@@ -17,7 +17,7 @@
 例如：
 
 ```text
-/home/l30002999/project/.omo/gbrain-capture/offline/20260726-mcp-offline-demo-a1b2c3d4.json
+<cwd>/.omo/gbrain-capture/offline/20260726-mcp-offline-demo-a1b2c3d4.json
 ```
 
 ### 1.2 队列内容

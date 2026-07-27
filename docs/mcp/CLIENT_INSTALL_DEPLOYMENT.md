@@ -341,5 +341,5 @@ bunx gbrain install-client \
 - MCP Contract 详细规范：[MCP_CONTRACT.md](MCP_CONTRACT.md)
 - Web UI 审核流程：[WEB_UI_REVIEW.md](WEB_UI_REVIEW.md)
 - 失败恢复与离线重试：[FAILURE_RECOVERY.md](FAILURE_RECOVERY.md)
-- GBrain 页面 schema：`../../source/SCHEMA.md`
-- 服务端运维：`../../runbook/OPERATIONS.md`
+- GBrain 页面 schema：`../knowledge-source/SCHEMA.md`
+- 服务端运维：`../OPERATIONS.md`

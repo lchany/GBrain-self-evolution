@@ -2,7 +2,7 @@
 
 这是 `GBrain-self-evolution` 的本地归档仓库。它不是源仓库镜像，而是一个可复现的交付包：GBrain 源码改动以 patch 形式交付，客户端文档、技能和 AGENTS 规则以普通文件交付。归档用于让审阅者在不依赖当前工作树的情况下，重新部署同一套 GBrain 自进化知识沉淀体系。
 
-当前只在本地创建。不要推送到 GitHub，等待编排器 gate 后再推送到 `git@github.com-lchany:lchany/GBrain-self-evolution.git`。
+归档已发布到 GitHub：`https://github.com/lchany/GBrain-self-evolution`。最终交付形式为 patch-based distribution：GBrain 源码改动以 patch 形式交付，客户端规则、技能和文档以普通文件交付。生产环境已在 `/opt/gbrain` 完成部署，`gbrain-serve-http.service` 已重启并处于 active 状态。F1-F5 最终结论均为 APPROVE（F2 初审 REJECT，修正后 re-review APPROVE）。
 
 ## 两个 change wave
 
@@ -18,17 +18,17 @@
 
 ### GBrain
 
-- 路径：`/home/l30002999/source_code/gbrain`
+- 路径：`/home/l30002999/source_code/gbrain`（归档生成时的本地路径，仅溯源；部署时改用下方 remote clone）
 - HEAD：`1fabbb9849f23703ee2898699868ce8101e7b61d`
-- remote：`origin git@github.com:garrytan/gbrain.git`
+- remote：`origin https://github.com/garrytan/gbrain.git`
 - 归档补丁：`patches/gbrain-self-evolution.patch`
 - 范围：完整工作树 delta，排除 `.omo/`。
 
 ### oh-my-openagent
 
-- 路径：`/home/l30002999/source_code/oh-my-openagent`
+- 路径：`/home/l30002999/source_code/oh-my-openagent`（归档生成时的本地路径，仅溯源；部署时改用下方 remote clone）
 - HEAD：`e3556c35d2c3879aeec1d7043ecc52e37bf1d3d3`
-- remote：`origin https://github.com/code-yeongyu/oh-my-openagent.git`，`fork git@github.com:lchany/oh-my-openagent.git`
+- remote：`origin https://github.com/code-yeongyu/oh-my-openagent.git`，`fork https://github.com/code-yeongyu/oh-my-openagent.git`
 - 归档补丁：`patches/oh-my-openagent-gbrain.patch`
 - 范围：只包含本计划显式路径；不包含 generated aggregate copies，也不包含其它 dirty state。
 
@@ -105,11 +105,22 @@ gbrain install-client
 systemctl restart gbrain-serve-http.service
 ```
 
-这是服务重启，通常是数秒级，不是机器重启。本次归档没有要求数据库 schema migration；部署重点是让远端 HTTP MCP 服务加载已验证的代码更改。部署后需要重新跑 F5 live gate，确认默认读取不暴露 `inbox/`。
+这是服务重启，通常是数秒级，不是机器重启。本次归档没有要求数据库 schema migration；部署重点是让远端 HTTP MCP 服务加载已验证的代码更改。
 
-## F5 状态边界
+生产环境已于 2026-07-27 完成部署，`gbrain-serve-http.service` 已重启并确认 active。最终 F5 live gate 已通过：默认读取不暴露 `inbox/`，显式 `include_prefixes` 可读取 inbox 草稿，read-token 尝试写入被 `insufficient_scope` 拒绝，权限边界与文档一致。
 
-本地代码和 transport 探针已支持修正，但 final-wave F5 的 live endpoint 仍显示部署滞后：远端服务还没有加载本地工作树中已验证的默认 `inbox/` 排除等修正。因此当前结论是：代码 verified，live gate 需要在生产部署后再通过。
+## F5 最终结论
+
+F5 E2E/live transcript 最终结论：APPROVE。
+
+历史状态：生产部署前，live endpoint 曾出现部署滞后，远端服务尚未加载本地工作树中已验证的默认 `inbox/` 排除等修正。该状态已在 2026-07-27 生产部署并重启服务后被覆盖。
+
+## 部署文档指针
+
+- `docs/deployment/README.md`：部署总览入口
+- `docs/deployment/new-machine-bootstrap.md`：服务器端新机器启动流程
+- `docs/deployment/client-onboarding.md`：客户端接入流程
+- `docs/deployment/agent-rules.md`：代理行为与规则约定
 
 ## 隐私说明
 

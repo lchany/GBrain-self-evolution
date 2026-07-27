@@ -1,6 +1,6 @@
 # GBrain 自进化归档证据摘要
 
-本文件汇总 `/home/l30002999/source_code/oh-my-openagent/.omo/evidence/20260726-gbrain-no-hook-capture/` 中 Todo 12 INDEX 和 final-wave F1-F5 的审阅结论。这里不收录原始 transcript、密集日志、token、真实 IP 或环境 dump。
+本文件汇总 `/home/l30002999/source_code/oh-my-openagent/.omo/evidence/20260726-gbrain-no-hook-capture/` 中 Todo 12 INDEX 和 final-wave F1-F5 的审阅结论；该路径仅为内部归档生成证据位置，不是部署输入。这里不收录原始 transcript、密集日志、token、真实 IP 或环境 dump。
 
 ## 功能地图
 
@@ -18,13 +18,21 @@
 - F2 MCP/security/privacy：初审 REJECT，修正后 re-review APPROVE。
 - F3 CLI/Web parity：APPROVE，`36 pass / 0 fail`，typecheck 退出码 0。
 - F4 client QA：APPROVE，Codex full gate `511 pass / 0 fail`；OpenCode/Codex 隔离保持不变。
-- F5 E2E/live transcript：REJECT，原因是 live endpoint 仍表现出部署滞后，默认 list/read 边界没有在远端服务生效。
+- F5 E2E/live transcript：最终结论 APPROVE。生产部署完成后，默认 `list_pages {limit:50}` 返回 47 页、0 条 `inbox/` slug；显式 `include_prefixes ["inbox/"]` 返回 4 条草稿；默认 search 返回 0 条 inbox；formal `get_page` 成功；read-token 执行 `put_page` 被 `insufficient_scope` 拒绝。
 
-## F5 部署边界
+## F5 部署边界与最终 verdict
 
-F5 的结论不是“本地代码未修好”，而是“本地源代码和探针已经支持修正，但远端 HTTP MCP/token 服务是另一个部署面”。本机没有该远端服务监听端口，因此不能用重启本机进程解释或修复 live failure。
+F5 的最终结论为 APPROVE。
 
-上线后必须在生产 `/opt/gbrain` 重启 `gbrain-serve-http.service`，再复跑 F5 live gate。预期通过条件是：默认读取不暴露 `inbox/`，显式 review/capture 路径仍可用，MCP annotation 与权限边界一致。
+2026-07-27 生产 `/opt/gbrain` 完成部署并重启 `gbrain-serve-http.service` 后，live endpoint 已加载本地工作树中已验证的默认 `inbox/` 排除、显式 prefix 读取和权限边界修正。实测结果：
+
+- 默认 `list_pages {limit:50}`：返回 47 页，0 条 `inbox/` slug。
+- 显式 `include_prefixes ["inbox/"]`：返回 4 条草稿。
+- 默认 search：返回 0 条 inbox。
+- formal `get_page`：正常返回。
+- read-token 执行 `put_page`：返回 `insufficient_scope`，写入权限边界生效。
+
+历史状态（已覆盖）：生产部署前，live endpoint 曾出现部署滞后，远端服务尚未加载本地工作树中已验证的默认 `inbox/` 排除等修正。该状态随 2026-07-27 生产部署和服务重启被终结。
 
 ## 已知风险
 

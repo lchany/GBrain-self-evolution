@@ -1,0 +1,17 @@
+# GBrain doctor timer 模板。
+# 安装步骤：复制为 /etc/systemd/system/gbrain-doctor.timer 后执行 daemon-reload，再 enable --now。
+# 调度保持保守；修复动作不要放入 timer。
+
+[Unit]
+Description=Run GBrain doctor on a conservative schedule
+After=network-online.target
+Wants=network-online.target
+
+[Timer]
+OnCalendar=*-*-* 03:17:00
+RandomizedDelaySec=20m
+Persistent=true
+Unit=gbrain-doctor.service
+
+[Install]
+WantedBy=timers.target

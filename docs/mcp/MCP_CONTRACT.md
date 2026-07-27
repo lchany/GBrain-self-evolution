@@ -277,5 +277,5 @@ migrated_from: null     # 必须：null（非 legacy 时）
 - [QUICKSTART.md](QUICKSTART.md)
 - [WEB_UI_REVIEW.md](WEB_UI_REVIEW.md)
 - [FAILURE_RECOVERY.md](FAILURE_RECOVERY.md)
-- `../../source/SCHEMA.md`
+- `../knowledge-source/SCHEMA.md`
 - `../../skills/gbrain-knowledge-writer/SKILL.md`

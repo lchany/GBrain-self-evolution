@@ -1,0 +1,17 @@
+# GBrain 增量同步 timer 模板。
+# 安装步骤：复制为 /etc/systemd/system/gbrain-sync.timer 后执行 daemon-reload，再 enable --now。
+# 调度保持保守；如需更高频率，先评估摄取成本和 Git checkpoint 行为。
+
+[Unit]
+Description=Run GBrain incremental sync on a conservative schedule
+After=network-online.target
+Wants=network-online.target
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=10m
+Persistent=true
+Unit=gbrain-sync.service
+
+[Install]
+WantedBy=timers.target

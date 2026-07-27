@@ -209,4 +209,4 @@ database, production `GBRAIN_HOME`, or production services.
   `gbrain-doctor.timer`, or the production database during a rehearsal.
 - Agent-instruction activation and rollback are separate from service restore.
   For that controlled cutover, use
-  `/mnt/disk2t/l30002999/gbrain-knowledge/cutover/ACTIVATE.md`.
+  `<gbrain-knowledge-repo>/cutover/ACTIVATE.md`（位于服务端知识仓库，不在本归档内）.

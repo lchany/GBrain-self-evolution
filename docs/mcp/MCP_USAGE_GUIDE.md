@@ -305,7 +305,7 @@ curl -sS -H "Authorization: Bearer <TOKEN-local-read>" \
    - `legacy-migration/` → `type: legacy`，`status: migrated-legacy`
 3. **遵守 9 字段 frontmatter 契约**。必须字段：
    `type`、`date`、`status`、`sensitivity`、`verification`、`applicability`、`non_applicable`、`source_refs`、`migrated_from`。
-   不要添加投机字段。详见 `../../source/SCHEMA.md`。
+    不要添加投机字段。详见 `../knowledge-source/SCHEMA.md`。
 4. **填写 source_refs**。每条事实性结论都要能追溯到证据路径、文档 URL、commit 或 session id。
 5. **更新而不是重复**。如果已有相关页面，用同一个 slug 更新；必要时在正文里注明合并来源。
 6. **写后检查**。查看 `put_page` 返回的 `auto_links` 和状态，确认没有写错 slug 或产生重复。
@@ -472,7 +472,7 @@ GBrain 在 `http://<server>:3132/admin/review` 提供只读审核页面。浏览
 - 非回环 IP 地址。请用 `<SERVER_IP>`、`<server>`、`<EXAMPLE_HOST>` 等占位符。
 - 密集原始日志或完整命令输出。只把结论写进正文，把日志路径放进 `source_refs`。
 
-详细规则见 `../../source/README.md` 和 `../../skills/gbrain-knowledge-writer/SKILL.md`。
+ 详细规则见 `../knowledge-source/README.md` 和 `../../skills/gbrain-knowledge-writer/SKILL.md`。
 
 ---
 
@@ -612,12 +612,12 @@ echo "smoke test done"
 ## 16. 相关文档
 
 - 快速上手：[QUICKSTART.md](QUICKSTART.md)
-- 源仓库规范：`../../source/README.md`
+- 源仓库规范：`../knowledge-source/README.md`
 - OpenCode 客户端安装部署：[CLIENT_INSTALL_DEPLOYMENT.md](CLIENT_INSTALL_DEPLOYMENT.md)
 - MCP Contract 详细规范：[MCP_CONTRACT.md](MCP_CONTRACT.md)
 - Web UI 审核流程：[WEB_UI_REVIEW.md](WEB_UI_REVIEW.md)
 - 失败恢复与离线重试：[FAILURE_RECOVERY.md](FAILURE_RECOVERY.md)
-- frontmatter 9 字段契约：`../../source/SCHEMA.md`
+- frontmatter 9 字段契约：`../knowledge-source/SCHEMA.md`
 - 完整 writer 工作流：`../../skills/gbrain-knowledge-writer/SKILL.md`
-- 运维与重建手册：`../../runbook/OPERATIONS.md`
-- agent 切换启用说明：`../../cutover/ACTIVATE.md`
+- 运维与重建手册：`../OPERATIONS.md`
+- agent 切换启用说明：见 `../OPERATIONS.md` 中的 agent-instruction activation / rollback 小节（归档内无单独 cutover/ACTIVATE.md）
