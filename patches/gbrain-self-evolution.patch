@@ -11,41 +11,27 @@ diff --git a/package.json b/package.json
 index 4d38e12..2f98a30 100644
 --- a/package.json
 +++ b/package.json
-@@ -4,7 +4,8 @@
-   "type": "module",
-   "main": "src/core/index.ts",
+@@ -6,3 +6,4 @@
    "bin": {
 -    "gbrain": "src/cli.ts"
 +    "gbrain": "src/cli.ts",
 +    "gbrain-review": "src/gbrain-review.ts"
    },
-   "exports": {
-     ".": "./src/core/index.ts",
 diff --git a/src/cli.ts b/src/cli.ts
 index 804d7db..7e51f54 100755
 --- a/src/cli.ts
 +++ b/src/cli.ts
-@@ -54,7 +54,7 @@ export function bigintToStringReplacer(_key: string, value: unknown): unknown {
- }
- 
+@@ -56,3 +56,3 @@ export function bigintToStringReplacer(_key: string, value: unknown): unknown {
  // CLI-only commands that bypass the operation layer
 -export const CLI_ONLY = new Set(['init', 'reinit-pglite', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'extract-conversation-facts', 'enrich', 'features', 'autopilot', 'graph-query', 'jobs', 'agent', 'apply-migrations', 'skillpack-check', 'skillpack', 'resolvers', 'integrity', 'repair-jsonb', 'orphans', 'sources', 'mounts', 'dream', 'check-resolvable', 'routing-eval', 'skillify', 'smoke-test', 'providers', 'storage', 'repos', 'code-def', 'code-refs', 'reindex', 'reindex-code', 'reindex-frontmatter', 'code-callers', 'code-callees', 'reconcile-links', 'frontmatter', 'auth', 'friction', 'claw-test', 'book-mirror', 'takes', 'think', 'salience', 'anomalies', 'calibration', 'transcripts', 'models', 'remote', 'recall', 'forget', 'edges-backfill', 'cache', 'ze-switch', 'founder', 'brainstorm', 'lsd', 'schema', 'capture', 'onboard', 'conversation-parser', 'status', 'connect', 'skillopt', 'quarantine', 'self-upgrade', 'advisor', 'watch', 'reindex-search-vector']);
 +export const CLI_ONLY = new Set(['init', 'reinit-pglite', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'extract-conversation-facts', 'enrich', 'features', 'autopilot', 'graph-query', 'jobs', 'agent', 'apply-migrations', 'skillpack-check', 'skillpack', 'resolvers', 'integrity', 'repair-jsonb', 'orphans', 'sources', 'mounts', 'dream', 'check-resolvable', 'routing-eval', 'skillify', 'smoke-test', 'providers', 'storage', 'repos', 'code-def', 'code-refs', 'reindex', 'reindex-code', 'reindex-frontmatter', 'code-callers', 'code-callees', 'reconcile-links', 'frontmatter', 'auth', 'friction', 'claw-test', 'book-mirror', 'takes', 'think', 'salience', 'anomalies', 'calibration', 'transcripts', 'models', 'remote', 'recall', 'forget', 'edges-backfill', 'cache', 'ze-switch', 'founder', 'brainstorm', 'lsd', 'schema', 'capture', 'review', 'install-client', 'onboard', 'conversation-parser', 'status', 'connect', 'skillopt', 'quarantine', 'self-upgrade', 'advisor', 'watch', 'reindex-search-vector']);
  // CLI-only commands whose handlers print their own --help text. These are
- // excluded from the generic short-circuit so detailed per-command and
- // per-subcommand usage stays reachable.
-@@ -76,6 +76,8 @@ const CLI_ONLY_SELF_HELP = new Set([
-   // runCapture saw --help. brainstorm + lsd were already in the set;
-   // capture was the holdout.
+@@ -78,2 +78,4 @@ const CLI_ONLY_SELF_HELP = new Set([
    'capture',
 +  'review',
 +  'install-client',
    // v0.42 self-upgrade ships its own usage (flags + the agent-skill story).
-   'self-upgrade',
-   // v0.43 (#2095): watch ships WATCH_HELP (flags + the stdin-turn protocol).
-@@ -1513,6 +1515,26 @@ async function handleCliOnly(command: string, args: string[]) {
-     return;
-   }
+@@ -1515,2 +1517,22 @@ async function handleCliOnly(command: string, args: string[]) {
  
 +  if (command === 'capture') {
 +    const { isGbrainCaptureArgs, runGbrainCapture } = await import('./commands/gbrain-capture.ts');
@@ -68,30 +54,21 @@ index 804d7db..7e51f54 100755
 +  }
 +
    // v0.41.39 (#1700): same pattern for `enrich --help`. enrich is in
-   // CLI_ONLY_SELF_HELP so the generic stub stays out of the way; this
-   // pre-engine-bind branch exposes the HELP constant without a configured
-@@ -2272,6 +2294,7 @@ SETUP
-   upgrade                            Self-update
-   check-update [--json]              Check for new versions
+@@ -2274,2 +2296,3 @@ SETUP
    doctor [--json] [--fast]            Health check (resolver, skills, pgvector, RLS, embeddings)
 +  install-client [--json]             Install GBrain client rules, skills, env files, and probes
    integrations [subcommand]          Manage integration recipes (senses + reflexes)
- 
- PAGES
 diff --git a/src/commands/capture.ts b/src/commands/capture.ts
 index 0b195e4..2591b5c 100644
 --- a/src/commands/capture.ts
 +++ b/src/commands/capture.ts
-@@ -110,10 +110,21 @@ Modes (mutually exclusive — first match wins):
-   gbrain capture "thought"          inline content
-   gbrain capture --file PATH        read content from a file
+@@ -112,2 +112,5 @@ Modes (mutually exclusive — first match wins):
    gbrain capture --stdin            read content from stdin (piped)
 +  gbrain capture --title TITLE --summary BODY --evidence REF
 +                                  structured inbox-only draft via writer MCP
 +  gbrain capture retry              replay .omo/gbrain-capture/offline/*.json
  
- Options:
-   --slug SLUG          Override the default inbox/YYYY-MM-DD-<hash6> slug
+@@ -116,2 +119,10 @@ Options:
    --type TYPE          Override the page type (default: note)
 +                       With --title, stores only a suggested inbox draft type.
 +  --title TITLE        Structured capture title (forces inbox-only draft mode)
@@ -102,8 +79,6 @@ index 0b195e4..2591b5c 100644
 +  --sensitivity LEVEL  public | internal | private (default: internal)
 +  --project-id ID      Optional project identifier suggestion
    --source ID          Multi-source brains: write under a non-default source.
-                        Resolution: --source flag > GBRAIN_SOURCE env >
-                        .gbrain-source dotfile (walk-up) > local_path >
 diff --git a/src/commands/gbrain-capture-candidate.ts b/src/commands/gbrain-capture-candidate.ts
 new file mode 100644
 index 0000000..ed8e9e0
@@ -2106,9 +2081,7 @@ diff --git a/src/commands/serve-http.ts b/src/commands/serve-http.ts
 index 2cbae64..13a87ab 100644
 --- a/src/commands/serve-http.ts
 +++ b/src/commands/serve-http.ts
-@@ -26,11 +26,20 @@ import { OAuthTokenRevocationRequestSchema } from '@modelcontextprotocol/sdk/sha
- import type { BrainEngine } from '../core/engine.ts';
- import { operations, OperationError } from '../core/operations.ts';
+@@ -28,3 +28,7 @@ import { operations, OperationError } from '../core/operations.ts';
  import type { OperationContext, AuthInfo } from '../core/operations.ts';
 -import { GBrainOAuthProvider, validateTokenEndpointAuthMethod } from '../core/oauth-provider.ts';
 +import {
@@ -2117,7 +2090,7 @@ index 2cbae64..13a87ab 100644
 +  validateTokenEndpointAuthMethod,
 +} from '../core/oauth-provider.ts';
  import type { SqlQuery } from '../core/oauth-provider.ts';
- import { hasScope, ALLOWED_SCOPES_LIST, normalizeScopesInput } from '../core/scope.ts';
+@@ -32,3 +36,8 @@ import { hasScope, ALLOWED_SCOPES_LIST, normalizeScopesInput } from '../core/sco
  import { summarizeMcpParams, dispatchToolCall } from '../mcp/dispatch.ts';
 -import { paramDefToSchema } from '../mcp/tool-defs.ts';
 +import { buildToolDefs } from '../mcp/tool-defs.ts';
@@ -2127,11 +2100,7 @@ index 2cbae64..13a87ab 100644
 +  registerDiscoveryHandlers,
 +} from '../mcp/discovery.ts';
  import { getBrainHotMemoryMeta } from '../core/facts/meta-hook.ts';
- import { loadConfig } from '../core/config.ts';
- import { buildError, serializeError } from '../core/errors.ts';
-@@ -622,11 +631,18 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
-     methods: ['GET', 'POST', 'OPTIONS'],
-     allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+@@ -624,7 +633,14 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
    };
 -  app.use('/mcp', cors(corsOAuthOptions));
 -  app.use('/token', cors(corsOAuthOptions));
@@ -2151,11 +2120,7 @@ index 2cbae64..13a87ab 100644
 +    cors(corsOAuthOptions),
 +  );
  
-   // ---------------------------------------------------------------------------
-   // Custom client_credentials handler (before mcpAuthRouter)
-@@ -665,7 +681,20 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
-         return;
-       }
+@@ -667,3 +683,16 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
  
 -      const tokens = await oauthProvider.exchangeClientCredentials(client_id, client_secret, scope);
 +      const rawResource: unknown = req.body?.resource;
@@ -2173,11 +2138,7 @@ index 2cbae64..13a87ab 100644
 +
 +      const tokens = await oauthProvider.exchangeClientCredentials(client_id, client_secret, scope, resource);
        res.json(tokens);
-     } catch (e) {
-       const msg = e instanceof Error ? e.message : 'Unknown error';
-@@ -714,6 +743,18 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
-     }
- 
+@@ -716,2 +745,14 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
      try {
 +      const rawResource: unknown = req.body?.resource;
 +      if (rawResource !== undefined && typeof rawResource !== 'string') {
@@ -2192,29 +2153,17 @@ index 2cbae64..13a87ab 100644
 +        return;
 +      }
        const client = await oauthProvider.verifyConfidentialClientSecret(clientId, presentedSecret);
-       let tokens;
-       if (grantType === 'authorization_code') {
-@@ -724,7 +765,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
-           res.status(400).json({ error: 'invalid_request', error_description: 'code required' });
-           return;
+@@ -726,3 +767,3 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
          }
 -        tokens = await oauthProvider.exchangeAuthorizationCode(client, code, codeVerifier, redirectUri);
 +        tokens = await oauthProvider.exchangeAuthorizationCode(client, code, codeVerifier, redirectUri, resource);
        } else {
-         const refreshToken = req.body.refresh_token;
-         const scopeParam = typeof req.body.scope === 'string' ? req.body.scope.split(/\s+/) : undefined;
-@@ -732,7 +773,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
-           res.status(400).json({ error: 'invalid_request', error_description: 'refresh_token required' });
-           return;
+@@ -734,3 +775,3 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
          }
 -        tokens = await oauthProvider.exchangeRefreshToken(client, refreshToken, scopeParam);
 +        tokens = await oauthProvider.exchangeRefreshToken(client, refreshToken, scopeParam, resource);
        }
-       res.json(tokens);
-     } catch (e) {
-@@ -843,6 +884,22 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
-   // reverse proxies / tunnels; default to localhost for dev.
-   const issuerUrl = new URL(publicUrl || `http://localhost:${port}`);
+@@ -845,2 +886,18 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
  
 +  // MCP authorization spec (2025-06-18 draft §5.1) and RFC 9728 require the
 +  // protected resource server to return its discovery metadata URL in the
@@ -2233,19 +2182,11 @@ index 2cbae64..13a87ab 100644
 +  const expectedMcpResource = canonicalResourceIdentifier(issuerUrl);
 +
    // F9: cookie `secure` flag honors both the request's TLS state (req.secure
-   // is set when express trust-proxy lands an X-Forwarded-Proto: https) AND
-   // the operator's declared issuer protocol (so a Cloudflare-tunnel deploy
-@@ -865,6 +922,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
-     // users_admin via /.well-known/oauth-authorization-server. The legacy
-     // ['read','write','admin'] list left those new scopes invisible.
+@@ -867,2 +924,3 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
      scopesSupported: [...ALLOWED_SCOPES_LIST],
 +    resourceServerUrl: issuerUrl,
      resourceName: 'GBrain MCP Server',
-   };
- 
-@@ -1524,6 +1582,16 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
-     req.on('close', () => sseClients.delete(res));
-   });
+@@ -1526,2 +1584,12 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
  
 +  // ---------------------------------------------------------------------------
 +  // Review Web UI routes (Todo 7) — mounted BEFORE the SPA fallback so
@@ -2258,29 +2199,17 @@ index 2cbae64..13a87ab 100644
 +  mountReviewRoutes(app, engine, requireAdmin);
 +
    // ---------------------------------------------------------------------------
-   // Admin SPA static files (v0.36.x #1090)
-   // ---------------------------------------------------------------------------
-@@ -1546,7 +1614,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
-   if (useDevPath) {
-     app.use('/admin', express.static(adminDistPath));
+@@ -1548,3 +1616,3 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
      app.get('/admin/{*path}', (req: Request, res: Response, next: NextFunction) => {
 -      if (req.path.startsWith('/admin/api/') || req.path === '/admin/events' || req.path === '/admin/login') {
 +      if (req.path.startsWith('/admin/api/') || req.path.startsWith('/admin/review') || req.path === '/admin/events' || req.path === '/admin/login') {
          return next();
-       }
-       res.sendFile(path.join(adminDistPath, 'index.html'));
-@@ -1565,7 +1633,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
-       return buf;
-     }
+@@ -1567,3 +1635,3 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
      app.get('/admin/{*path}', (req: Request, res: Response, next: NextFunction) => {
 -      if (req.path.startsWith('/admin/api/') || req.path === '/admin/events' || req.path === '/admin/login') {
 +      if (req.path.startsWith('/admin/api/') || req.path.startsWith('/admin/review') || req.path === '/admin/events' || req.path === '/admin/login') {
          return next();
-       }
-       const hit = ADMIN_ASSETS[req.path];
-@@ -1596,12 +1664,40 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
-   // (not 404) so probing clients (claude.ai, etc.) recognize this as an MCP
-   // endpoint, not a missing route. Without this, clients display "endpoint not
+@@ -1598,8 +1666,36 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
    // found" instead of "endpoint exists but no SSE channel."
 -  app.get('/mcp', (_req: Request, res: Response) => {
 -    res.set('Allow', 'POST, DELETE');
@@ -2321,11 +2250,7 @@ index 2cbae64..13a87ab 100644
 +    },
 +    async (req: Request, res: Response) => {
      const startTime = Date.now();
-     const authInfo = (req as any).auth as AuthInfo;
- 
-@@ -1614,9 +1710,14 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
-     // Create a fresh MCP server per request (stateless)
-     const server = new Server(
+@@ -1616,5 +1712,10 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
        { name: 'gbrain', version: VERSION },
 -      { capabilities: { tools: {} } },
 +      {
@@ -2337,11 +2262,7 @@ index 2cbae64..13a87ab 100644
 +    registerDiscoveryHandlers(server);
 +
      server.setRequestHandler(ListToolsRequestSchema, async () => {
-       // v0.28.10: log every JSON-RPC method, not just successful tools/call.
-       // Pre-fix, /admin/api/requests showed nothing for clients that only
-@@ -1640,19 +1741,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
-         status: 'success',
-         timestamp: new Date().toISOString(),
+@@ -1642,15 +1743,3 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
        });
 -      return {
 -        tools: mcpOperations.map(op => ({
@@ -2358,43 +2279,29 @@ index 2cbae64..13a87ab 100644
 -      };
 +      return { tools: buildToolDefs(mcpOperations) };
      });
- 
-     server.setRequestHandler(CallToolRequestSchema, async (request) => {
-@@ -1885,7 +1974,8 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
-         });
-       }
+@@ -1887,3 +1976,4 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
      }
 -  });
 +    },
 +  );
  
-   // ---------------------------------------------------------------------------
-   // v0.38 ingestion substrate — POST /ingest (webhook source)
-@@ -1944,7 +2034,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
-   app.post(
-     '/ingest',
+@@ -1946,3 +2036,3 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
      ingestRateLimiter,
 -    requireBearerAuth({ verifier: oauthProvider, requiredScopes: ['write'] }),
 +    requireBearerAuth({ verifier: oauthProvider, requiredScopes: ['write'], resourceMetadataUrl }),
      express.raw({ type: '*/*', limit: ingestMaxBytes }),
-     async (req: Request, res: Response) => {
-       const startTime = Date.now();
 diff --git a/src/core/index.ts b/src/core/index.ts
 index f5f946c..d92f091 100644
 --- a/src/core/index.ts
 +++ b/src/core/index.ts
-@@ -2,3 +2,4 @@ export type { BrainEngine } from './engine.ts';
- export { PostgresEngine } from './postgres-engine.ts';
- export * from './types.ts';
+@@ -4 +4,2 @@ export * from './types.ts';
  export { parseMarkdown, serializeMarkdown, splitBody } from './markdown.ts';
 +export * from './review/index.ts';
 diff --git a/src/core/oauth-provider.ts b/src/core/oauth-provider.ts
 index 46c2b16..332ea94 100644
 --- a/src/core/oauth-provider.ts
 +++ b/src/core/oauth-provider.ts
-@@ -22,7 +22,11 @@ import type {
- import type { OAuthServerProvider, AuthorizationParams } from '@modelcontextprotocol/sdk/server/auth/provider.js';
- import type { OAuthRegisteredClientsStore } from '@modelcontextprotocol/sdk/server/auth/clients.js';
+@@ -24,3 +24,7 @@ import type { OAuthRegisteredClientsStore } from '@modelcontextprotocol/sdk/serv
  import type { AuthInfo as SdkAuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 -import { InvalidTokenError, InvalidClientMetadataError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 +import {
@@ -2403,11 +2310,7 @@ index 46c2b16..332ea94 100644
 +  InvalidTokenError,
 +} from '@modelcontextprotocol/sdk/server/auth/errors.js';
  import { hashToken, generateToken, isUndefinedColumnError } from './utils.ts';
- import { hasScope, assertAllowedScopes, parseScopeString, InvalidScopeError } from './scope.ts';
- import type { AuthInfo as CoreAuthInfo } from './operations.ts';
-@@ -176,6 +180,11 @@ export function coerceTimestamp(value: unknown): number | undefined {
-   return n;
- }
+@@ -178,2 +182,7 @@ export function coerceTimestamp(value: unknown): number | undefined {
  
 +export function canonicalResourceIdentifier(resource: URL): string {
 +  if (resource.hash) throw new InvalidGrantError('OAuth resource must not contain a fragment');
@@ -2415,56 +2318,34 @@ index 46c2b16..332ea94 100644
 +}
 +
  interface GBrainOAuthProviderOptions {
-   sql: SqlQuery;
-   /** Default token TTL in seconds (default: 3600 = 1 hour) */
-@@ -448,7 +457,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
-               ${pgArray(grantedScopes)},
-               ${params.codeChallenge}, ${'S256'},
+@@ -450,3 +459,3 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
                ${params.redirectUri}, ${params.state || null},
 -              ${params.resource?.toString() || null}, ${expiresAt})
 +              ${params.resource ? canonicalResourceIdentifier(params.resource) : null}, ${expiresAt})
      `;
- 
-     // Redirect back with the code
-@@ -485,6 +494,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
-   ): Promise<OAuthTokens> {
-     const codeHash = hashToken(authorizationCode);
+@@ -487,2 +496,3 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
      const now = Math.floor(Date.now() / 1000);
 +    const resourceId = resource ? canonicalResourceIdentifier(resource) : null;
  
-     // F1 + F7c hardening: bind client_id AND redirect_uri atomically into the
-     // DELETE WHERE clause. RFC 6749 §10.5 requires auth codes be single-use;
-@@ -505,6 +515,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
-           WHERE code_hash = ${codeHash}
-             AND client_id = ${client.client_id}
+@@ -507,2 +517,3 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
              AND redirect_uri = ${redirectUri}
 +            AND resource IS NOT DISTINCT FROM ${resourceId}
              AND expires_at > ${now}
-           RETURNING client_id, scopes, resource
-         `
-@@ -512,16 +523,17 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
-           DELETE FROM oauth_codes
-           WHERE code_hash = ${codeHash}
+@@ -514,2 +525,3 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
              AND client_id = ${client.client_id}
 +            AND resource IS NOT DISTINCT FROM ${resourceId}
              AND expires_at > ${now}
-           RETURNING client_id, scopes, resource
+@@ -517,3 +529,3 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
          `;
 -    if (rows.length === 0) throw new Error('Authorization code not found or expired');
 +    if (rows.length === 0) throw new Error('Authorization code not found, expired, or resource mismatch');
  
-     const codeRow = rows[0];
- 
-     // Issue tokens
+@@ -523,3 +535,3 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
      const scopes = (codeRow.scopes as string[]) || [];
 -    return this.issueTokens(client.client_id, scopes, resource, true);
 +    return this.issueTokens(client.client_id, scopes, resourceId ? new URL(resourceId) : undefined, true);
    }
- 
-   // -------------------------------------------------------------------------
-@@ -536,23 +548,21 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
-   ): Promise<OAuthTokens> {
-     const tokenHash = hashToken(refreshToken);
+@@ -538,13 +550,11 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
      const now = Math.floor(Date.now() / 1000);
 +    const resourceId = resource ? canonicalResourceIdentifier(resource) : null;
  
@@ -2485,7 +2366,7 @@ index 46c2b16..332ea94 100644
 +      SELECT scopes, expires_at
 +      FROM oauth_tokens
        WHERE token_hash = ${tokenHash}
-         AND token_type = 'refresh'
+@@ -552,5 +562,5 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
          AND client_id = ${client.client_id}
 -      RETURNING client_id, scopes, expires_at
 +        AND resource IS NOT DISTINCT FROM ${resourceId}
@@ -2493,11 +2374,7 @@ index 46c2b16..332ea94 100644
 -    if (rows.length === 0) throw new Error('Refresh token not found');
 +    if (rows.length === 0) throw new Error('Refresh token not found or resource mismatch');
  
-     const row = rows[0];
-     // NULL expires_at is treated as expired (fail-closed). Schema permits NULL
-@@ -579,7 +589,18 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
-       throw new Error('Requested scope exceeds refresh token grant');
-     }
+@@ -581,3 +591,14 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
      const tokenScopes = scopes ?? grantedScopes;
 -    return this.issueTokens(client.client_id, tokenScopes, resource, true);
 +
@@ -2513,65 +2390,40 @@ index 46c2b16..332ea94 100644
 +
 +    return this.issueTokens(client.client_id, tokenScopes, resourceId ? new URL(resourceId) : undefined, true);
    }
- 
-   // -------------------------------------------------------------------------
-@@ -809,6 +830,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
-     clientId: string,
-     clientSecret: string,
+@@ -811,2 +832,3 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
      requestedScope?: string,
 +    resource?: URL,
    ): Promise<OAuthTokens> {
-     const client = await this._clientsStore.getClient(clientId);
-     if (!client) throw new Error('Client not found');
-@@ -860,7 +882,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
-     }
- 
+@@ -862,3 +884,3 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
      // Client credentials: access token only, NO refresh token (RFC 6749 4.4.3)
 -    return this.issueTokens(clientId, grantedScopes, undefined, false, clientTtl);
 +    return this.issueTokens(clientId, grantedScopes, resource, false, clientTtl);
    }
- 
-   // -------------------------------------------------------------------------
-@@ -1022,11 +1044,12 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
-     const now = Math.floor(Date.now() / 1000);
-     const effectiveTtl = ttlOverride || this.tokenTtl;
+@@ -1024,2 +1046,3 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
      const accessExpiry = now + effectiveTtl;
 +    const resourceId = resource ? canonicalResourceIdentifier(resource) : null;
  
-     await this.sql`
-       INSERT INTO oauth_tokens (token_hash, token_type, client_id, scopes, expires_at, resource)
+@@ -1028,3 +1051,3 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
        VALUES (${accessHash}, ${'access'}, ${clientId},
 -              ${pgArray(scopes)}, ${accessExpiry}, ${resource?.toString() || null})
 +              ${pgArray(scopes)}, ${accessExpiry}, ${resourceId})
      `;
- 
-     const result: OAuthTokens = {
-@@ -1044,7 +1067,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
-       await this.sql`
-         INSERT INTO oauth_tokens (token_hash, token_type, client_id, scopes, expires_at, resource)
+@@ -1046,3 +1069,3 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
          VALUES (${refreshHash}, ${'refresh'}, ${clientId},
 -                ${pgArray(scopes)}, ${refreshExpiry}, ${resource?.toString() || null})
 +                ${pgArray(scopes)}, ${refreshExpiry}, ${resourceId})
        `;
- 
-       result.refresh_token = refreshToken;
 diff --git a/src/core/operations.ts b/src/core/operations.ts
 index ab2d4cb..bebaebb 100644
 --- a/src/core/operations.ts
 +++ b/src/core/operations.ts
-@@ -24,7 +24,8 @@ import { getContentFlag } from './quarantine.ts';
- import { bumpLastRetrievedAt } from './last-retrieved.ts';
- import { isSearchMode } from './search/mode.ts';
+@@ -26,3 +26,4 @@ import { isSearchMode } from './search/mode.ts';
  import { stampEvidence } from './search/evidence.ts';
 -import type { SearchResult } from './types.ts';
 +import { validatePutPageWrite } from './put-page-validation.ts';
 +import type { Page, SearchResult } from './types.ts';
  import { CJK_SLUG_CHARS } from './cjk.ts';
- import * as db from './db.ts';
- import { VERSION } from '../version.ts';
-@@ -253,6 +254,15 @@ export interface ParamDef {
-   default?: unknown;
-   enum?: string[];
+@@ -255,2 +256,11 @@ export interface ParamDef {
    items?: ParamDef;
 +  minimum?: number;
 +  maximum?: number;
@@ -2583,11 +2435,7 @@ index ab2d4cb..bebaebb 100644
 +  patternDescription?: string;
 +  integer?: boolean;
  }
- 
- export interface Logger {
-@@ -787,6 +797,11 @@ const put_page: Operation = {
-   scope: 'write',
-   handler: async (ctx, p) => {
+@@ -789,2 +799,7 @@ const put_page: Operation = {
      const slug = p.slug as string;
 +    const content = p.content as string;
 +    const validation = validatePutPageWrite(slug, content, { strictSchema: ctx.remote !== false });
@@ -2595,20 +2443,12 @@ index ab2d4cb..bebaebb 100644
 +      throw new OperationError('invalid_params', validation.message, validation.suggestion, 'gbrain://schema/page');
 +    }
  
-     // v0.39.3.0 CV6 trust gate for provenance write-through (WARN-8).
-     // Only trusted LOCAL callers (ctx.remote === false — capture CLI,
-@@ -850,7 +865,7 @@ const put_page: Operation = {
-       // Pack load failed; fall through to legacy inferType behavior.
-       activePack = undefined;
+@@ -852,3 +867,3 @@ const put_page: Operation = {
      }
 -    const result = await importFromContent(ctx.engine, slug, p.content as string, {
 +    const result = await importFromContent(ctx.engine, slug, content, {
        noEmbed,
-       // v0.42 (#1699): untrusted callers can't smuggle gate-owned frontmatter
-       // markers (quarantine/content_flag/embed_skip). Fail-closed — anything
-@@ -1153,7 +1168,11 @@ async function runAutoLink(
- 
-   // Live-mode resolver: per-put throwaway cache, pg_trgm + optional search.
+@@ -1155,3 +1170,7 @@ async function runAutoLink(
    // Issue #972 (codex [P1]): pass sourceId so basename resolution stays
 -  // within this page's source — no cross-source basename edges.
 +  // within this page's source — no cross-source basename edges. Also scopes
@@ -2617,11 +2457,7 @@ index ab2d4cb..bebaebb 100644
 +  // at the FK filter and the link looks like it failed to resolve. Twin of
 +  // #1436's `tryFuzzyMatch` fix.
    const resolver = makeResolver(engine, { mode: 'live', sourceId: opts?.sourceId });
-   // Issue #972: opt-in bare-wikilink basename resolution. Off by default.
-   const globalBasename = await isGlobalBasenameEnabled(engine);
-@@ -1378,13 +1397,203 @@ const purge_deleted_pages: Operation = {
- const LIST_PAGES_SORT_VALUES = ['updated_desc', 'updated_asc', 'created_desc', 'slug'] as const;
- type ListPagesSort = typeof LIST_PAGES_SORT_VALUES[number];
+@@ -1380,2 +1399,187 @@ type ListPagesSort = typeof LIST_PAGES_SORT_VALUES[number];
  
 +const READ_PAGE_STATUS_VALUES = ['draft', 'reviewed', 'verified', 'migrated-legacy'] as const;
 +const READ_PAGE_VERIFICATION_VALUES = ['unverified', 'verified'] as const;
@@ -2809,10 +2645,7 @@ index ab2d4cb..bebaebb 100644
 +}
 +
  const list_pages: Operation = {
-   name: 'list_pages',
-   description: LIST_PAGES_DESCRIPTION,
-   params: {
-     type: { type: 'string', description: 'Filter by page type' },
+@@ -1386,3 +1590,8 @@ const list_pages: Operation = {
      tag: { type: 'string', description: 'Filter by tag' },
 -    limit: { type: 'number', description: 'Max results (default 50)' },
 +    limit: { ...READ_LIMIT_PARAM, description: 'Max results (default 50, min 1, max 100).' },
@@ -2822,26 +2655,20 @@ index ab2d4cb..bebaebb 100644
 +    status: READ_STATUS_PARAM,
 +    verification: READ_VERIFICATION_PARAM,
      // v0.29 — surface filter that already exists on PageFilters.
-     updated_after: {
-       type: 'string',
-@@ -1411,22 +1620,22 @@ const list_pages: Operation = {
-     // were ignored at this op handler and the engine returned every source's
-     // pages indiscriminately.
+@@ -1413,2 +1622,6 @@ const list_pages: Operation = {
      const scope = sourceScopeOpts(ctx);
 +    const limit = clampSearchLimit(p.limit as number | undefined, 50, 100);
 +    const offset = readOffset(p);
 +    const envelope = hasReadContractParams(p, true);
 +    const filters = readFilters(p, ctx);
      const pages = await ctx.engine.listPages({
-       type: p.type as any,
+@@ -1416,3 +1629,4 @@ const list_pages: Operation = {
        tag: p.tag as string,
 -      limit: clampSearchLimit(p.limit as number | undefined, 50, 100),
 +      limit: envelope ? READ_FILTER_SCAN_LIMIT : limit,
 +      offset: envelope ? 0 : offset,
        includeDeleted: (p.include_deleted as boolean) === true,
-       updated_after: typeof p.updated_after === 'string' ? p.updated_after : undefined,
-       sort,
-       ...scope,
+@@ -1422,9 +1636,4 @@ const list_pages: Operation = {
      });
 -    return pages.map(pg => ({
 -      slug: pg.slug,
@@ -2853,11 +2680,7 @@ index ab2d4cb..bebaebb 100644
 +    const summaries = pages.filter((pg) => pageMatchesReadFilters(pg, filters)).map(pageSummary);
 +    return envelope ? paginateItems(summaries, limit, offset) : summaries;
    },
-   scope: 'read',
-   cliHints: { name: 'list' },
-@@ -1439,16 +1648,24 @@ const search: Operation = {
-   description: SEARCH_DESCRIPTION,
-   params: {
+@@ -1441,4 +1650,8 @@ const search: Operation = {
      query: { type: 'string', required: true },
 -    limit: { type: 'number', description: 'Max results (default 20)' },
 -    offset: { type: 'number', description: 'Skip first N results (for pagination)' },
@@ -2868,9 +2691,7 @@ index ab2d4cb..bebaebb 100644
 +    status: READ_STATUS_PARAM,
 +    verification: READ_VERIFICATION_PARAM,
      mode: { type: 'string', description: 'Search mode (conservative|balanced|tokenmax). Local callers only.' },
-   },
-   handler: async (ctx, p) => {
-     const startedAt = Date.now();
+@@ -1448,5 +1661,9 @@ const search: Operation = {
      const queryText = p.query as string;
 -    const limit = (p.limit as number) || 20;
 -    const offset = (p.offset as number) || 0;
@@ -2882,39 +2703,28 @@ index ab2d4cb..bebaebb 100644
 +    const searchLimit = envelope ? limit + 1 : limit;
 +    const prefixOpts = readPrefixSearchOpts(filters);
  
-     // T4/D5 — per-call mode honored ONLY for trusted/local callers so a remote
-     // OAuth client can't escalate to the costly tokenmax bundle. Local + unknown
-@@ -1461,8 +1678,8 @@ const search: Operation = {
-     const keywordOnly = (await ctx.engine.getConfig('search.mcp_keyword_only')) === 'true';
- 
+@@ -1463,4 +1680,4 @@ const search: Operation = {
      if (keywordOnly) {
 -      const raw = await ctx.engine.searchKeyword(queryText, { limit, offset, ...scope });
 -      const results = dedupResults(raw);
 +      const raw = await ctx.engine.searchKeyword(queryText, { limit: searchLimit, offset, ...scope, ...prefixOpts });
 +      const results = await filterSearchResults(ctx, dedupResults(raw), filters);
        stampEvidenceSafe(results);
-       // #1699: the keyword-only opt-out must STILL surface the content_flag
-       // agent-warning channel (hybridSearch stamps it; this branch bypasses
-@@ -1470,24 +1687,26 @@ const search: Operation = {
-       await stampContentFlags(ctx.engine, results);
-       bumpLastRetrievedAt(ctx.engine, results.map((r) => r.page_id));
+@@ -1472,3 +1689,3 @@ const search: Operation = {
        maybeCaptureSearch(ctx, queryText, results, Date.now() - startedAt, false);
 -      return results;
 +      return envelope ? searchEnvelope(results, limit, offset, raw.length > limit) : results;
      }
- 
-     // Cheap-hybrid (D4/D15): full vector+keyword+RRF+pool+title+alias, but
-     // expansion OFF (no per-call LLM cost). `query` op is the full-control variant.
-     let capturedMeta: HybridSearchMeta | null = null;
+@@ -1479,3 +1696,3 @@ const search: Operation = {
      const results = await hybridSearchCached(ctx.engine, queryText, {
 -      limit,
 +      limit: searchLimit,
        offset,
-       expansion: false,
+@@ -1483,2 +1700,3 @@ const search: Operation = {
        ...scope,
 +      ...prefixOpts,
        ...(perCallMode ? { mode: perCallMode } : {}),
-       onMeta: (m) => { capturedMeta = m; },
+@@ -1486,6 +1704,7 @@ const search: Operation = {
      });
 +    const filteredResults = await filterSearchResults(ctx, results, filters);
      const latency_ms = Date.now() - startedAt;
@@ -2925,11 +2735,7 @@ index ab2d4cb..bebaebb 100644
 +    maybeCaptureSearch(ctx, queryText, filteredResults, latency_ms, true, capturedMeta);
 +    return envelope ? searchEnvelope(filteredResults, limit, offset, results.length > limit) : filteredResults;
    },
-   scope: 'read',
-   cliHints: { name: 'search', positional: ['query'] },
-@@ -1508,8 +1727,12 @@ const query: Operation = {
-      *  CLI loads the file, base64-encodes, and passes through `image`). */
-     image: { type: 'string', description: 'Base64-encoded image bytes for image-similarity search (CLI: --image <path>).' },
+@@ -1510,4 +1729,8 @@ const query: Operation = {
      image_mime: { type: 'string', description: 'MIME type for the image bytes (auto-derived from path on CLI; required when calling op directly).' },
 -    limit: { type: 'number', description: 'Max results (default 20)' },
 -    offset: { type: 'number', description: 'Skip first N results (for pagination)' },
@@ -2940,11 +2746,7 @@ index ab2d4cb..bebaebb 100644
 +    status: READ_STATUS_PARAM,
 +    verification: READ_VERIFICATION_PARAM,
      expand: { type: 'boolean', description: 'Enable multi-query expansion (default: true)' },
-     detail: { type: 'string', description: 'Result detail level: low (compiled truth only), medium (default, all with dedup), high (all chunks)' },
-     mode: { type: 'string', description: 'Search mode (conservative|balanced|tokenmax). Local callers only; remote uses configured mode.' },
-@@ -1599,6 +1822,12 @@ const query: Operation = {
-     const queryText = p.query as string | undefined;
-     const imageData = p.image as string | undefined;
+@@ -1601,2 +1824,8 @@ const query: Operation = {
      const imageMime = (p.image_mime as string) || 'image/jpeg';
 +    const limit = clampSearchLimit(p.limit as number | undefined, 20, 100);
 +    const offset = readOffset(p);
@@ -2953,11 +2755,7 @@ index ab2d4cb..bebaebb 100644
 +    const searchLimit = envelope ? limit + 1 : limit;
 +    const prefixOpts = readPrefixSearchOpts(filters);
      const embeddingColumnParam =
-       typeof p.embedding_column === 'string' && p.embedding_column.length > 0
-         ? (p.embedding_column as string)
-@@ -1625,12 +1854,14 @@ const query: Operation = {
-       // own thread of the source scope. Pre-fix, this branch leaked
-       // image pages across sources independent of the text path's fix.
+@@ -1627,8 +1856,10 @@ const query: Operation = {
        const results = await ctx.engine.searchVector(vec, {
 -        limit: (p.limit as number) || 20,
 -        offset: (p.offset as number) || 0,
@@ -2971,171 +2769,93 @@ index ab2d4cb..bebaebb 100644
 +      const filteredResults = await filterSearchResults(ctx, results, filters);
 +      return envelope ? searchEnvelope(filteredResults, limit, offset, results.length > limit) : filteredResults;
      }
- 
-     if (!queryText) {
-@@ -1651,8 +1882,8 @@ const query: Operation = {
-     // semantic cache + token budget + intent weighting fire automatically.
-     // Plain hybridSearch remains the bare API for callers that opt out.
+@@ -1653,4 +1884,4 @@ const query: Operation = {
      const results = await hybridSearchCached(ctx.engine, queryText, {
 -      limit: (p.limit as number) || 20,
 -      offset: (p.offset as number) || 0,
 +      limit: searchLimit,
 +      offset,
        expansion: expand,
-       expandFn: expand ? expandQuery : undefined,
-       // T4/D5 — per-call mode (local/trusted only; remote ignored).
-@@ -1663,6 +1894,7 @@ const query: Operation = {
-       nearSymbol: (p.near_symbol as string) || undefined,
-       walkDepth: typeof p.walk_depth === 'number' ? (p.walk_depth as number) : undefined,
+@@ -1665,2 +1896,3 @@ const query: Operation = {
        ...querySourceScope,
 +      ...prefixOpts,
        // v0.29.1 — agent-explicit recency + salience. Omitted = heuristic defaults.
-       salience: p.salience as 'off' | 'on' | 'strong' | undefined,
-       recency: p.recency as 'off' | 'on' | 'strong' | undefined,
-@@ -1691,10 +1923,11 @@ const query: Operation = {
-       relationalRetrieval: typeof p.relational === 'boolean' ? (p.relational as boolean) : undefined,
-     });
+@@ -1693,2 +1925,3 @@ const query: Operation = {
      const latency_ms = Date.now() - startedAt;
 +    const filteredResults = await filterSearchResults(ctx, results, filters);
  
-     // v0.37.0 (D11): op-layer last_retrieved_at write-back. Same shape as the
+@@ -1696,3 +1929,3 @@ const query: Operation = {
      // search handler — fire-and-forget, internal callers bypass this path.
 -    bumpLastRetrievedAt(ctx.engine, results.map((r) => r.page_id));
 +    bumpLastRetrievedAt(ctx.engine, filteredResults.map((r) => r.page_id));
  
-     // Op-layer capture (v0.25.0). Fire-and-forget. meta tells gbrain-evals
-     // what hybridSearch *actually* did so replay can distinguish "with API
-@@ -1709,7 +1942,7 @@ const query: Operation = {
-         {
-           tool_name: 'query',
+@@ -1711,3 +1944,3 @@ const query: Operation = {
            query: queryText,
 -          results,
 +          results: filteredResults,
            meta,
-           latency_ms,
-           remote: ctx.remote ?? false,
-@@ -1722,7 +1955,7 @@ const query: Operation = {
-       );
-     }
+@@ -1724,3 +1957,3 @@ const query: Operation = {
  
 -    return results;
 +    return envelope ? searchEnvelope(filteredResults, limit, offset, results.length > limit) : filteredResults;
    },
-   scope: 'read',
-   cliHints: { name: 'query', positional: ['query'] },
-@@ -2223,6 +2456,7 @@ const get_stats: Operation = {
-   name: 'get_stats',
-   description: 'Brain statistics (page count, chunk count, etc.)',
+@@ -2225,2 +2458,3 @@ const get_stats: Operation = {
    params: {},
 +  mutating: false,
    handler: async (ctx) => {
-     return ctx.engine.getStats();
-   },
-@@ -2234,6 +2468,7 @@ const get_health: Operation = {
-   name: 'get_health',
-   description: 'Brain health dashboard (embed coverage, stale pages, orphans)',
+@@ -2236,2 +2470,3 @@ const get_health: Operation = {
    params: {},
 +  mutating: false,
    handler: async (ctx) => {
-     return ctx.engine.getHealth();
-   },
-@@ -2449,6 +2684,7 @@ const get_status_snapshot: Operation = {
-   name: 'get_status_snapshot',
-   description: 'Snapshot for `gbrain status` thin-client mode: sync freshness + last cycle. Admin-scope.',
+@@ -2451,2 +2686,3 @@ const get_status_snapshot: Operation = {
    params: {},
 +  mutating: false,
    handler: async (ctx) => {
-     const { buildSyncStatusReport } = await import('../commands/sync.ts');
-     const { buildCycleSnapshot } = await import('../commands/status.ts');
-@@ -2516,6 +2752,7 @@ const run_doctor: Operation = {
-   name: 'run_doctor',
-   description: 'Run brain health checks and return a structured DoctorReport (thin-client doctor surface).',
+@@ -2518,2 +2754,3 @@ const run_doctor: Operation = {
    params: {},
 +  mutating: false,
    handler: async (ctx) => {
-     const { doctorReportRemote } = await import('../commands/doctor.ts');
-     return doctorReportRemote(ctx.engine);
-@@ -2709,6 +2946,7 @@ const file_list: Operation = {
-   params: {
-     slug: { type: 'string', description: 'Filter by page slug' },
+@@ -2711,2 +2948,3 @@ const file_list: Operation = {
    },
 +  mutating: false,
    scope: 'admin',
-   localOnly: true,
-   handler: async (_ctx, p) => {
-@@ -2817,6 +3055,7 @@ const file_url: Operation = {
-   params: {
-     storage_path: { type: 'string', required: true },
+@@ -2819,2 +3057,3 @@ const file_url: Operation = {
    },
 +  mutating: false,
    scope: 'admin',
-   localOnly: true,
-   handler: async (_ctx, p) => {
-@@ -3093,6 +3332,7 @@ const get_job: Operation = {
-   params: {
-     id: { type: 'number', required: true, description: 'Job ID' },
+@@ -3095,2 +3334,3 @@ const get_job: Operation = {
    },
 +  mutating: false,
    scope: 'admin',
-   handler: async (ctx, p) => {
-     const { MinionQueue } = await import('./minions/queue.ts');
-@@ -3112,6 +3352,7 @@ const list_jobs: Operation = {
-     name: { type: 'string', description: 'Filter by job type' },
-     limit: { type: 'number', description: 'Max results (default: 50)' },
+@@ -3114,2 +3354,3 @@ const list_jobs: Operation = {
    },
 +  mutating: false,
    scope: 'admin',
-   handler: async (ctx, p) => {
-     const { MinionQueue } = await import('./minions/queue.ts');
-@@ -3167,6 +3408,7 @@ const get_job_progress: Operation = {
-   params: {
-     id: { type: 'number', required: true, description: 'Job ID' },
+@@ -3169,2 +3410,3 @@ const get_job_progress: Operation = {
    },
 +  mutating: false,
    scope: 'admin',
-   handler: async (ctx, p) => {
-     const { MinionQueue } = await import('./minions/queue.ts');
-@@ -3183,6 +3425,7 @@ const pause_job: Operation = {
-   params: {
-     id: { type: 'number', required: true, description: 'Job ID' },
+@@ -3185,2 +3427,3 @@ const pause_job: Operation = {
    },
 +  mutating: true,
    scope: 'admin',
-   handler: async (ctx, p) => {
-     const { MinionQueue } = await import('./minions/queue.ts');
-@@ -3199,6 +3442,7 @@ const resume_job: Operation = {
-   params: {
-     id: { type: 'number', required: true, description: 'Job ID' },
+@@ -3201,2 +3444,3 @@ const resume_job: Operation = {
    },
 +  mutating: true,
    scope: 'admin',
-   handler: async (ctx, p) => {
-     const { MinionQueue } = await import('./minions/queue.ts');
-@@ -3216,6 +3460,7 @@ const replay_job: Operation = {
-     id: { type: 'number', required: true, description: 'Source job ID to replay' },
-     data_overrides: { type: 'object', required: false, description: 'Data fields to override (merged with original)' },
+@@ -3218,2 +3462,3 @@ const replay_job: Operation = {
    },
 +  mutating: true,
    scope: 'admin',
-   handler: async (ctx, p) => {
-     if (ctx.dryRun) return { dry_run: true, action: 'replay_job', id: p.id };
-@@ -3235,6 +3480,7 @@ const send_job_message: Operation = {
-     payload: { type: 'object', required: true, description: 'Message payload (arbitrary JSON)' },
-     sender: { type: 'string', required: false, description: 'Sender identity (default: admin)' },
+@@ -3237,2 +3482,3 @@ const send_job_message: Operation = {
    },
 +  mutating: true,
    scope: 'admin',
-   handler: async (ctx, p) => {
-     if (ctx.dryRun) return { dry_run: true, action: 'send_job_message', id: p.id };
-@@ -4855,7 +5101,7 @@ const reload_schema_pack: Operation = {
-     pack: { type: 'string', description: 'Pack name to invalidate (omit to flush all)' },
-   },
+@@ -4857,3 +5103,3 @@ const reload_schema_pack: Operation = {
    scope: 'admin',
 -  mutating: false,  // no DB writes
 +  mutating: true,
    handler: async (_ctx, p) => {
-     const { invalidatePackCache } = await import('./schema-pack/registry.ts');
-     return invalidatePackCache(p.pack as string | undefined);
 diff --git a/src/core/put-page-validation.ts b/src/core/put-page-validation.ts
 new file mode 100644
 index 0000000..bf80eef
@@ -4271,19 +3991,13 @@ diff --git a/src/mcp/dispatch.ts b/src/mcp/dispatch.ts
 index 8501ec7..3ea9905 100644
 --- a/src/mcp/dispatch.ts
 +++ b/src/mcp/dispatch.ts
-@@ -10,6 +10,9 @@ import type { BrainEngine } from '../core/engine.ts';
- import { operations, OperationError } from '../core/operations.ts';
- import type { Operation, OperationContext, AuthInfo } from '../core/operations.ts';
+@@ -12,2 +12,5 @@ import type { Operation, OperationContext, AuthInfo } from '../core/operations.t
  import { loadConfig } from '../core/config.ts';
 +import { validateParams } from './param-validation.ts';
 +
 +export { validateParams } from './param-validation.ts';
  
- export interface ToolResult {
-   content: { type: 'text'; text: string }[];
-@@ -167,25 +170,6 @@ export function summarizeMcpParams(opName: string, params: unknown): ParamSummar
-   };
- }
+@@ -169,21 +172,2 @@ export function summarizeMcpParams(opName: string, params: unknown): ParamSummar
  
 -/** Validate required params exist and have the expected type. Returns null on success, error message on failure. */
 -export function validateParams(op: Operation, params: Record<string, unknown>): string | null {
@@ -4305,24 +4019,16 @@ index 8501ec7..3ea9905 100644
 -}
 -
  const stderrLogger: OperationContext['logger'] = {
-   info: (msg: string) => process.stderr.write(`[info] ${msg}\n`),
-   warn: (msg: string) => process.stderr.write(`[warn] ${msg}\n`),
-@@ -226,7 +210,7 @@ export async function dispatchToolCall(
-   opts: DispatchOpts = {},
- ): Promise<ToolResult> {
+@@ -228,3 +212,3 @@ export async function dispatchToolCall(
    const op = operations.find(o => o.name === name);
 -  if (!op) {
 +  if (!op || ((opts.remote ?? true) && op.localOnly === true)) {
      // Always return JSON-shaped error content. v0.31 e2e tests
-     // (sources-remote-mcp.test.ts) parse content via JSON.parse so a
-     // plain `Error: ...` string here breaks the contract on every
 diff --git a/src/mcp/http-transport.ts b/src/mcp/http-transport.ts
 index c3ff28c..4e21c6a 100644
 --- a/src/mcp/http-transport.ts
 +++ b/src/mcp/http-transport.ts
-@@ -32,6 +32,15 @@ import { operations } from '../core/operations.ts';
- import type { AuthInfo } from '../core/operations.ts';
- import { VERSION } from '../version.ts';
+@@ -34,2 +34,11 @@ import { VERSION } from '../version.ts';
  import { dispatchToolCall } from './dispatch.ts';
 +import {
 +  GBRAIN_SERVER_CAPABILITIES,
@@ -4334,21 +4040,13 @@ index c3ff28c..4e21c6a 100644
 +} from './discovery.ts';
 +import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
  import { buildDefaultLimiters, type RateLimiter } from './rate-limit.ts';
- import { sqlQueryForEngine } from '../core/sql-query.ts';
- import { parseLegacyTokenScope } from '../core/legacy-token-scope.ts';
-@@ -348,7 +357,8 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
-             result: {
-               protocolVersion: '2025-03-26',
+@@ -350,3 +359,4 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
                serverInfo: { name: 'gbrain', version: VERSION },
 -              capabilities: { tools: {} },
 +              capabilities: GBRAIN_SERVER_CAPABILITIES,
 +              instructions: GBRAIN_SERVER_INSTRUCTIONS,
              },
-             jsonrpc: '2.0',
-             id,
-@@ -362,6 +372,50 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
-         return new Response(null, { status: 204, headers: corsHeaders(origin) });
-       }
+@@ -364,2 +374,46 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
  
 +      if (method === 'prompts/list') {
 +        logRequest(auth.tokenName!, 'prompts/list', 'success', Date.now() - startedMs);
@@ -4395,8 +4093,6 @@ index c3ff28c..4e21c6a 100644
 +      }
 +
        // tools/list
-       if (method === 'tools/list') {
-         logRequest(auth.tokenName!, 'tools/list', 'success', Date.now() - startedMs);
 diff --git a/src/mcp/param-validation.ts b/src/mcp/param-validation.ts
 new file mode 100644
 index 0000000..f50c7cb
@@ -4470,9 +4166,7 @@ diff --git a/src/mcp/server.ts b/src/mcp/server.ts
 index ae5ab4c..8b4caa8 100644
 --- a/src/mcp/server.ts
 +++ b/src/mcp/server.ts
-@@ -5,6 +5,11 @@ import type { BrainEngine } from '../core/engine.ts';
- import { operations } from '../core/operations.ts';
- import { VERSION } from '../version.ts';
+@@ -7,2 +7,7 @@ import { VERSION } from '../version.ts';
  import { buildToolDefs } from './tool-defs.ts';
 +import {
 +  GBRAIN_SERVER_CAPABILITIES,
@@ -4480,11 +4174,7 @@ index ae5ab4c..8b4caa8 100644
 +  registerDiscoveryHandlers,
 +} from './discovery.ts';
  import { dispatchToolCall, validateParams, buildOperationContext } from './dispatch.ts';
- import { getBrainHotMemoryMeta } from '../core/facts/meta-hook.ts';
- import { loadConfig } from '../core/config.ts';
-@@ -16,16 +21,22 @@ import {
- import { resolveEntitiesToPointers, logDeliveredReflexPointers } from '../core/context/retrieval-reflex.ts';
- 
+@@ -18,7 +23,13 @@ import { resolveEntitiesToPointers, logDeliveredReflexPointers } from '../core/c
  export async function startMcpServer(engine: BrainEngine) {
 +  const mcpOperations = operations.filter(op => !op.localOnly);
    const server = new Server(
@@ -4499,35 +4189,24 @@ index ae5ab4c..8b4caa8 100644
 +  registerDiscoveryHandlers(server);
 +
    // Generate tool definitions from operations. Extracted to buildToolDefs so
-   // the subagent tool registry (v0.15+) can call the same mapper against a
-   // filtered OPERATIONS subset instead of duplicating this shape.
+@@ -27,3 +38,3 @@ export async function startMcpServer(engine: BrainEngine) {
    server.setRequestHandler(ListToolsRequestSchema, async () => ({
 -    tools: buildToolDefs(operations),
 +    tools: buildToolDefs(mcpOperations),
    }));
- 
-   // Dispatch tool calls via shared dispatch.ts (parity with HTTP transport).
 diff --git a/src/mcp/tool-defs.ts b/src/mcp/tool-defs.ts
 index 3cadf56..d5fef64 100644
 --- a/src/mcp/tool-defs.ts
 +++ b/src/mcp/tool-defs.ts
-@@ -1,4 +1,5 @@
+@@ -1,2 +1,3 @@
  import type { Operation, ParamDef } from '../core/operations.ts';
 +import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
  
- export interface McpToolDef {
-   name: string;
-@@ -8,6 +9,7 @@ export interface McpToolDef {
-     properties: Record<string, unknown>;
-     required: string[];
+@@ -10,2 +11,3 @@ export interface McpToolDef {
    };
 +  annotations: ToolAnnotations;
  }
- 
- /**
-@@ -33,22 +35,48 @@ export function paramDefToSchema(p: ParamDef): Record<string, unknown> {
-     ...(p.description ? { description: p.description } : {}),
-     ...(p.enum ? { enum: p.enum } : {}),
+@@ -35,2 +37,9 @@ export function paramDefToSchema(p: ParamDef): Record<string, unknown> {
      ...(p.default !== undefined ? { default: p.default } : {}),
 +    ...(p.minimum !== undefined ? { minimum: p.minimum } : {}),
 +    ...(p.maximum !== undefined ? { maximum: p.maximum } : {}),
@@ -4537,8 +4216,7 @@ index 3cadf56..d5fef64 100644
 +    ...(p.maxItems !== undefined ? { maxItems: p.maxItems } : {}),
 +    ...(p.pattern ? { pattern: p.pattern } : {}),
      ...(p.items ? { items: paramDefToSchema(p.items) } : {}),
-   };
- }
+@@ -39,16 +48,35 @@ export function paramDefToSchema(p: ParamDef): Record<string, unknown> {
  
 +function toolAnnotations(op: Operation): ToolAnnotations {
 +  const readOnly = (op.scope ?? 'read') === 'read' || op.mutating === false;
@@ -4591,13 +4269,11 @@ diff --git a/test/e2e/http-transport.test.ts b/test/e2e/http-transport.test.ts
 index 45c7f9e..a7d9df4 100644
 --- a/test/e2e/http-transport.test.ts
 +++ b/test/e2e/http-transport.test.ts
-@@ -97,9 +97,40 @@ describeE2E('http-transport E2E (real Postgres)', () => {
-     const body = await r.json();
-     expect(body.result.tools).toBeArray();
+@@ -99,2 +99,3 @@ describeE2E('http-transport E2E (real Postgres)', () => {
      expect(body.result.tools.length).toBeGreaterThan(5);
 +    expect(body.result.tools[0].annotations).toBeDefined();
      expect(r.headers.get('content-type')).toContain('application/json');
-   });
+@@ -102,2 +103,32 @@ describeE2E('http-transport E2E (real Postgres)', () => {
  
 +  test('2b. /mcp discovery methods advertise and return prompts and resources', async () => {
 +    const headers = { 'Authorization': `Bearer ${validToken}`, 'Content-Type': 'application/json' };
@@ -4630,15 +4306,11 @@ index 45c7f9e..a7d9df4 100644
 +  });
 +
    test('3. /mcp tools/call (real op: list_pages) round-trips successfully — F1+F2+F3 guard', async () => {
-     const r = await fetch(`http://localhost:${srv.port}/mcp`, {
-       method: 'POST',
 diff --git a/test/e2e/serve-http-oauth.test.ts b/test/e2e/serve-http-oauth.test.ts
 index cca6d9f..e8db22a 100644
 --- a/test/e2e/serve-http-oauth.test.ts
 +++ b/test/e2e/serve-http-oauth.test.ts
-@@ -118,11 +118,21 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
-   }, 30_000);
- 
+@@ -120,3 +120,13 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
    // Helper: mint a token with given scopes
 -  async function mintToken(scope = 'read write'): Promise<{ access_token: string; expires_in: number; scope: string }> {
 +  async function mintToken(
@@ -4653,25 +4325,17 @@ index cca6d9f..e8db22a 100644
 +    });
 +    if (resource) body.set('resource', resource);
      const res = await fetch(`${BASE}/token`, {
-       method: 'POST',
+@@ -124,3 +134,3 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
 -      body: `grant_type=client_credentials&client_id=${clientId}&client_secret=${clientSecret}&scope=${encodeURIComponent(scope)}`,
 +      body,
      });
-     expect(res.ok).toBe(true);
-     return res.json() as any;
-@@ -152,7 +162,7 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
-     expect(data.scope).toContain('read');
-   });
+@@ -154,3 +164,3 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
  
 -  test('minted token is accepted at /mcp — tools/list returns tools', async () => {
 +  test('client_credentials without resource preserves legacy /mcp access', async () => {
      const { access_token } = await mintToken('read');
-     const res = await mcpCall(access_token, 'tools/list');
- 
-@@ -165,6 +175,18 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
-     expect(body).toContain('query');  // query tool too
-   }, 15_000);
+@@ -167,2 +177,14 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
  
 +  test('client_credentials with the MCP resource is accepted at /mcp', async () => {
 +    const { access_token } = await mintToken('read', `${BASE}/`);
@@ -4686,11 +4350,7 @@ index cca6d9f..e8db22a 100644
 +  }, 15_000);
 +
    test('minted token works for tools/call — search executes', async () => {
-     const { access_token } = await mintToken('read');
-     const res = await mcpCall(access_token, 'tools/call', {
-@@ -200,6 +222,63 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
-     expect(res.status).toBe(401);
-   });
+@@ -202,2 +224,59 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
  
 +  test('OAuth token for another resource is rejected at /mcp', async () => {
 +    if (!clientId) throw new Error('test setup failed: OAuth client missing');
@@ -4750,11 +4410,7 @@ index cca6d9f..e8db22a 100644
 +  });
 +
    // =========================================================================
-   // Fix 2: OAuth metadata includes client_credentials
-   // =========================================================================
-@@ -265,15 +344,21 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
-   // MCP Streamable HTTP spec, not 404. claude.ai + other probing clients
-   // distinguish "endpoint exists, no SSE channel" from "endpoint missing"
+@@ -267,6 +346,6 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
    // on this status code; 404 makes them give up.
 -  test('GET /mcp returns 405 with Allow: POST, DELETE (v0.36.1.x #1076)', async () => {
 +  test('GET /mcp returns 405 and advertises only the implemented POST method', async () => {
@@ -4763,9 +4419,7 @@ index cca6d9f..e8db22a 100644
 -    expect(res.headers.get('Allow')).toBe('POST, DELETE');
 +    expect(res.headers.get('Allow')).toBe('POST');
      const body = await res.json() as { jsonrpc?: string; error?: { code?: number } };
-     expect(body.jsonrpc).toBe('2.0');
-     expect(body.error?.code).toBe(-32000);
-   });
+@@ -276,2 +355,8 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
  
 +  test('DELETE /mcp returns 405 instead of falling through to 404', async () => {
 +    const res = await fetch(`${BASE}/mcp`, { method: 'DELETE' });
@@ -4774,33 +4428,21 @@ index cca6d9f..e8db22a 100644
 +  });
 +
    test('X-Forwarded-For header does not crash server', async () => {
-     const res = await fetch(`${BASE}/health`, {
-       headers: { 'X-Forwarded-For': '10.0.0.1, 172.16.0.1' },
-@@ -546,7 +631,7 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
-     try {
-       await sql`
+@@ -548,3 +633,3 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
          INSERT INTO oauth_tokens (token_hash, token_type, client_id, scopes, expires_at)
 -        VALUES (${tokenHash}, ${'access'}, ${publicClientId!}, ${sql.array(['read'])}, ${Math.floor(Date.now() / 1000) + 3600})
 +        VALUES (${tokenHash}, ${'access'}, ${publicClientId!}, ${'{read}'}, ${Math.floor(Date.now() / 1000) + 3600})
        `;
-     } finally {
-       await sql.end();
 diff --git a/test/e2e/serve-stdio-roundtrip.test.ts b/test/e2e/serve-stdio-roundtrip.test.ts
 index 9fe9909..1ddc287 100644
 --- a/test/e2e/serve-stdio-roundtrip.test.ts
 +++ b/test/e2e/serve-stdio-roundtrip.test.ts
-@@ -93,7 +93,7 @@ describe('serve stdio round-trip E2E (local PGLite → real MCP tool calls)', ()
-     if (home) { try { rmSync(home, { recursive: true, force: true }); } catch { /* best-effort */ } }
-   });
+@@ -95,3 +95,3 @@ describe('serve stdio round-trip E2E (local PGLite → real MCP tool calls)', ()
  
 -  test('initialize handshake + tools/list exposes the core retrieval tools', async () => {
 +  test('initialize handshake + tools/list exposes core tools and hides localOnly operations', async () => {
      expect(connected).toBe(true);
-     const { tools } = await client!.listTools();
-     const names = new Set(tools.map((t) => t.name));
-@@ -105,6 +105,41 @@ describe('serve stdio round-trip E2E (local PGLite → real MCP tool calls)', ()
-       expect(names.has(core)).toBe(true);
-     }
+@@ -107,2 +107,37 @@ describe('serve stdio round-trip E2E (local PGLite → real MCP tool calls)', ()
      expect(names.has('capture')).toBe(false); // CLI-only, must not be advertised as MCP
 +    for (const localOnly of ['purge_deleted_pages', 'sync_brain', 'file_list', 'file_upload', 'get_recent_transcripts']) {
 +      expect(names.has(localOnly)).toBe(false);
@@ -4838,35 +4480,23 @@ index 9fe9909..1ddc287 100644
 +    const resource = await activeClient.readResource({ uri: 'gbrain://guide/workflows' });
 +    expect(resource.contents[0]?.mimeType).toBe('text/markdown');
    }, 30_000);
- 
-   test('tools/call get_brain_identity returns version + engine + a populated counter', async () => {
 diff --git a/test/e2e/v0_29-mcp-dispatch-pglite.test.ts b/test/e2e/v0_29-mcp-dispatch-pglite.test.ts
 index 0102094..49fa573 100644
 --- a/test/e2e/v0_29-mcp-dispatch-pglite.test.ts
 +++ b/test/e2e/v0_29-mcp-dispatch-pglite.test.ts
-@@ -9,8 +9,8 @@
-  *   2. buildOperationContext (ctx.remote, ctx.engine, ctx.config wiring)
-  *   3. handler invocation + JSON serialization (ToolResult shape)
+@@ -11,4 +11,4 @@
   *   4. Error path: OperationError → isError + JSON envelope
 - *   5. Trust gate: ctx.remote === true on get_recent_transcripts must
 - *      reach the handler and produce a permission_denied error.
 + *   5. Trust gate: ctx.remote === true hides localOnly operations before
 + *      their handlers can run.
   *
-  * Runs against PGLite in-memory. No DATABASE_URL, no API keys.
-  */
-@@ -62,7 +62,7 @@ beforeAll(async () => {
-     weight: computeEmotionalWeight({ tags: r.tags, takes: r.takes }),
-   }));
+@@ -64,3 +64,3 @@ beforeAll(async () => {
    await engine.setEmotionalWeightBatch(rows);
 -});
 +}, 30_000);
  
- afterAll(async () => {
-   if (engine) await engine.disconnect();
-@@ -108,20 +108,15 @@ describe('v0.29 E2E — dispatchToolCall for the three new ops', () => {
-     }
-   });
+@@ -110,7 +110,3 @@ describe('v0.29 E2E — dispatchToolCall for the three new ops', () => {
  
 -  test('get_recent_transcripts rejects with permission_denied when ctx.remote === true', async () => {
 -    // Defense-in-depth: even though serve-http filters localOnly: true ops
@@ -4875,10 +4505,7 @@ index 0102094..49fa573 100644
 -    // every MCP transport sets, so the reject must fire here.
 +  test('get_recent_transcripts is hidden from remote dispatch as an unknown tool', async () => {
      const result = await dispatchToolCall(engine, 'get_recent_transcripts', {
-       days: 7,
-     }, { remote: true });
- 
-     expect(result.isError).toBe(true);
+@@ -121,5 +117,4 @@ describe('v0.29 E2E — dispatchToolCall for the three new ops', () => {
      const err = JSON.parse(result.content[0].text);
 -    // OperationError.toJSON() serializes the code as `error:`, not `code:`.
 -    expect(err.error).toBe('permission_denied');
@@ -4886,8 +4513,6 @@ index 0102094..49fa573 100644
 +    expect(err.error).toBe('unknown_tool');
 +    expect(err.message).toContain('Unknown tool');
    });
- 
-   test('get_recent_transcripts succeeds when ctx.remote === false (CLI path)', async () => {
 diff --git a/test/gbrain-capture.test.ts b/test/gbrain-capture.test.ts
 new file mode 100644
 index 0000000..f7da915
@@ -5757,9 +5382,7 @@ diff --git a/test/mcp-tool-defs.test.ts b/test/mcp-tool-defs.test.ts
 index 7ee4dd0..23cb61e 100644
 --- a/test/mcp-tool-defs.test.ts
 +++ b/test/mcp-tool-defs.test.ts
-@@ -56,6 +56,12 @@ function legacyInlineMap(ops: typeof operations) {
-         .filter(([, v]) => v.required)
-         .map(([k]) => k),
+@@ -58,2 +58,8 @@ function legacyInlineMap(ops: typeof operations) {
      },
 +    annotations: {
 +      readOnlyHint: (op.scope ?? 'read') === 'read',
@@ -5768,11 +5391,7 @@ index 7ee4dd0..23cb61e 100644
 +      openWorldHint: true,
 +    },
    }));
- }
- 
-@@ -88,6 +94,25 @@ describe('buildToolDefs', () => {
-       expect(Array.isArray(def.inputSchema.required)).toBe(true);
-     }
+@@ -90,2 +96,21 @@ describe('buildToolDefs', () => {
    });
 +
 +  test('classifies read and write operations with conservative MCP annotations', () => {
@@ -5794,15 +5413,11 @@ index 7ee4dd0..23cb61e 100644
 +    });
 +  });
  });
- 
- // ---------------------------------------------------------------------------
 diff --git a/test/oauth.test.ts b/test/oauth.test.ts
 index 43c4844..7ec9dc6 100644
 --- a/test/oauth.test.ts
 +++ b/test/oauth.test.ts
-@@ -191,6 +191,17 @@ describe('client credentials', () => {
-     expect(tokens.scope).toBe('read');
-   });
+@@ -193,2 +193,13 @@ describe('client credentials', () => {
  
 +  test('resource-bound exchange persists the requested resource', async () => {
 +    const tokens = await provider.exchangeClientCredentials(
@@ -5816,11 +5431,7 @@ index 43c4844..7ec9dc6 100644
 +  });
 +
    test('no refresh token issued for CC grant', async () => {
-     const tokens = await provider.exchangeClientCredentials(clientId, clientSecret, 'read');
-     expect(tokens.refresh_token).toBeUndefined();
-@@ -403,6 +414,18 @@ describe('revokeToken', () => {
- // ---------------------------------------------------------------------------
- 
+@@ -405,2 +416,14 @@ describe('revokeToken', () => {
  describe('authorization code flow', () => {
 +  async function insertAuthorizationCode(clientId: string, resource: string | null): Promise<string> {
 +    const code = generateToken('gbrain_code_');
@@ -5835,11 +5446,7 @@ index 43c4844..7ec9dc6 100644
 +  }
 +
    test('code issuance and exchange', async () => {
-     const { clientId } = await provider.registerClientManual(
-       'authcode-test', ['authorization_code'], 'read write',
-@@ -534,6 +557,70 @@ describe('authorization code flow', () => {
-     expect(auth.scopes).toEqual(['read']);
-   });
+@@ -536,2 +559,66 @@ describe('authorization code flow', () => {
  
 +  test('authorization code exchange requires the originally authorized resource', async () => {
 +    const { clientId } = await provider.registerClientManual(
@@ -5906,11 +5513,7 @@ index 43c4844..7ec9dc6 100644
 +  });
 +
    // CSO finding #2 regression. The pre-fix SELECT-then-DELETE pattern let two
-   // concurrent token requests with the same code both pass the SELECT, both
-   // running DELETE (no-op on second) and both calling issueTokens. The fix is
-@@ -627,6 +714,77 @@ describe('refresh token', () => {
-     const successes = results.filter(r => r.status === 'fulfilled');
-     expect(successes.length).toBe(1);
+@@ -629,2 +716,73 @@ describe('refresh token', () => {
    });
 +
 +  test('refresh token preserves its resource and a mismatch does not consume it', async () => {
@@ -5984,8 +5587,6 @@ index 43c4844..7ec9dc6 100644
 +    expect(rotated.access_token).toStartWith('gbrain_at_');
 +  });
  });
- 
- // ---------------------------------------------------------------------------
 diff --git a/test/put-page-validation.test.ts b/test/put-page-validation.test.ts
 new file mode 100644
 index 0000000..0f7fd2a
