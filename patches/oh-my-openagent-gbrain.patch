@@ -1,0 +1,404 @@
+diff --git a/docs/guide/installation.md b/docs/guide/installation.md
+index d34f9dd52..c71cba07e 100644
+--- a/docs/guide/installation.md
++++ b/docs/guide/installation.md
+@@ -109,6 +109,7 @@ A detached worker finishes the install in the background (the `sg` download is t
+ **What bootstrap does NOT do:**
+ 
+ - It **never writes Codex permission settings.** `approval_policy`, `sandbox_mode`, and `network_access` are left untouched. Autonomous mode stays an explicit npx installer choice — `npx lazycodex-ai install --no-tui --codex-autonomous` (see [the one-liner section](#light-codex-cli--one-line-no-agent-needed)).
++- It does not install GBrain client rules by itself. If you use GBrain, run `gbrain install-client` for the target user or sandbox `CODEX_HOME`; that installs the user-level Codex GBrain rule block plus the `gbrain-capture` and `gbrain-review` skills. Those skills call `gbrain capture` / `gbrain review` through the shell, keep promotion gated on the exact `PROMOTE <target-slug>` phrase, and do not add Codex lifecycle hooks.
+ - It does not run the npx self-update for healthy marketplace-managed installs. The auto-update hook logs the skip and surfaces this guidance instead: "Auto-update skipped: this LazyCodex install is managed by the Codex plugin marketplace, so the npx self-update was not started. Tell the user to upgrade with `codex plugin marketplace upgrade sisyphuslabs`, and that Codex will ask them to re-approve hooks after the upgrade." If the hook detects stale local marketplace cache/bin state (for example, a local manifest or managed `ulw` link points at a deleted payload), it may start the npx installer as a local repair and ask you to restart the Codex session afterward.
+ - It never persists anything under the Codex-managed plugin cache directory itself; all bootstrap state lives in the plugin data dir above.
+ 
+diff --git a/packages/omo-codex/README.md b/packages/omo-codex/README.md
+index 83b921b47..cb292b641 100644
+--- a/packages/omo-codex/README.md
++++ b/packages/omo-codex/README.md
+@@ -37,6 +37,8 @@ To install **both** the Ultimate edition (OpenCode plugin) and the Light edition
+ 
+ The installer copies the built plugin into `~/.codex/plugins/cache/sisyphuslabs/omo/<version>/`, writes the local marketplace snapshot under `~/.codex/.tmp/marketplaces/sisyphuslabs/plugins/omo/`, copies bundled agent TOMLs into `~/.codex/agents/`, enables `omo@sisyphuslabs` in `~/.codex/config.toml`, writes the valid `[features.multi_agent_v2]` limit table without enabling MultiAgentV2, and registers the `sisyphuslabs` marketplace from the local built cache. If an older config used `[features] multi_agent_v2 = false`, the installer preserves that explicit disable as table-form `enabled = false`. `lazycodex-ai` is the npm/bin alias and `lazycodex` is the marketplace repository; the marketplace identity remains `sisyphuslabs`.
+ 
++For GBrain client setup, run `gbrain install-client` against the target user environment after LazyCodex is installed. It installs the user-level Codex GBrain rule block and the `gbrain-capture` / `gbrain-review` skills; those skills invoke the shell CLIs `gbrain capture` and `gbrain review`, and promotion still requires the exact human confirmation phrase `PROMOTE <target-slug>`. This path does not add Codex lifecycle hooks.
++
+ To remove managed Codex Light state, run `npx lazycodex-ai uninstall`. The backward-compatible alias is `npx lazycodex-ai cleanup`. Uninstall removes managed `sisyphuslabs` cache/marketplace directories, strips OMO marketplace/plugin/hook-state config blocks with a backup, removes managed agent TOML files from `~/.codex/agents/`, and repairs the known project-local legacy `.codex/config.toml` conflict while leaving project-owned `.codex` files in place.
+ 
+ ### Local dev install (dogfood the source build)
+diff --git a/packages/omo-codex/plugin/scripts/sync-skills.mjs b/packages/omo-codex/plugin/scripts/sync-skills.mjs
+index 5b581471f..9559a1633 100644
+--- a/packages/omo-codex/plugin/scripts/sync-skills.mjs
++++ b/packages/omo-codex/plugin/scripts/sync-skills.mjs
+@@ -183,6 +183,35 @@ private logs, or PII; summarize with lengths, hashes, and short non-sensitive
+ prefixes when identity is needed.
+ `;
+ 
++const gbrainCaptureCodexCompatibility = `## Codex GBrain Compatibility
++
++In Codex, invoke the GBrain capture CLI through the shell as \`gbrain capture\` or \`gbrain capture retry\`. Do not rewrite it to \`gbrain-capture ...\` unless that standalone binary is explicitly present in the active environment.
++
++When direct MCP access is required, use the active Codex MCP tool surface only for a configured GBrain server/tool that is visible in the current tools list; otherwise prefer the \`gbrain capture\` CLI. Keep GBrain service identifiers as placeholders such as \`<server>\` and never write real URLs, IPs, tokens, or secrets into Codex rules, skills, notes, or drafts.
++
++`;
++
++const gbrainReviewCodexCompatibility = `## Codex GBrain Compatibility
++
++In Codex, invoke the GBrain review CLI through the shell as \`gbrain review\`. Do not rewrite it to \`gbrain-review ...\` unless that standalone binary is explicitly present in the active environment.
++
++Promotion remains a human gate: \`gbrain review promote ... --confirm "PROMOTE <target-slug>"\` requires the user to provide the exact \`PROMOTE <target-slug>\` phrase. Agents must not invent or auto-submit that confirmation.
++
++When direct MCP access is required, use the active Codex MCP tool surface only for a configured GBrain server/tool that is visible in the current tools list; otherwise prefer the \`gbrain review\` CLI. Keep GBrain service identifiers as placeholders such as \`<server>\` and never write real URLs, IPs, tokens, or secrets into Codex rules, skills, notes, or drafts.
++
++`;
++
++function insertAfterFrontmatter(content, section) {
++	if (content.includes(section.trim())) return content;
++	const frontmatterMatch = content.match(/^---\n[\s\S]*?\n---\n+/);
++	if (!frontmatterMatch) return `${section}${content}`;
++	return `${frontmatterMatch[0]}${section}${content.slice(frontmatterMatch[0].length)}`;
++}
++
++function removeGbrainReviewStandaloneBinarySection(content) {
++	return content.replace(/\n独立 bin 也可用：\n\n```bash\ngbrain-review <list\|show\|plan\|reject\|needs-evidence\|keep\|promote\|merge\|verify\|repair\|cleanup>\n```\n/, "\n");
++}
++
+ function applyCodexSkillOverlays(skillName, content) {
+ 	if (skillName === "start-work") {
+ 		return content
+@@ -192,6 +221,12 @@ function applyCodexSkillOverlays(skillName, content) {
+ 	if (skillName === "review-work" && !content.includes("When `review-work` is used as a final implementation")) {
+ 		return content.replace(reviewWorkAnchor, `${reviewWorkAnchor}${reviewWorkCodexGate}`);
+ 	}
++	if (skillName === "gbrain-capture") {
++		return insertAfterFrontmatter(content, gbrainCaptureCodexCompatibility);
++	}
++	if (skillName === "gbrain-review") {
++		return removeGbrainReviewStandaloneBinarySection(insertAfterFrontmatter(content, gbrainReviewCodexCompatibility));
++	}
+ 	return content;
+ }
+ 
+diff --git a/packages/omo-codex/plugin/test/gbrain-skills.test.mjs b/packages/omo-codex/plugin/test/gbrain-skills.test.mjs
+new file mode 100644
+index 000000000..54fb799c3
+--- /dev/null
++++ b/packages/omo-codex/plugin/test/gbrain-skills.test.mjs
+@@ -0,0 +1,33 @@
++import assert from "node:assert/strict";
++import { readFile } from "node:fs/promises";
++import { dirname, join } from "node:path";
++import test from "node:test";
++import { fileURLToPath } from "node:url";
++
++const root = dirname(dirname(fileURLToPath(import.meta.url)));
++
++test("#given synced GBrain shared skills #when inspected for Codex #then CLI and human-gate contracts are machine-readable", async () => {
++	// given
++	const captureRoot = join(root, "skills", "gbrain-capture");
++	const reviewRoot = join(root, "skills", "gbrain-review");
++
++	// when
++	const captureSkill = await readFile(join(captureRoot, "SKILL.md"), "utf8");
++	const reviewSkill = await readFile(join(reviewRoot, "SKILL.md"), "utf8");
++	const captureMetadata = await readFile(join(captureRoot, "agents", "openai.yaml"), "utf8");
++	const reviewMetadata = await readFile(join(reviewRoot, "agents", "openai.yaml"), "utf8");
++
++	// then
++	assert.match(captureSkill, /^---\r?\nname: gbrain-capture\r?\n/m);
++	assert.match(reviewSkill, /^---\r?\nname: gbrain-review\r?\n/m);
++	assert.match(captureSkill, /## Codex GBrain Compatibility/);
++	assert.match(reviewSkill, /## Codex GBrain Compatibility/);
++	assert.match(captureSkill, /`gbrain capture`/);
++	assert.match(captureSkill, /`gbrain capture retry`/);
++	assert.match(reviewSkill, /`gbrain review`/);
++	assert.match(reviewSkill, /PROMOTE <target-slug>/);
++	assert.doesNotMatch(captureSkill, /^gbrain-capture </m);
++	assert.doesNotMatch(reviewSkill, /^gbrain-review </m);
++	assert.match(captureMetadata, /display_name: "\(OmO\) gbrain-capture"/);
++	assert.match(reviewMetadata, /display_name: "\(OmO\) gbrain-review"/);
++});
+diff --git a/packages/omo-codex/plugin/test/sync-skills-test-support.mjs b/packages/omo-codex/plugin/test/sync-skills-test-support.mjs
+index 14f76191f..2a202c499 100644
+--- a/packages/omo-codex/plugin/test/sync-skills-test-support.mjs
++++ b/packages/omo-codex/plugin/test/sync-skills-test-support.mjs
+@@ -10,6 +10,8 @@ export const expectedSkills = [
+ 	"comment-checker",
+ 	"debugging",
+ 	"frontend",
++	"gbrain-capture",
++	"gbrain-review",
+ 	"git-master",
+ 	"init-deep",
+ 	"lcx-contribute-bug-fix",
+@@ -126,6 +128,24 @@ prefixes when identity is needed.
+ `;
+ const reviewWorkCodexGatePattern = new RegExp(reviewWorkCodexGate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+ 
++const gbrainCaptureCodexCompatibility = `## Codex GBrain Compatibility
++
++In Codex, invoke the GBrain capture CLI through the shell as \`gbrain capture\` or \`gbrain capture retry\`. Do not rewrite it to \`gbrain-capture ...\` unless that standalone binary is explicitly present in the active environment.
++
++When direct MCP access is required, use the active Codex MCP tool surface only for a configured GBrain server/tool that is visible in the current tools list; otherwise prefer the \`gbrain capture\` CLI. Keep GBrain service identifiers as placeholders such as \`<server>\` and never write real URLs, IPs, tokens, or secrets into Codex rules, skills, notes, or drafts.
++
++`;
++
++const gbrainReviewCodexCompatibility = `## Codex GBrain Compatibility
++
++In Codex, invoke the GBrain review CLI through the shell as \`gbrain review\`. Do not rewrite it to \`gbrain-review ...\` unless that standalone binary is explicitly present in the active environment.
++
++Promotion remains a human gate: \`gbrain review promote ... --confirm "PROMOTE <target-slug>"\` requires the user to provide the exact \`PROMOTE <target-slug>\` phrase. Agents must not invent or auto-submit that confirmation.
++
++When direct MCP access is required, use the active Codex MCP tool surface only for a configured GBrain server/tool that is visible in the current tools list; otherwise prefer the \`gbrain review\` CLI. Keep GBrain service identifiers as placeholders such as \`<server>\` and never write real URLs, IPs, tokens, or secrets into Codex rules, skills, notes, or drafts.
++
++`;
++
+ export function removeCodexSkillOverlays(skillName, content) {
+ 	if (skillName === "start-work") {
+ 		return content
+@@ -135,6 +155,24 @@ export function removeCodexSkillOverlays(skillName, content) {
+ 	if (skillName === "review-work") {
+ 		return content.replace(reviewWorkCodexGatePattern, "");
+ 	}
++	if (skillName === "gbrain-capture") {
++		return content.replace(gbrainCaptureCodexCompatibility, "");
++	}
++	if (skillName === "gbrain-review") {
++		const standaloneBinarySection = [
++			"独立 bin 也可用：",
++			"",
++			"```bash",
++			"gbrain-review <list|show|plan|reject|needs-evidence|keep|promote|merge|verify|repair|cleanup>",
++			"```",
++			"",
++			"## 审核流程",
++		].join("\n");
++		return content.replace(gbrainReviewCodexCompatibility, "").replace(
++			"\n## 审核流程",
++			standaloneBinarySection,
++		);
++	}
+ 	return content;
+ }
+ 
+diff --git a/packages/omo-codex/src/install/codex-config-permissions.test.ts b/packages/omo-codex/src/install/codex-config-permissions.test.ts
+index 7cd2acd03..a2792d51a 100644
+--- a/packages/omo-codex/src/install/codex-config-permissions.test.ts
++++ b/packages/omo-codex/src/install/codex-config-permissions.test.ts
+@@ -7,7 +7,8 @@ import { tmpdir } from "node:os"
+ import { join } from "node:path"
+ import { updateCodexConfig } from "./codex-config-toml"
+ 
+-const posixTest = process.platform === "win32" ? test.skip : test
++const canSimulateUnreadableFile = process.platform !== "win32" && !(typeof process.getuid === "function" && process.getuid() === 0)
++const posixTest = canSimulateUnreadableFile ? test : test.skip
+ 
+ posixTest("#given unreadable existing config #when updating config #then rejects and preserves content", async () => {
+   // given
+diff --git a/packages/shared-skills/AGENTS.md b/packages/shared-skills/AGENTS.md
+index aecdb0fa7..86e1d484e 100644
+--- a/packages/shared-skills/AGENTS.md
++++ b/packages/shared-skills/AGENTS.md
+@@ -6,9 +6,9 @@
+ 
+ Hand-authored, cross-harness skill bundle shared between the OpenCode and Codex editions. Mostly authored skill data, with skill-owned scripts/assets when required and no transform inside the package. `index.mjs` exports `sharedSkillsRootPath()` returning the absolute path to `skills/`. Package: `@oh-my-opencode/shared-skills` (`files`: `index.mjs`, `index.d.ts`, `skills`).
+ 
+-## SKILLS (16 under `skills/<name>/`)
++## SKILLS (18 under `skills/<name>/`)
+ 
+-`programming`, `debugging`, `frontend`, `visual-qa`, `ast-grep`, `coding-agent-sessions`, `git-master`, `refactor`, `review-work`, `start-work`, `ulw-plan`, `ulw-research`, `init-deep`, `remove-ai-slops`, `lsp-setup`, `ultimate-browsing`.
++`programming`, `debugging`, `frontend`, `visual-qa`, `ast-grep`, `coding-agent-sessions`, `git-master`, `refactor`, `review-work`, `start-work`, `ulw-plan`, `ulw-research`, `init-deep`, `remove-ai-slops`, `lsp-setup`, `ultimate-browsing`, `gbrain-capture`, `gbrain-review`.
+ 
+ The Codex-only `lcx-report-bug`, `lcx-contribute-bug-fix`, and `lcx-doctor` skills live under `packages/omo-codex/plugin/components/lcx/skills/`; they are no longer authored in this package.
+ 
+diff --git a/packages/shared-skills/skills/gbrain-capture/SKILL.md b/packages/shared-skills/skills/gbrain-capture/SKILL.md
+new file mode 100644
+index 000000000..0c1f6462e
+--- /dev/null
++++ b/packages/shared-skills/skills/gbrain-capture/SKILL.md
+@@ -0,0 +1,97 @@
++---
++name: gbrain-capture
++description: "Capture durable GBrain candidates into inbox drafts. Use when a task produces reusable success knowledge, a verified wrong-answer incident, durable user/project rules, project facts, decisions, milestones, or when the user asks to record something; never store raw transcripts or secrets."
++---
++
++# gbrain-capture
++
++把当前任务的结论提炼成 GBrain `inbox/` 草稿。它只负责 capture，不负责审核、promote 或批准通用经验。
++
++## 触发规则
++
++### MUST：必须考虑 capture
++
++- 用户给出长期规则或偏好，例如“以后”“后续”“永远”“必须”“不要”“默认”“remember”“always”“must”“never”。
++- 做出明确架构、流程、配置、部署、工具选择决策。
++- 已确认 root cause，且 fix 已经真实验证。
++- 某个方案被硬证据证明无效，构成错题集。
++- 完成项目里程碑或项目关闭。
++- 用户明确要求“这条有价值，记录下来”。
++- 出错、验证失败、方案无效后，下一轮尝试前必须先查询相关 incident/错题集。
++
++### SHOULD：应考虑 capture
++
++- 首次打通一个可复用流程。
++- 形成可复用 runbook。
++- 发现环境、机器、网络、部署、数据集事实。
++- 成功替代旧方案的新正确路径。
++- 避免重大风险的决策。
++
++### NEVER：不得 capture
++
++- 闲聊、无证据猜测、一次性过程噪音。
++- raw transcript、raw tool output、密集日志、原始 JSON、认证响应。
++- password、API key、token、私钥、认证文件。
++- 真实人名、员工号、个人账号名。
++- 未匿名化的非 loopback IP、hostname、机器别名。
++
++## 写入边界
++
++- 所有新沉淀先进入 `inbox/<slug>`。
++- 新草稿必须是 `status: draft`、`verification: unverified`。
++- `type` 只是建议：成功案例可建议 `knowledge`、`runbook`、`decision`、`project`；错题集默认建议 `incident`。
++- 只写提炼后的结论和证据指针，不写完整聊天记录或完整工具输出。
++- GBrain 服务地址只写占位符 `<server>`；不要把真实 URL、IP、token、secret 写入 AGENTS、skill 或草稿正文。
++
++## 推荐工作流
++
++1. 判断是否命中 MUST/SHOULD/NEVER。
++2. 用双路查询确认不是重复主题：
++   - 可复用成功经验：`knowledge/`、`runbooks/`、相关 `decisions/`、`projects/`。
++   - 禁止重犯事项：相关 `incidents/`、失败错题、已验证无效方案。
++3. 选择模板：
++   - 成功案例参考 `/mnt/disk2t/l30002999/gbrain-knowledge/source/templates/success-case.md`。
++   - 失败错题参考 `/mnt/disk2t/l30002999/gbrain-knowledge/source/templates/wrong-answer.md`。
++4. 需要直接通过 MCP 写页面时，先加载 `gbrain-knowledge-writer`，执行 search-before-create，再用 MCP `put_page`。
++5. 优先使用已实现的结构化 CLI 写 `inbox/` 草稿：
++
++```bash
++gbrain capture --title "<标题>" --summary "<场景-做法-结果-结论-下次规则>" --evidence "<证据指针>" --type <knowledge|runbook|decision|project|incident|environment>
++```
++
++离线或 writer 凭证不可用时，只允许结构化候选进入本地队列：
++
++```bash
++gbrain capture retry
++```
++
++## 内容结构
++
++成功案例使用：
++
++```markdown
++## 场景
++## 正确做法
++## 结果
++## 结论
++## 下次规则
++```
++
++失败错题使用：
++
++```markdown
++# 不要再用 <错误方案> 解决 <问题>
++
++## 场景
++## 错误做法
++## 失败结果
++## 结论
++## 下次规则
++```
++
++## 完成前自检
++
++- `source_refs` 只有证据指针，没有 raw log。
++- 没有 secret、token、私钥、真实个人信息、未匿名化内网地址。
++- 没有自动 promote 指令；草稿仍在 `inbox/`。
++- 输出记录写入结果和 slug，方便后续 `gbrain-review` 人工审核。
+diff --git a/packages/shared-skills/skills/gbrain-review/SKILL.md b/packages/shared-skills/skills/gbrain-review/SKILL.md
+new file mode 100644
+index 000000000..1f2f7842f
+--- /dev/null
++++ b/packages/shared-skills/skills/gbrain-review/SKILL.md
+@@ -0,0 +1,85 @@
++---
++name: gbrain-review
++description: "Review GBrain inbox drafts with human gates. Use when promoting, keeping, merging, rejecting, verifying, repairing, or cleaning up inbox drafts; promotion to knowledge or general runbooks requires explicit human review and exact `PROMOTE <target-slug>` confirmation."
++---
++
++# gbrain-review
++
++审核 GBrain `inbox/` 草稿并决定去向。它是人工审核门，不是自动升级器。
++
++## 何时使用
++
++- 用户要求审核、整理、升级、拒绝、合并 GBrain 草稿。
++- `gbrain-capture` 写入了 `inbox/`，需要决定是否保留为项目事实、决策、incident、runbook、environment，或升级为通用经验。
++- 项目里程碑、项目关闭、root cause 修复完成后，需要把候选经验放入人工审核流程。
++- 需要验证某个 target slug 是否已经可检索。
++- 部分失败后需要 `repair` 或 `cleanup`。
++
++## 核心原则
++
++- 默认从 `inbox/` 开始：未审核草稿不能当作已确认知识使用。
++- `list`、`show`、`plan`、`verify` 是只读操作。
++- `reject`、`needs-evidence`、`keep`、`promote`、`merge`、`repair`、`cleanup` 是写操作。
++- `promote` 到 `knowledge/` 或通用 `runbooks/` 必须逐条人工确认。
++- 确认短语必须精确为 `PROMOTE <target-slug>`；不能用回车、模糊同意或 agent 自行确认代替。
++- 审核必须展示 source slug、target slug、目标 type、verification、适用/不适用条件、门禁结果和风险。
++- 不得绕过 search-before-create；发现重复主题时使用 `merge` 或更新已有页。
++- 若 target 写入后检索验证失败，不得删除原 `inbox/`。
++- 若审核记录写入失败，不得删除原 `inbox/`；按提示使用 `repair`。
++
++## CLI 命令面
++
++```bash
++gbrain review list [--limit 50] [--type incident] [--status draft] [--verification unverified]
++gbrain review show inbox/<slug>
++gbrain review plan inbox/<slug> --action <keep|promote|merge|reject|needs-evidence|repair|cleanup> --target <target-slug> --type <target-type>
++gbrain review verify <target-slug>
++gbrain review reject inbox/<slug> --reason "<原因>"
++gbrain review needs-evidence inbox/<slug> --reason "<缺少什么证据>"
++gbrain review keep inbox/<slug> --target <projects|decisions|incidents|runbooks|environments>/<slug> --type <project|decision|incident|runbook|environment>
++gbrain review promote inbox/<slug> --target <knowledge|runbooks>/<slug> --type <knowledge|runbook> --confirm "PROMOTE <target-slug>"
++gbrain review merge inbox/<slug> --target <existing-slug> --type <target-type> --confirm "MERGE <existing-slug>"
++gbrain review repair inbox/<slug>
++gbrain review cleanup inbox/<slug>
++```
++
++独立 bin 也可用：
++
++```bash
++gbrain-review <list|show|plan|reject|needs-evidence|keep|promote|merge|verify|repair|cleanup>
++```
++
++## 审核流程
++
++1. `gbrain review list` 找到待审核草稿。
++2. `gbrain review show inbox/<slug>` 查看建议类型、验证状态和风险。
++3. `gbrain review plan ...` 先生成计划；检查 evidence、重复页、secret/raw transcript、目标路径和 verification 门禁。
++4. 对项目内事实或决策，用 `keep` 进入 `projects/`、`decisions/`、`incidents/`、`runbooks/` 或 `environments/`。
++5. 对跨项目通用经验，用 `promote`，并要求人类输入 `PROMOTE <target-slug>`。
++6. 对重复主题，用 `merge` 合入已有页面。
++7. 对证据不足，用 `needs-evidence`；不要删除草稿。
++8. 对无价值或违规内容，用 `reject --reason`。
++9. 写入后确认输出包含 target slug、review slug、receipts，并用 `verify` 或输出里的 retrieval result 确认可检索。
++
++## 人工门禁
++
++promote 前必须向用户展示：
++
++- `source_slug: inbox/...`
++- `target_slug: knowledge/...` 或 `runbooks/...`
++- `target_type`
++- `verification`
++- `applicability` / `non_applicable`
++- 重复页检查结果
++- secret/raw transcript 检查结果
++- 将进入通用经验的风险说明
++
++只有用户明确提供 `PROMOTE <target-slug>` 后，才允许执行 promote。agent 不得自动补这个确认短语。
++
++## 禁止事项
++
++- 不自动 promote。
++- 不把 `inbox/` 草稿当成默认查询结果。
++- 不保存 raw transcript、raw tool output、密集日志或认证响应。
++- 不写真实 GBrain URL、IP、token 或 secret；只使用 `<server>` 这类占位符。
++- 不在检索验证失败、审核记录失败或重复目标未处理时删除 `inbox/`。
