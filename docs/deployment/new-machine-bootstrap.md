@@ -3,11 +3,25 @@
 ## 1. 准备源码与数据库
 
 ```bash
-git clone <GBRAIN_REPOSITORY> /opt/gbrain
+git clone --branch gbrain-review-ui --single-branch \
+  https://github.com/lchany/GBrain-self-evolution.git /opt/gbrain
 cd /opt/gbrain
 bun install --frozen-lockfile
 bun run build:admin-embedded
+bun run build
+sudo install -m 0755 bin/gbrain /usr/local/bin/gbrain
 ```
+
+不要从 `garrytan/gbrain` 部署此服务。部署前确认：
+
+```bash
+git remote get-url origin
+git branch --show-current
+/usr/local/bin/gbrain serve --help | grep allow-anonymous-mcp
+```
+
+预期仓库为 `lchany/GBrain-self-evolution`，分支为 `gbrain-review-ui`，
+并且帮助中包含 `--allow-anonymous-mcp`。
 
 准备 PostgreSQL/pgvector，按本项目现有 `gbrain init` 文档初始化数据库，
 并执行 `gbrain doctor`。不要把 `DATABASE_URL` 写入本仓库。
@@ -20,6 +34,7 @@ sudo install -m 0644 deploy/systemd/gbrain-serve-http.service.example \
   /etc/systemd/system/gbrain-serve-http.service
 sudo install -m 0600 deploy/env/gbrain-serve.env.example \
   /etc/gbrain/gbrain-serve.env
+sudo rm -f /etc/systemd/system/gbrain-serve-http.service.d/20-http-basic.conf
 sudo systemctl daemon-reload
 ```
 
@@ -36,8 +51,12 @@ sudo systemctl daemon-reload
 
 ```bash
 sudo systemctl enable --now gbrain-serve-http.service
-deploy/scripts/verify-server.sh
+sudo deploy/scripts/verify-server.sh
 ```
+
+如果已有旧的脏源码目录，先保留它，再把目标分支 clone 到独立目录；不要
+在脏工作树上直接 build。`bootstrap-server.sh --apply` 会拒绝错误仓库、错误
+分支和脏工作树，并在目标 checkout 内重新构建和安装二进制。
 
 ## 3. 云防火墙和 TLS 要求
 

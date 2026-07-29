@@ -3,13 +3,18 @@ set -euo pipefail
 
 APPLY=0
 PREFIX=/opt/gbrain
+REPOSITORY=https://github.com/lchany/GBrain-self-evolution.git
+BRANCH=gbrain-review-ui
+BINARY=/usr/local/bin/gbrain
 usage() {
   cat <<'USAGE'
 Usage: bootstrap-server.sh [--apply] [--prefix PATH]
 
-Default is dry-run. --apply creates the documented runtime directories and
-installs the checked-in HTTP service/env templates; it never creates secrets.
-The cloud firewall and TLS proxy remain operator-managed prerequisites.
+The script must be run from a clean checkout of the pinned repository and
+branch. Default is dry-run. --apply builds the admin assets and CLI binary,
+installs the binary and checked-in HTTP service/env templates, and removes the
+known stale HTTP drop-in. It never creates secrets. The cloud firewall and TLS
+proxy remain operator-managed prerequisites.
 USAGE
 }
 
@@ -24,14 +29,48 @@ while [[ $# -gt 0 ]]; do
 done
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+[[ -d "${ROOT}/.git" ]] || {
+  printf 'source checkout is required: %s\n' "${ROOT}" >&2
+  exit 1
+}
+REMOTE_URL="$(git -C "${ROOT}" remote get-url origin 2>/dev/null || true)"
+case "${REMOTE_URL}" in
+  "${REPOSITORY}"|git@github.com:lchany/GBrain-self-evolution.git) ;;
+  *)
+    printf 'wrong source repository: %s\nexpected: %s\n' "${REMOTE_URL}" "${REPOSITORY}" >&2
+    exit 1
+    ;;
+esac
+CURRENT_BRANCH="$(git -C "${ROOT}" branch --show-current)"
+[[ "${CURRENT_BRANCH}" == "${BRANCH}" ]] || {
+  printf 'wrong source branch: %s\nexpected: %s\n' "${CURRENT_BRANCH}" "${BRANCH}" >&2
+  exit 1
+}
+[[ -z "$(git -C "${ROOT}" status --porcelain)" ]] || {
+  printf 'source checkout is dirty: %s\n' "${ROOT}" >&2
+  exit 1
+}
 if [[ "${APPLY}" == 0 ]]; then
+  printf 'DRY-RUN: source=%s branch=%s\n' "${REPOSITORY}" "${BRANCH}"
+  printf 'DRY-RUN: bun install --frozen-lockfile; bun run build:admin-embedded; bun run build\n'
+  printf 'DRY-RUN: install %s/bin/gbrain %s\n' "${ROOT}" "${BINARY}"
   printf 'DRY-RUN: mkdir -p %s /opt/gbrain-knowledge/source /etc/gbrain\n' "${PREFIX}"
-  printf 'DRY-RUN: install service and env templates; chmod env 0600; systemctl daemon-reload\n'
+  printf 'DRY-RUN: install service and env templates; remove stale 20-http-basic.conf; systemctl daemon-reload\n'
   exit 0
 fi
 
+cd "${ROOT}"
+bun install --frozen-lockfile
+bun run build:admin-embedded
+bun run build
+install -m 0755 "${ROOT}/bin/gbrain" "${BINARY}"
 install -d -m 0755 "${PREFIX}" /opt/gbrain-knowledge/source /etc/gbrain
 install -m 0644 "${ROOT}/deploy/systemd/gbrain-serve-http.service.example" /etc/systemd/system/gbrain-serve-http.service
-install -m 0600 "${ROOT}/deploy/env/gbrain-serve.env.example" /etc/gbrain/gbrain-serve.env
+if [[ ! -e /etc/gbrain/gbrain-serve.env ]]; then
+  install -m 0600 "${ROOT}/deploy/env/gbrain-serve.env.example" /etc/gbrain/gbrain-serve.env
+else
+  printf 'Preserving existing /etc/gbrain/gbrain-serve.env\n'
+fi
+rm -f /etc/systemd/system/gbrain-serve-http.service.d/20-http-basic.conf
 systemctl daemon-reload
-printf 'Installed templates. Fill placeholders in /etc/gbrain/gbrain-serve.env, then verify the TLS proxy and cloud firewall before starting.\n'
+printf 'Installed %s from %s@%s. Fill placeholders in /etc/gbrain/gbrain-serve.env, then verify the TLS proxy and cloud firewall before starting.\n' "${BINARY}" "${REPOSITORY}" "${BRANCH}"

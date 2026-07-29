@@ -4,8 +4,11 @@ These are the checked-in, non-secret assets for the current cloud deployment sha
 
 - `systemd/gbrain-serve-http.service.example` runs the HTTP MCP and admin review service.
 - `env/gbrain-serve.env.example` documents Basic Auth, admin origin, bind, and the anonymous MCP switch.
-- `scripts/bootstrap-server.sh` installs templates, dry-run by default.
-- `scripts/verify-server.sh` performs read-only health/readiness checks.
+- `scripts/bootstrap-server.sh` requires the pinned `gbrain-review-ui` checkout,
+  rebuilds the admin assets and CLI binary, installs the service templates, and
+  removes the known stale HTTP drop-in; dry-run is the default.
+- `scripts/verify-server.sh` performs read-only health/readiness checks,
+  including an anonymous MCP initialize request.
 - `scripts/install-client-assets.sh` installs rules and skills only; it never handles credentials.
 
 The service listener must stay behind the cloud firewall allowlist and a TLS
