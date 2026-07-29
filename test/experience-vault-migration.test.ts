@@ -12,6 +12,7 @@ import {
   planLegacyReconciliation,
   redactLegacyText,
   sanitizeLegacyPath,
+  selectLegacyPagesForWrite,
   selectPermanentMigrationReport,
   validateLegacyPageReadBack,
   type ExistingLegacyPage,
@@ -339,6 +340,37 @@ describe('Experience Vault migration mapping', () => {
       legacySlug('projects/stale.md'),
       legacySlug('runbooks/old-name.md'),
     ].sort());
+  });
+
+  test('rewrites an exact source-hash match when its derived page is not strict-compliant', () => {
+    const source = record();
+    const built = buildLegacyPage(source, {
+      archiveCommit: ARCHIVE_COMMIT,
+      importedPathToSlug: new Map(),
+    });
+    const strictReadBack = readBackFor(built);
+    const legacyReadBack = {
+      ...strictReadBack,
+      frontmatter: {
+        ...(strictReadBack.frontmatter as Record<string, unknown>),
+        source_refs: ['<legacy-corpus>/knowledge/safe-retry.md'],
+        migrated_from: source.relativePath,
+        non_applicable: ['daily-legacy-vault-flow'],
+      },
+    };
+
+    expect(selectLegacyPagesForWrite({
+      records: [source],
+      pages: [built],
+      plannedWritePaths: new Set(),
+      existingReadBackBySlug: new Map([[built.slug, strictReadBack]]),
+    })).toEqual([]);
+    expect(selectLegacyPagesForWrite({
+      records: [source],
+      pages: [built],
+      plannedWritePaths: new Set(),
+      existingReadBackBySlug: new Map([[built.slug, legacyReadBack]]),
+    })).toEqual([built]);
   });
 
   test('loads only the four core families plus nested share candidates', () => {
