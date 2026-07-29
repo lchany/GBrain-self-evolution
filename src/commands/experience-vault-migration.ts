@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, type Dirent } from 'node:fs';
 import { posix } from 'node:path';
 import matter from 'gray-matter';
+import { scrubPii } from '../core/eval-capture-scrub.ts';
 
 export type LegacyRecordType =
   | 'project'
@@ -92,7 +93,21 @@ export function redactLegacyText(input: string): RedactionResult {
 
   text = replaceCounted(
     text,
-    /```(?:log|console|output|text)\s*\n[\s\S]*?```/gi,
+    /^(?:\s*(?:export\s+)?[A-Z_][A-Z0-9_]{1,}=).+$/gm,
+    '[REDACTED_ENV_ASSIGNMENT]',
+    'environment_assignment',
+    counts,
+  );
+  text = replaceCounted(
+    text,
+    /\b(?:export\s+)?[A-Z_][A-Z0-9_]{1,}=[^\s`]+/g,
+    '[REDACTED_ENV_ASSIGNMENT]',
+    'environment_assignment',
+    counts,
+  );
+  text = replaceCounted(
+    text,
+    /```(?:log|console|output)\s*\n[\s\S]*?```/gi,
     '[REDACTED_RAW_LOG_BLOCK]',
     'raw_log_block',
     counts,
@@ -120,7 +135,35 @@ export function redactLegacyText(input: string): RedactionResult {
   );
   text = replaceCounted(
     text,
-    /(?<![\w.])(?!(?:127|0)\.)(?!(?:10|192\.168)\.)(?!172\.(?:1[6-9]|2\d|3[01])\.)(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?/g,
+    /\b(?:sk-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{8,}|github_pat_[A-Za-z0-9_]+|xox[A-Za-z0-9_-]+|gbrain_[A-Za-z0-9_-]{8,})\b/gi,
+    '[REDACTED_CREDENTIAL]',
+    'credential',
+    counts,
+  );
+  text = replaceCounted(
+    text,
+    /\bprj_[a-f0-9]{8,}\b/gi,
+    '[REDACTED_OPAQUE_IDENTIFIER]',
+    'opaque_identifier',
+    counts,
+  );
+  text = replaceCounted(
+    text,
+    /(?:^|\n)\s*(?:HTTP\/\d(?:\.\d)?\s+\d{3}|(?:access_token|refresh_token|id_token|client_secret|authorization)\s*[:=]).*$/gim,
+    '\n[REDACTED_RAW_AUTH_RESPONSE]',
+    'raw_auth_response',
+    counts,
+  );
+  text = replaceCounted(
+    text,
+    /(?<![\w.])(?!127\.)(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?/g,
+    '[REDACTED_NETWORK_ADDRESS]',
+    'network_address',
+    counts,
+  );
+  text = replaceCounted(
+    text,
+    /(?<![\w:])(?!(?:::1)\b)(?:[A-Fa-f0-9]{1,4}:){2,7}[A-Fa-f0-9]{0,4}(?![\w:])/g,
     '[REDACTED_NETWORK_ADDRESS]',
     'network_address',
     counts,
@@ -132,6 +175,23 @@ export function redactLegacyText(input: string): RedactionResult {
     'absolute_path',
     counts,
   );
+  text = replaceCounted(
+    text,
+    /\b(?:raw transcript|full transcript|raw tool output|full tool output)\b|^\s*(?:Assistant|User|System|Tool|assistant_message|user_message|system_message|tool_result)\s*:.*$/gim,
+    '[REDACTED_RAW_TRANSCRIPT_MARKER]',
+    'raw_transcript_marker',
+    counts,
+  );
+  text = replaceCounted(
+    text,
+    /^(?:\s*(?:\[[^\]\n]{1,40}\]|\d{4}-\d{2}-\d{2}[T ][^\n]{0,40}|(?:INFO|WARN|ERROR|DEBUG|TRACE)\b|(?:stdout|stderr)>|\+\s|\$\s).{20,}|\s*(?:at\s+\S+\s+\(|File "[^"]+", line \d+|Traceback \(most recent call last\)|Caused by:|Error: ).{10,})$/gim,
+    '[REDACTED_LOG_LINE]',
+    'raw_log_line',
+    counts,
+  );
+  const piiScrubbed = scrubPii(text);
+  if (piiScrubbed !== text) increment(counts, 'personal_identifier', 1);
+  text = piiScrubbed;
 
   return { text, counts };
 }
@@ -145,7 +205,8 @@ export function sanitizeLegacyPath(relativePath: string): string {
     ? family
     : 'legacy-artifacts';
   const extension = normalized.toLowerCase().endsWith('.md') ? '.md' : '';
-  return `${safeFamily}/redacted-${extension ? 'record.md' : 'artifact'}`;
+  const fingerprint = sha256(normalized).slice(0, 16);
+  return `${safeFamily}/redacted-${extension ? `record-${fingerprint}.md` : `artifact-${fingerprint}`}`;
 }
 
 export function legacySlug(relativePath: string): string {
@@ -237,6 +298,7 @@ export function buildLegacyPage(
   options: {
     readonly archiveCommit: string;
     readonly importedPathToSlug: ReadonlyMap<string, string>;
+    readonly slug?: string;
   },
 ): BuiltLegacyPage {
   const references = convertReferences(
@@ -246,8 +308,13 @@ export function buildLegacyPage(
     options.importedPathToSlug,
   );
   const redacted = redactLegacyText(references.text);
+  const redactedTitle = redactLegacyText(record.title);
+  const redactions: Record<string, number> = { ...redacted.counts };
+  for (const [category, count] of Object.entries(redactedTitle.counts)) {
+    increment(redactions, category, count);
+  }
   const body = [
-    `# ${redactLegacyText(record.title).text}`,
+    `# ${redactedTitle.text}`,
     '',
     redacted.text.trim(),
     '',
@@ -256,14 +323,14 @@ export function buildLegacyPage(
   ].join('\n');
 
   return {
-    slug: legacySlug(record.relativePath),
+    slug: options.slug ?? legacySlug(record.relativePath),
     markdown: matter.stringify(body, migratedFrontmatter(record, options.archiveCommit)),
     rawSha256: record.rawSha256,
     references: {
       resolved: references.resolved,
       unresolved: references.unresolved,
     },
-    redactions: redacted.counts,
+    redactions,
   };
 }
 
@@ -272,8 +339,13 @@ export function buildPendingDraft(
   archiveCommit: string,
 ): BuiltLegacyPage {
   const redacted = redactLegacyText(record.content);
+  const redactedTitle = redactLegacyText(record.title);
+  const redactions: Record<string, number> = { ...redacted.counts };
+  for (const [category, count] of Object.entries(redactedTitle.counts)) {
+    increment(redactions, category, count);
+  }
   const body = [
-    `# ${redactLegacyText(record.title).text}`,
+    `# ${redactedTitle.text}`,
     '',
     redacted.text.trim(),
     '',
@@ -296,7 +368,7 @@ export function buildPendingDraft(
     markdown,
     rawSha256: record.rawSha256,
     references: { resolved: 0, unresolved: 0 },
-    redactions: redacted.counts,
+    redactions,
   };
 }
 
@@ -304,23 +376,34 @@ export function planLegacyReconciliation(
   current: readonly LegacyRecord[],
   existing: readonly ExistingLegacyPage[],
 ): LegacyReconciliationPlan {
-  const existingBySlug = new Map(existing.map((page) => [page.slug, page]));
-  const currentSlugs = new Set(current.map((record) => legacySlug(record.relativePath)));
+  const claimedExistingSlugs = new Set<string>();
   const reuse: ExistingLegacyPage[] = [];
   const write: LegacyRecord[] = [];
 
   for (const record of current) {
-    const expectedSlug = legacySlug(record.relativePath);
-    const page = existingBySlug.get(expectedSlug);
+    const page = matchExistingLegacyPage(record, existing);
+    if (page) claimedExistingSlugs.add(page.slug);
     if (page?.rawSha256 === record.rawSha256) reuse.push(page);
     else write.push(record);
   }
 
   const deleteAfterVerifiedWrites = existing
-    .filter((page) => !currentSlugs.has(page.slug))
+    .filter((page) => !claimedExistingSlugs.has(page.slug))
     .map((page) => page.slug);
 
   return { reuse, write, deleteAfterVerifiedWrites };
+}
+
+export function matchExistingLegacyPage(
+  record: LegacyRecord,
+  existing: readonly ExistingLegacyPage[],
+): ExistingLegacyPage | undefined {
+  const expectedSlug = legacySlug(record.relativePath);
+  const sanitizedPath = sanitizeLegacyPath(record.relativePath);
+  return existing.find((candidate) => {
+    return candidate.migratedFrom === record.relativePath
+      || candidate.migratedFrom === sanitizedPath;
+  }) ?? existing.find((candidate) => candidate.slug === expectedSlug);
 }
 
 function walkMarkdown(root: string, relativeDirectory: string): string[] {
@@ -374,9 +457,47 @@ function normalizeType(value: unknown, relativePath: string): LegacyRecordType {
   throw new Error(`legacy record has no valid type: ${sanitizeLegacyPath(relativePath)}`);
 }
 
+function unquoteLegacyScalar(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    try {
+      return JSON.parse(trimmed) as string;
+    } catch {
+      return trimmed.slice(1, -1);
+    }
+  }
+  if (trimmed.startsWith("'") && trimmed.endsWith("'")) {
+    return trimmed.slice(1, -1).replaceAll("''", "'");
+  }
+  return trimmed;
+}
+
+function parseLegacyRecord(raw: string): {
+  readonly data: Record<string, string>;
+  readonly content: string;
+} {
+  if (!raw.startsWith('---\n') && !raw.startsWith('---\r\n')) {
+    return { data: {}, content: raw };
+  }
+  const closing = /\r?\n---\r?\n/g;
+  closing.lastIndex = raw.startsWith('---\r\n') ? 5 : 4;
+  const match = closing.exec(raw);
+  if (!match) return { data: {}, content: raw };
+  const header = raw.slice(raw.indexOf('\n') + 1, match.index);
+  const data: Record<string, string> = {};
+  for (const key of ['type', 'date', 'title']) {
+    const field = header.match(new RegExp(`^${key}:\\s*(.*?)\\s*$`, 'm'))?.[1];
+    if (field !== undefined && !(key in data)) data[key] = unquoteLegacyScalar(field);
+  }
+  return {
+    data,
+    content: raw.slice(match.index + match[0].length),
+  };
+}
+
 function loadRecord(root: string, relativePath: string): LegacyRecord {
   const raw = readFileSync(posix.join(root, relativePath), 'utf8');
-  const parsed = matter(raw);
+  const parsed = parseLegacyRecord(raw);
   const title = typeof parsed.data.title === 'string' && parsed.data.title.trim()
     ? parsed.data.title.trim()
     : posix.basename(relativePath).replace(/\.md$/i, '');

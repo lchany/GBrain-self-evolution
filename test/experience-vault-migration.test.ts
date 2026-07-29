@@ -72,6 +72,36 @@ describe('Experience Vault migration mapping', () => {
     });
   });
 
+  test('redacts server-forbidden PII, environment assignments, and transcript markers', () => {
+    const input = [
+      'Contact operator@example.test before retrying.',
+      'GBRAIN_EXAMPLE_TOKEN=example-value',
+      'Run `SAFE_FLAG=1 command`.',
+      'HTTP/1.1 401 Unauthorized',
+      'Raw tool output follows.',
+      'User: pasted operational output',
+      'token shape sk-example12345678',
+      'project identity prj_deadbeef1234',
+    ].join('\n');
+
+    const result = redactLegacyText(input);
+
+    expect(result.text).not.toContain('operator@example.test');
+    expect(result.text).not.toContain('GBRAIN_EXAMPLE_TOKEN=example-value');
+    expect(result.text).not.toMatch(/raw tool output/i);
+    expect(result.text).not.toContain('User: pasted');
+    expect(result.text).not.toContain('sk-example12345678');
+    expect(result.text).not.toContain('prj_deadbeef1234');
+    expect(result.counts.personal_identifier).toBe(1);
+    expect(result.text).not.toContain('SAFE_FLAG=1');
+    expect(result.text).not.toContain('HTTP/1.1 401');
+    expect(result.counts.environment_assignment).toBe(2);
+    expect(result.counts.raw_auth_response).toBe(1);
+    expect(result.counts.raw_transcript_marker).toBe(2);
+    expect(result.counts.credential).toBe(1);
+    expect(result.counts.opaque_identifier).toBe(1);
+  });
+
   test('sanitizes provenance and converts exact imported references only', () => {
     const target = 'runbooks/retry-safely.md';
     const targetSlug = legacySlug(target);
@@ -91,11 +121,11 @@ describe('Experience Vault migration mapping', () => {
 
     expect(parsed.content).toContain(`[[${targetSlug}]]`);
     expect(parsed.content).toContain(
-      `legacy-archive:${ARCHIVE_COMMIT}:reference-config/redacted-artifact`,
+      `legacy-archive:${ARCHIVE_COMMIT}:${sanitizeLegacyPath('reference-config/private-client.sh')}`,
     );
-    expect(parsed.data.migrated_from).toBe('knowledge/redacted-record.md');
+    expect(parsed.data.migrated_from).toBe(sanitizeLegacyPath('knowledge/safe-retry.md'));
     expect(parsed.data.source_refs).toEqual([
-      `legacy-archive:${ARCHIVE_COMMIT}:knowledge/redacted-record.md`,
+      `legacy-archive:${ARCHIVE_COMMIT}:${sanitizeLegacyPath('knowledge/safe-retry.md')}`,
     ]);
     expect(page.references).toEqual({ resolved: 1, unresolved: 1 });
   });
@@ -119,7 +149,7 @@ describe('Experience Vault migration mapping', () => {
       verification: 'unverified',
       applicability: ['legacy-migration'],
       non_applicable: [],
-      migrated_from: 'knowledge/redacted-record.md',
+      migrated_from: sanitizeLegacyPath('knowledge/safe-retry.md'),
     });
     expect(pending.data).toMatchObject({
       type: 'runbook',
@@ -159,7 +189,7 @@ describe('Experience Vault migration mapping', () => {
     ];
     const existing: ExistingLegacyPage[] = [
       {
-        slug: legacySlug('knowledge/safe-retry.md'),
+        slug: 'legacy-migration/historical-safe-retry-1111111111',
         migratedFrom: sanitizeLegacyPath('knowledge/safe-retry.md'),
         rawSha256: 'a'.repeat(64),
       },
@@ -183,7 +213,7 @@ describe('Experience Vault migration mapping', () => {
     const plan = planLegacyReconciliation(current, existing);
 
     expect(plan.reuse.map((item) => item.slug)).toEqual([
-      legacySlug('knowledge/safe-retry.md'),
+      'legacy-migration/historical-safe-retry-1111111111',
     ]);
     expect(plan.write.map((item) => item.relativePath)).toEqual([
       'incidents/changed.md',
@@ -221,6 +251,37 @@ describe('Experience Vault migration mapping', () => {
       expect(inventory.pending.map((item) => item.relativePath)).toEqual([
         'share-candidates/project-safe/knowledge/pending.md',
       ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('loads legacy frontmatter with duplicate non-essential keys', () => {
+    const root = mkdtempSync(join(tmpdir(), 'legacy-duplicate-frontmatter-'));
+    try {
+      mkdirSync(join(root, 'knowledge'), { recursive: true });
+      writeFileSync(join(root, 'knowledge', 'duplicate.md'), [
+        '---',
+        'type: knowledge',
+        'date: 2026-07-29',
+        'title: "Duplicate legacy metadata"',
+        'source_incidents: []',
+        'source_incidents: [incidents/example.md]',
+        '---',
+        '',
+        'The durable body must still migrate.',
+        '',
+      ].join('\n'));
+
+      const inventory = loadLegacyInventory(root);
+
+      expect(inventory.core).toHaveLength(1);
+      expect(inventory.core[0]).toMatchObject({
+        type: 'knowledge',
+        date: '2026-07-29',
+        title: 'Duplicate legacy metadata',
+        content: '\nThe durable body must still migrate.\n',
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
