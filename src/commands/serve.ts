@@ -75,8 +75,10 @@ export async function runServe(
   opts: ServeOptions = {},
 ) {
   // v0.26+: --http dispatches to the full OAuth 2.1 server (serve-http.ts)
-  // with admin dashboard, scope enforcement, SSE feed, and the requireBearerAuth
-  // middleware. Master's simpler startHttpTransport from v0.22.7 is superseded
+  // with admin dashboard, scope enforcement, SSE feed, and bearer auth.
+  // --allow-anonymous-mcp is an explicit cloud-firewall deployment mode that
+  // grants only read+write MCP access; admin operations remain protected.
+  // Master's simpler startHttpTransport from v0.22.7 is superseded
   // — the OAuth provider in serve-http.ts handles bearer auth via
   // verifyAccessToken with legacy access_tokens fallback (so v0.22.7 callers
   // that used `gbrain auth create` keep working unchanged).
@@ -126,9 +128,10 @@ export async function runServe(
     // TTY (never into container log storage). --print-admin-token forces the
     // raw value even on a non-TTY start.
     const printAdminToken = args.includes('--print-admin-token');
+    const allowAnonymousMcp = args.includes('--allow-anonymous-mcp');
 
     const { runServeHttp } = await import('./serve-http.ts');
-    await runServeHttp(engine, { port, tokenTtl, enableDcr, enableDcrInsecure, publicUrl, logFullParams, bind, suppressBootstrapToken, printAdminToken });
+    await runServeHttp(engine, { port, tokenTtl, enableDcr, enableDcrInsecure, publicUrl, logFullParams, bind, suppressBootstrapToken, printAdminToken, allowAnonymousMcp });
     return;
   }
 

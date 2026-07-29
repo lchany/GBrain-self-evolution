@@ -2295,7 +2295,7 @@ SETUP
   upgrade                            Self-update
   check-update [--json]              Check for new versions
   doctor [--json] [--fast]            Health check (resolver, skills, pgvector, RLS, embeddings)
-  install-client [--json]             Install GBrain client rules, skills, env files, and probes
+  install-client [--json]             Install GBrain client rules and skills only
   integrations [subcommand]          Manage integration recipes (senses + reflexes)
 
 PAGES
@@ -2430,6 +2430,7 @@ ADMIN
     --token-ttl N                    Access token TTL in seconds (default: 3600)
     --enable-dcr                     Enable Dynamic Client Registration (DCR clients default to authorization_code)
     --enable-dcr-insecure            Also allow the consent-bypassing client_credentials grant on DCR (implies --enable-dcr)
+    --allow-anonymous-mcp             Allow cloud-firewall allowlisted MCP clients read+write access without credentials
     --public-url URL                 Public issuer URL (required behind proxy/tunnel)
   connect <mcp-url> --token <t>      Wire Claude Code to a remote gbrain (bearer token)
         [--install] [--json]         Print the paste-ready command, or --install to run it

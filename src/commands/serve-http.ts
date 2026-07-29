@@ -4,7 +4,7 @@
  * Combines:
  * - MCP SDK's mcpAuthRouter (OAuth endpoints: /authorize, /token, /register, /revoke)
  * - Custom client_credentials handler (SDK doesn't support CC grant)
- * - MCP tool calls at /mcp with bearer auth + scope enforcement
+ * - MCP tool calls at /mcp with bearer auth or firewall-allowlisted anonymous read/write + scope enforcement
  * - Admin dashboard at /admin with cookie auth
  * - SSE live activity feed at /admin/events
  * - Health check at /health
@@ -67,6 +67,12 @@ import {
  * 3s leaves 2s of headroom for TCP, response framing, and clock skew.
  */
 export const HEALTH_TIMEOUT_MS = 3000;
+
+export function selectMcpOperations(allowAnonymousMcp: boolean): typeof operations {
+  return operations.filter(op =>
+    !op.localOnly && (!allowAnonymousMcp || op.scope === 'read' || op.scope === 'write'),
+  );
+}
 
 /**
  * v0.36.1.x #1024: bootstrap token resolution.
@@ -295,6 +301,7 @@ interface ServeHttpOptions {
   port: number;
   tokenTtl: number;
   enableDcr: boolean;
+  allowAnonymousMcp?: boolean;
   /**
    * #1353: allow the consent-bypassing client_credentials grant on the DCR path.
    * Off by default; DCR clients default to authorization_code. Implies enableDcr.
@@ -446,6 +453,7 @@ export function skillPublishStatus(publishSkills: boolean): { bannerValue: strin
 
 export async function runServeHttp(engine: BrainEngine, options: ServeHttpOptions) {
   const { port, tokenTtl, enableDcr, enableDcrInsecure, publicUrl, logFullParams } = options;
+  const allowAnonymousMcp = options.allowAnonymousMcp === true;
   // v0.34.1 (#864, D11): default bind flipped from 0.0.0.0 to 127.0.0.1.
   // gbrain's primary use case is a personal-knowledge brain on a laptop;
   // the pre-v0.34 default exposed brains on every interface. Server
@@ -459,6 +467,12 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   if (logFullParams) {
     console.error(
       '[serve-http] WARNING: --log-full-params writes raw request payloads to mcp_request_log + SSE feed. Disable for shared dashboards or production.',
+    );
+  }
+
+  if (allowAnonymousMcp) {
+    console.error(
+      '[serve-http] WARNING: anonymous MCP read/write is enabled. Restrict the listener with the cloud firewall; admin operations still require admin authentication.',
     );
   }
 
@@ -1694,7 +1708,18 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // ---------------------------------------------------------------------------
   // MCP tool calls (bearer auth + scope enforcement)
   // ---------------------------------------------------------------------------
-  const mcpOperations = operations.filter(op => !op.localOnly);
+  const mcpOperations = selectMcpOperations(allowAnonymousMcp);
+  const anonymousMcpAuthInfo: AuthInfo = {
+    token: '',
+    clientId: 'cloud-firewall-allowlist',
+    clientName: 'cloud-firewall-allowlist',
+    scopes: ['read', 'write'],
+    sourceId: 'default',
+  };
+  const allowAnonymousMcpRequest: express.RequestHandler = (req, _res, next) => {
+    req.auth = anonymousMcpAuthInfo;
+    next();
+  };
 
   // v0.36.x #1076: MCP Streamable HTTP spec — GET /mcp opens an optional SSE
   // backchannel for server-initiated messages. gbrain's transport is stateless
@@ -1711,7 +1736,9 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
 
   app.post(
     '/mcp',
-    requireBearerAuth({ verifier: oauthProvider, resourceMetadataUrl }),
+    allowAnonymousMcp
+      ? allowAnonymousMcpRequest
+      : requireBearerAuth({ verifier: oauthProvider, resourceMetadataUrl }),
     (req: Request, res: Response, next: NextFunction) => {
       const tokenResource = req.auth?.resource;
       if (!tokenResource) {
