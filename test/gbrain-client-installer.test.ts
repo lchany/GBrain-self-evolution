@@ -26,8 +26,15 @@ describe('gbrain install-client', () => {
       expect(existsSync(join(root, 'xdg', 'gbrain'))).toBe(false);
       expect(readFileSync(join(root, 'xdg', 'opencode', 'AGENTS.md'), 'utf8')).toContain('GBRAIN_CLIENT_RULES_START');
       expect(readFileSync(join(root, 'codex', 'AGENTS.md'), 'utf8')).toContain('GBRAIN_CLIENT_RULES_START');
-      expect(readFileSync(join(root, 'xdg', 'opencode', 'skills', 'gbrain-capture', 'SKILL.md'), 'utf8')).toContain('gbrain capture');
-      expect(readFileSync(join(root, 'codex', 'skills', 'gbrain-review', 'SKILL.md'), 'utf8')).toContain('PROMOTE <target-slug>');
+      const captureSkill = readFileSync(join(root, 'xdg', 'opencode', 'skills', 'gbrain-capture', 'SKILL.md'), 'utf8');
+      const reviewSkill = readFileSync(join(root, 'codex', 'skills', 'gbrain-review', 'SKILL.md'), 'utf8');
+      expect(captureSkill).toContain('put_page');
+      expect(captureSkill).toContain('inbox/');
+      expect(captureSkill).not.toContain('gbrain capture');
+      expect(reviewSkill).toContain('list_pages');
+      expect(reviewSkill).toContain('authenticated admin review');
+      expect(reviewSkill).not.toContain('gbrain review');
+      expect(reviewSkill).not.toContain('PROMOTE <target-slug>');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
