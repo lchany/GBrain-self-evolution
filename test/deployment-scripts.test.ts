@@ -3,6 +3,11 @@ import { describe, expect, test } from 'bun:test';
 
 const bootstrapScript = await readFile('deploy/scripts/bootstrap-server.sh', 'utf8');
 const verifyScript = await readFile('deploy/scripts/verify-server.sh', 'utf8');
+const runServerScript = await readFile('deploy/scripts/run-server.sh', 'utf8');
+const serviceUnit = await readFile(
+  'deploy/systemd/gbrain-serve-http.service.example',
+  'utf8',
+);
 
 describe('deployment scripts', () => {
   test('pins the published repository and builds the installed binary', () => {
@@ -24,5 +29,11 @@ describe('deployment scripts', () => {
     expect(verifyScript).toContain('mcp="$(curl');
     expect(verifyScript).toContain('initialize');
     expect(verifyScript).toContain('Missing Authorization');
+  });
+
+  test('only advertises a public issuer when HTTPS is configured', () => {
+    expect(runServerScript).toContain('== https://*');
+    expect(runServerScript).toContain('--allow-anonymous-mcp');
+    expect(serviceUnit).toContain('deploy/scripts/run-server.sh');
   });
 });

@@ -50,6 +50,8 @@ sudo systemctl daemon-reload
 服务模板显式启用 `--allow-anonymous-mcp`。这表示云防火墙已完成源地址
 白名单后，白名单客户端可以直接调用 read/write MCP；admin scope 不会被
 匿名请求获得。不要在未配置云防火墙和 TLS 终止前把服务绑定到公网接口。
+启动包装脚本只会在 `GBRAIN_PUBLIC_URL` 使用 HTTPS 时传递 `--public-url`；
+HTTP 直连部署会省略 OAuth public issuer，但匿名 MCP 仍可使用。
 
 ```bash
 sudo systemctl enable --now gbrain-serve-http.service
