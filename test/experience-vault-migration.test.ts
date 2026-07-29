@@ -34,6 +34,18 @@ function record(overrides: Partial<LegacyRecord> = {}): LegacyRecord {
   };
 }
 
+function readBackFor(page: BuiltLegacyPage): Record<string, unknown> {
+  const parsed = matter(page.markdown);
+  const { type, ...frontmatter } = parsed.data;
+  return {
+    slug: page.slug,
+    type,
+    compiled_truth: parsed.content,
+    frontmatter,
+    deleted_at: null,
+  };
+}
+
 describe('Experience Vault migration mapping', () => {
   test('derives a stable strict slug from the source path', () => {
     const first = legacySlug('projects/customer-acme-employee-12345.md');
@@ -181,23 +193,28 @@ describe('Experience Vault migration mapping', () => {
       importedPathToSlug: new Map(),
     });
     const expected = matter(built.markdown);
+    const { type, ...frontmatter } = expected.data;
     const readBack = {
       slug: built.slug,
-      type: expected.data.type,
+      type,
       compiled_truth: expected.content,
-      frontmatter: expected.data,
+      frontmatter,
       deleted_at: null,
     };
 
     expect(validateLegacyPageReadBack(built, readBack)).toBeNull();
     expect(validateLegacyPageReadBack(built, {
       ...readBack,
-      frontmatter: { ...expected.data, status: 'draft' },
+      frontmatter: { ...frontmatter, status: 'draft' },
     })).toMatch(/status/);
     expect(validateLegacyPageReadBack(built, {
       ...readBack,
-      frontmatter: { ...expected.data, source_refs: ['legacy-archive:wrong'] },
+      frontmatter: { ...frontmatter, source_refs: ['legacy-archive:wrong'] },
     })).toMatch(/source_refs/);
+    expect(validateLegacyPageReadBack(built, {
+      ...readBack,
+      type: 'incident',
+    })).toMatch(/type/);
   });
 
   test('reuses a valid permanent report instead of overwriting first-run statistics', () => {
@@ -235,11 +252,12 @@ describe('Experience Vault migration mapping', () => {
       rawSha256: '2'.repeat(64),
     };
     const parsed = matter(firstRun.markdown);
+    const { type, ...frontmatter } = parsed.data;
     const existingReadBack = {
       slug: firstRun.slug,
-      type: parsed.data.type,
+      type,
       compiled_truth: parsed.content,
-      frontmatter: parsed.data,
+      frontmatter,
       deleted_at: null,
     };
 
@@ -385,10 +403,7 @@ describe('Experience Vault migration mapping', () => {
       if (name === 'get_page') {
         if (args.include_deleted) return { slug: args.slug, deleted_at: '2026-07-29T00:00:00Z' };
         const page = bySlug.get(String(args.slug));
-        return {
-          slug: args.slug,
-          compiled_truth: `<!-- legacy-vault-sha256:${page?.rawSha256} -->`,
-        };
+        return page ? readBackFor(page) : { slug: args.slug };
       }
       if (name === 'delete_page') return { ok: true };
       throw new Error(`unexpected tool: ${name}`);
@@ -447,10 +462,7 @@ describe('Experience Vault migration mapping', () => {
       if (name === 'get_page') {
         reads += 1;
         if (reads === 1) throw new Error('page_not_found');
-        return {
-          slug: args.slug,
-          compiled_truth: `legacy-vault-sha256:${page.rawSha256}`,
-        };
+        return readBackFor(page);
       }
       throw new Error(`unexpected tool: ${name}`);
     };

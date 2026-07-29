@@ -13,6 +13,8 @@ import {
   loadLegacyInventory,
   matchExistingLegacyPage,
   planLegacyReconciliation,
+  selectPermanentMigrationReport,
+  validateLegacyPageReadBack,
   type BuiltLegacyPage,
   type ExistingLegacyPage,
   type MigrationToolCaller,
@@ -136,6 +138,23 @@ async function loadExistingManagedPages(
   return managed;
 }
 
+async function loadPageIfExists(
+  slug: string,
+  callTool: MigrationToolCaller,
+): Promise<unknown | undefined> {
+  const result = await callTool('list_pages', {
+    include_prefixes: [slug],
+    limit: 10,
+    offset: 0,
+    sort: 'slug',
+  });
+  if (!isRecord(result) || !Array.isArray(result.items)) {
+    throw new Error('list_pages returned an unexpected result');
+  }
+  const exact = result.items.find((item) => isRecord(item) && item.slug === slug);
+  return exact ? callTool('get_page', { slug }) : undefined;
+}
+
 function mergeCounts(
   target: Record<string, number>,
   source: Readonly<Record<string, number>>,
@@ -209,12 +228,9 @@ async function verifyFinalSet(
 ): Promise<void> {
   for (const [index, expected] of pages.entries()) {
     const page = await callTool('get_page', { slug: expected.slug });
-    if (
-      !isRecord(page)
-      || page.slug !== expected.slug
-      || !pageText(page).includes(`legacy-vault-sha256:${expected.rawSha256}`)
-    ) {
-      throw new Error(`final verification failed for ${expected.slug}`);
+    const mismatch = validateLegacyPageReadBack(expected, page);
+    if (mismatch !== null) {
+      throw new Error(`final verification failed for ${expected.slug}: ${mismatch}`);
     }
     if ((index + 1) % 25 === 0) console.error(`[migration] verified ${index + 1}/${pages.length}`);
   }
@@ -279,6 +295,16 @@ async function main(): Promise<void> {
     const pendingPages = inventory.pending.map((record) => {
       return buildPendingDraft(record, options.archiveCommit);
     });
+    const pendingWritePages: BuiltLegacyPage[] = [];
+    for (const page of pendingPages) {
+      const existingPending = await loadPageIfExists(page.slug, callTool);
+      if (
+        existingPending === undefined
+        || validateLegacyPageReadBack(page, existingPending) !== null
+      ) {
+        pendingWritePages.push(page);
+      }
+    }
     const redactions: Record<string, number> = {};
     let resolvedReferences = 0;
     let unresolvedReferences = 0;
@@ -313,6 +339,12 @@ async function main(): Promise<void> {
       strictSchema: true,
     });
     if (!validation.ok) throw new Error(`report validation failed: ${validation.message}`);
+    const existingReport = await loadPageIfExists(reportPage.slug, callTool);
+    const permanentReport = selectPermanentMigrationReport({
+      generated: reportPage,
+      archiveCommit: options.archiveCommit,
+      existingReadBack: existingReport,
+    });
 
     const summary = {
       mode: options.apply ? 'apply' : 'dry-run',
@@ -323,7 +355,7 @@ async function main(): Promise<void> {
       managed_existing_pages: existing.length,
       exact_reuse: plan.reuse.length,
       writes_or_updates: writePages.length,
-      pending_writes: pendingPages.length,
+      pending_writes: pendingWritePages.length,
       stale_soft_deletes: plan.deleteAfterVerifiedWrites.length,
       redactions,
       references: { resolved: resolvedReferences, unresolved: unresolvedReferences },
@@ -332,14 +364,27 @@ async function main(): Promise<void> {
     console.log(JSON.stringify(summary, null, 2));
     if (!options.apply) return;
 
-    const pagesToWrite = [...writePages, ...pendingPages, reportPage];
+    const pagesToWrite = [
+      ...writePages,
+      ...pendingWritePages,
+      ...(permanentReport.pageToWrite ? [permanentReport.pageToWrite] : []),
+    ];
     const applied = await applyLegacyPages({
       pages: pagesToWrite,
       staleSlugs: plan.deleteAfterVerifiedWrites,
       callTool,
       sampleSize: options.sampleSize,
     });
-    await verifyFinalSet([...allCorePages, ...pendingPages, reportPage], callTool);
+    await verifyFinalSet([...allCorePages, ...pendingPages], callTool);
+    const finalReportReadBack = await callTool('get_page', { slug: reportPage.slug });
+    const finalPermanentReport = selectPermanentMigrationReport({
+      generated: reportPage,
+      archiveCommit: options.archiveCommit,
+      existingReadBack: finalReportReadBack,
+    });
+    if (finalPermanentReport.expectedRawSha256 !== permanentReport.expectedRawSha256) {
+      throw new Error('permanent migration report identity changed during apply');
+    }
     const retrieval = await callTool('search', {
       query: 'Migration identity',
       include_prefixes: ['legacy-migration/'],

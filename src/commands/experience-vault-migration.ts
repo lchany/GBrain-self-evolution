@@ -530,6 +530,108 @@ function pageText(result: unknown): string {
   return parts.join('\n');
 }
 
+function sameField(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+export function validateLegacyPageReadBack(
+  expected: BuiltLegacyPage,
+  readBack: unknown,
+): string | null {
+  if (typeof readBack !== 'object' || readBack === null) {
+    return 'read-back result is not an object';
+  }
+  const actual = readBack as Record<string, unknown>;
+  if (actual.slug !== expected.slug) return 'slug does not match';
+  if (actual.deleted_at !== undefined && actual.deleted_at !== null) {
+    return 'deleted_at is still set';
+  }
+  if (!pageText(actual).includes(`${HASH_MARKER}:${expected.rawSha256}`)) {
+    return 'legacy-vault-sha256 does not match';
+  }
+
+  const expectedFrontmatter = matter(expected.markdown).data as Record<string, unknown>;
+  const actualFrontmatter = typeof actual.frontmatter === 'object'
+    && actual.frontmatter !== null
+    ? actual.frontmatter as Record<string, unknown>
+    : null;
+  if (!actualFrontmatter) return 'frontmatter is missing';
+
+  for (const field of [
+    'status',
+    'sensitivity',
+    'verification',
+    'applicability',
+    'non_applicable',
+    'source_refs',
+    'migrated_from',
+  ]) {
+    if (!sameField(actualFrontmatter[field], expectedFrontmatter[field])) {
+      return `${field} does not match`;
+    }
+  }
+  if (actual.type !== expectedFrontmatter.type) {
+    return 'top-level type does not match';
+  }
+  return null;
+}
+
+export function selectPermanentMigrationReport(input: {
+  readonly generated: BuiltLegacyPage;
+  readonly archiveCommit: string;
+  readonly existingReadBack?: unknown;
+}): {
+  readonly pageToWrite: BuiltLegacyPage | null;
+  readonly expectedRawSha256: string;
+} {
+  if (input.existingReadBack === undefined) {
+    return {
+      pageToWrite: input.generated,
+      expectedRawSha256: input.generated.rawSha256,
+    };
+  }
+  if (typeof input.existingReadBack !== 'object' || input.existingReadBack === null) {
+    throw new Error('permanent migration report read-back is not an object');
+  }
+  const actual = input.existingReadBack as Record<string, unknown>;
+  if (actual.slug !== input.generated.slug) {
+    throw new Error('permanent migration report slug does not match');
+  }
+  if (actual.deleted_at !== undefined && actual.deleted_at !== null) {
+    throw new Error('permanent migration report is soft-deleted');
+  }
+  const frontmatter = typeof actual.frontmatter === 'object' && actual.frontmatter !== null
+    ? actual.frontmatter as Record<string, unknown>
+    : null;
+  const requiredFrontmatter: Record<string, unknown> = {
+    status: 'draft',
+    sensitivity: 'internal',
+    verification: 'unverified',
+    applicability: ['migration-cutover-report'],
+    non_applicable: [],
+    source_refs: [`legacy-archive:${input.archiveCommit}:migration-summary`],
+    migrated_from: null,
+  };
+  if (!frontmatter) throw new Error('permanent migration report frontmatter is missing');
+  if (actual.type !== 'project') {
+    throw new Error('permanent migration report type does not match');
+  }
+  for (const [field, expected] of Object.entries(requiredFrontmatter)) {
+    if (!sameField(frontmatter[field], expected)) {
+      throw new Error(`permanent migration report ${field} does not match`);
+    }
+  }
+  const text = pageText(actual);
+  if (!text.includes(`Archive commit: \`${input.archiveCommit}\``)) {
+    throw new Error('permanent migration report archive commit does not match');
+  }
+  const existingHash = text.match(new RegExp(`${HASH_MARKER}:([a-f0-9]{64})`))?.[1];
+  if (!existingHash) {
+    throw new Error('permanent migration report identity hash is missing');
+  }
+  return { pageToWrite: null, expectedRawSha256: existingHash };
+}
+
 async function writeAndVerifyPage(
   page: BuiltLegacyPage,
   callTool: MigrationToolCaller,
@@ -551,16 +653,9 @@ async function writeAndVerifyPage(
   for (let attempt = 1; attempt <= 8; attempt += 1) {
     try {
       const readBack = await callTool('get_page', { slug: page.slug });
-      const slug = typeof readBack === 'object' && readBack !== null
-        ? (readBack as Record<string, unknown>).slug
-        : undefined;
-      if (
-        slug === page.slug
-        && pageText(readBack).includes(`${HASH_MARKER}:${page.rawSha256}`)
-      ) {
-        return;
-      }
-      lastError = new Error('read-back content did not match');
+      const mismatch = validateLegacyPageReadBack(page, readBack);
+      if (mismatch === null) return;
+      lastError = new Error(mismatch);
     } catch (error) {
       lastError = error;
     }
