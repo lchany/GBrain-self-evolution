@@ -1,0 +1,31 @@
+# Install the env file as root-owned mode 0600 before enabling this unit.
+# Put TLS termination and the cloud firewall allowlist in front of this listener.
+
+[Unit]
+Description=GBrain HTTP MCP and admin review service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gbrain
+Group=gbrain
+WorkingDirectory=/opt/gbrain
+EnvironmentFile=/etc/gbrain/gbrain-serve.env
+ExecStart=/usr/local/bin/gbrain serve --http --port ${GBRAIN_HTTP_PORT} --bind ${GBRAIN_HTTP_BIND} --public-url ${GBRAIN_PUBLIC_URL} --allow-anonymous-mcp --suppress-bootstrap-token
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/gbrain /opt/gbrain-knowledge /var/lib/gbrain /run/gbrain
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gbrain-serve-http
+
+[Install]
+WantedBy=multi-user.target
