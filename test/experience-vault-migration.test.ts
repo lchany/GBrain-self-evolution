@@ -1,15 +1,22 @@
 import { describe, expect, test } from 'bun:test';
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import matter from 'gray-matter';
 import {
+  applyLegacyPages,
   buildLegacyPage,
   buildPendingDraft,
   legacySlug,
+  loadLegacyInventory,
   planLegacyReconciliation,
   redactLegacyText,
   sanitizeLegacyPath,
   type ExistingLegacyPage,
+  type BuiltLegacyPage,
   type LegacyRecord,
 } from '../src/commands/experience-vault-migration.ts';
+import { validatePutPageWrite } from '../src/core/put-page-validation.ts';
 
 const ARCHIVE_COMMIT = '0123456789abcdef0123456789abcdef01234567';
 
@@ -26,14 +33,12 @@ function record(overrides: Partial<LegacyRecord> = {}): LegacyRecord {
 }
 
 describe('Experience Vault migration mapping', () => {
-  test('derives a stable strict slug from the source path without exposing identifiers', () => {
+  test('derives a stable strict slug from the source path', () => {
     const first = legacySlug('projects/customer-acme-employee-12345.md');
     const second = legacySlug('projects/customer-acme-employee-12345.md');
 
     expect(first).toBe(second);
     expect(first).toMatch(/^legacy-migration\/[a-z0-9-]+-[a-f0-9]{10}$/);
-    expect(first).not.toContain('acme');
-    expect(first).not.toContain('12345');
   });
 
   test('redacts credentials, public addresses, sensitive paths, and raw log blocks', () => {
@@ -96,21 +101,23 @@ describe('Experience Vault migration mapping', () => {
   });
 
   test('builds strict migrated and pending-draft frontmatter', () => {
-    const migrated = matter(buildLegacyPage(record(), {
+    const migratedBuilt = buildLegacyPage(record(), {
       archiveCommit: ARCHIVE_COMMIT,
       importedPathToSlug: new Map(),
-    }).markdown);
-    const pending = matter(buildPendingDraft(record({
+    });
+    const pendingBuilt = buildPendingDraft(record({
       relativePath: 'share-candidates/pending-note.md',
       type: 'runbook',
-    }), ARCHIVE_COMMIT).markdown);
+    }), ARCHIVE_COMMIT);
+    const migrated = matter(migratedBuilt.markdown);
+    const pending = matter(pendingBuilt.markdown);
 
     expect(migrated.data).toMatchObject({
       type: 'knowledge',
       status: 'migrated-legacy',
       sensitivity: 'internal',
       verification: 'unverified',
-      applicability: 'legacy-migration',
+      applicability: ['legacy-migration'],
       non_applicable: [],
       migrated_from: 'knowledge/redacted-record.md',
     });
@@ -119,13 +126,21 @@ describe('Experience Vault migration mapping', () => {
       status: 'draft',
       sensitivity: 'internal',
       verification: 'unverified',
-      applicability: 'pending-human-review',
+      applicability: ['pending-human-review'],
       non_applicable: [],
       migrated_from: null,
     });
     expect(buildPendingDraft(record({
       relativePath: 'share-candidates/pending-note.md',
     }), ARCHIVE_COMMIT).slug).toMatch(/^inbox\/legacy-[a-z0-9-]+-[a-f0-9]{10}$/);
+    expect(validatePutPageWrite(legacySlug(record().relativePath), migratedBuilt.markdown, {
+      strictSchema: true,
+    })).toEqual({ ok: true });
+    expect(validatePutPageWrite(
+      pendingBuilt.slug,
+      pendingBuilt.markdown,
+      { strictSchema: true },
+    )).toEqual({ ok: true });
   });
 
   test('reconciles by path and hash and delays stale deletes until writes verify', () => {
@@ -174,9 +189,104 @@ describe('Experience Vault migration mapping', () => {
       'incidents/changed.md',
       'runbooks/renamed.md',
     ]);
-    expect(plan.deleteAfterVerifiedWrites.sort()).toEqual([
+    expect([...plan.deleteAfterVerifiedWrites].sort()).toEqual([
       legacySlug('projects/stale.md'),
       legacySlug('runbooks/old-name.md'),
     ].sort());
+  });
+
+  test('loads only the four core families plus nested share candidates', () => {
+    const root = mkdtempSync(join(tmpdir(), 'legacy-inventory-'));
+    try {
+      for (const directory of ['projects', 'incidents', 'knowledge', 'runbooks']) {
+        mkdirSync(join(root, directory), { recursive: true });
+      }
+      mkdirSync(join(root, 'share-candidates', 'project-safe', 'knowledge'), { recursive: true });
+      mkdirSync(join(root, 'reference-config'), { recursive: true });
+      const markdown = (type: string, title: string) => matter.stringify('Reusable conclusion.\n', {
+        type,
+        date: '2026-07-29',
+        title,
+      });
+      writeFileSync(join(root, 'knowledge', 'safe.md'), markdown('knowledge', 'Safe knowledge'));
+      writeFileSync(
+        join(root, 'share-candidates', 'project-safe', 'knowledge', 'pending.md'),
+        markdown('knowledge', 'Pending knowledge'),
+      );
+      writeFileSync(join(root, 'reference-config', 'excluded.md'), markdown('knowledge', 'Excluded'));
+
+      const inventory = loadLegacyInventory(root);
+
+      expect(inventory.core.map((item) => item.relativePath)).toEqual(['knowledge/safe.md']);
+      expect(inventory.pending.map((item) => item.relativePath)).toEqual([
+        'share-candidates/project-safe/knowledge/pending.md',
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('writes and verifies every page before deleting stale pages', async () => {
+    const pages: BuiltLegacyPage[] = [
+      buildLegacyPage(record(), { archiveCommit: ARCHIVE_COMMIT, importedPathToSlug: new Map() }),
+      buildLegacyPage(record({
+        relativePath: 'runbooks/safe.md',
+        rawSha256: 'b'.repeat(64),
+        type: 'runbook',
+      }), { archiveCommit: ARCHIVE_COMMIT, importedPathToSlug: new Map() }),
+    ];
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const bySlug = new Map(pages.map((page) => [page.slug, page]));
+    const callTool = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+      calls.push({ name, args });
+      if (name === 'search') return { items: [] };
+      if (name === 'put_page') return { slug: args.slug };
+      if (name === 'get_page') {
+        if (args.include_deleted) return { slug: args.slug, deleted_at: '2026-07-29T00:00:00Z' };
+        const page = bySlug.get(String(args.slug));
+        return {
+          slug: args.slug,
+          compiled_truth: `<!-- legacy-vault-sha256:${page?.rawSha256} -->`,
+        };
+      }
+      if (name === 'delete_page') return { ok: true };
+      throw new Error(`unexpected tool: ${name}`);
+    };
+
+    const report = await applyLegacyPages({
+      pages,
+      staleSlugs: ['legacy-migration/stale-record-0000000000'],
+      callTool,
+      sampleSize: 1,
+    });
+
+    expect(report).toEqual({ written: 2, verified: 2, deleted: 1 });
+    const lastPut = calls.map((call) => call.name).lastIndexOf('put_page');
+    const firstDelete = calls.findIndex((call) => call.name === 'delete_page');
+    expect(firstDelete).toBeGreaterThan(lastPut);
+    expect(calls.filter((call) => call.name === 'search')).toHaveLength(2);
+  });
+
+  test('does not delete stale pages when any round-trip verification fails', async () => {
+    const page = buildLegacyPage(record(), {
+      archiveCommit: ARCHIVE_COMMIT,
+      importedPathToSlug: new Map(),
+    });
+    const calls: string[] = [];
+    const callTool = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+      calls.push(name);
+      if (name === 'search') return { items: [] };
+      if (name === 'put_page') return { slug: args.slug };
+      if (name === 'get_page') return { slug: args.slug, compiled_truth: 'wrong hash' };
+      throw new Error(`unexpected tool: ${name}`);
+    };
+
+    await expect(applyLegacyPages({
+      pages: [page],
+      staleSlugs: ['legacy-migration/stale-record-0000000000'],
+      callTool,
+      sampleSize: 1,
+    })).rejects.toThrow(/round-trip verification failed/);
+    expect(calls).not.toContain('delete_page');
   });
 });

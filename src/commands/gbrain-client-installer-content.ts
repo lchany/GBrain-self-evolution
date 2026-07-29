@@ -5,9 +5,9 @@ export const GBRAIN_CLIENT_RULES = `${GBRAIN_RULES_BLOCK_START}
 # GBrain client rules
 
 - Before non-trivial work, query GBrain for reusable knowledge/runbooks and known incidents; classify results as directly applicable, partially applicable, or not applicable.
-- Use \`gbrain capture --title ... --type ... --summary ... --evidence ...\` for durable findings. Automatic or semi-automatic capture writes only \`inbox/\` drafts.
+- For durable findings, search first and use the connected GBrain MCP \`put_page\` operation to create an \`inbox/\` draft.
 - Never write raw transcripts, dense logs, bearer tokens, client secrets, passwords, private keys, personal identifiers, or unredacted non-loopback IPs to GBrain.
-- Use \`gbrain review\` for human review. Promotion to \`knowledge/\` or general \`runbooks/\` requires the exact confirmation phrase \`PROMOTE <target-slug>\`.
+- Inspect drafts with the connected GBrain MCP \`list_pages\` and \`get_page\` operations. Promotion is performed only through the authenticated admin review interface.
 - Do not add lifecycle hooks for GBrain capture or review. The workflow is explicit command/skill driven.
 - Client network access is controlled by the cloud firewall allowlist; this installer does not create or distribute credentials.
 
@@ -22,7 +22,8 @@ description: Capture verified durable findings into GBrain inbox drafts. Use aft
 
 # GBrain Capture
 
-Use \`gbrain capture --title <title> --type <knowledge|runbook|incident|decision|project|environment|agent-skill> --summary <summary> --evidence <pointer>\`.
+Use the connected GBrain MCP operations. Search before creating a draft, then call
+\`put_page\` with an \`inbox/<slug>\` slug and complete draft frontmatter.
 
 Rules:
 
@@ -30,7 +31,7 @@ Rules:
 - Capture only distilled conclusions plus evidence pointers.
 - Capture writes \`inbox/\` drafts only; do not target final \`knowledge/\`, \`runbooks/\`, or \`incidents/\` paths.
 - Do not capture raw transcripts, dense logs, secrets, private keys, credentials, personal identifiers, or unredacted non-loopback IPs.
-- If the allowlisted MCP service is unavailable, keep the offline queue receipt and retry with \`gbrain capture retry\` after network access is restored.
+- Do not install a local GBrain CLI, create a local queue, or request client credentials as a fallback.
 `;
 
 export const GBRAIN_REVIEW_SKILL = `---
@@ -40,13 +41,14 @@ description: Review GBrain inbox drafts and promote, keep, merge, repair, or rej
 
 # GBrain Review
 
-Use \`gbrain review list\`, \`gbrain review show <inbox/slug>\`, \`gbrain review plan ...\`, and \`gbrain review promote ...\`.
+Use the connected GBrain MCP \`list_pages\` and \`get_page\` operations to inspect
+\`inbox/\` drafts. Promotion happens only in the authenticated admin review interface.
 
 Rules:
 
 - Review starts from \`inbox/\` drafts.
 - Do not promote automatically.
-- Promotion to \`knowledge/\` or general \`runbooks/\` requires the exact confirmation phrase \`PROMOTE <target-slug>\` from the human operator.
+- Anonymous MCP clients do not promote drafts.
 - Reject or mark needs-evidence with a reason.
 - Keep evidence pointers, not raw logs or secrets.
 `;
