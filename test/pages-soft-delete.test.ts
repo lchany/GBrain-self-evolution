@@ -104,6 +104,24 @@ describe('restorePage', () => {
     await seedPage(engine, 'people/dave');
     expect(await engine.restorePage('people/dave')).toBe(false);
   });
+
+  test('putPage reactivates a soft-deleted slug while updating its content', async () => {
+    await seedPage(engine, 'people/reimported');
+    await engine.softDeletePage('people/reimported');
+
+    await engine.putPage('people/reimported', {
+      type: 'note' as any,
+      title: 'Reimported',
+      compiled_truth: 'Fresh content from a legitimate re-import',
+      timeline: '',
+      frontmatter: {},
+    });
+
+    const page = await engine.getPage('people/reimported');
+    expect(page).not.toBeNull();
+    expect(page!.deleted_at).toBeFalsy();
+    expect(page!.compiled_truth).toBe('Fresh content from a legitimate re-import');
+  });
 });
 
 describe('purgeDeletedPages (TTL boundary)', () => {
