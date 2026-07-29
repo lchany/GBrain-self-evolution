@@ -9,7 +9,7 @@ export const GBRAIN_CLIENT_RULES = `${GBRAIN_RULES_BLOCK_START}
 - Never write raw transcripts, dense logs, bearer tokens, client secrets, passwords, private keys, personal identifiers, or unredacted non-loopback IPs to GBrain.
 - Use \`gbrain review\` for human review. Promotion to \`knowledge/\` or general \`runbooks/\` requires the exact confirmation phrase \`PROMOTE <target-slug>\`.
 - Do not add lifecycle hooks for GBrain capture or review. The workflow is explicit command/skill driven.
-- Local credentials live only in \`~/.config/gbrain/local-read.env\` and \`~/.config/gbrain/local-writer.env\` with mode 600. Do not copy their values into config, prompts, logs, or evidence.
+- Client network access is controlled by the cloud firewall allowlist; this installer does not create or distribute credentials.
 
 Suggested skills: \`gbrain-capture\`, \`gbrain-review\`.
 ${GBRAIN_RULES_BLOCK_END}
@@ -30,7 +30,7 @@ Rules:
 - Capture only distilled conclusions plus evidence pointers.
 - Capture writes \`inbox/\` drafts only; do not target final \`knowledge/\`, \`runbooks/\`, or \`incidents/\` paths.
 - Do not capture raw transcripts, dense logs, secrets, private keys, credentials, personal identifiers, or unredacted non-loopback IPs.
-- If writer credentials are unavailable, keep the offline queue receipt and retry with \`gbrain capture retry\` after credentials are restored.
+- If the allowlisted MCP service is unavailable, keep the offline queue receipt and retry with \`gbrain capture retry\` after network access is restored.
 `;
 
 export const GBRAIN_REVIEW_SKILL = `---
