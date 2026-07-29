@@ -6,6 +6,15 @@ PREFIX=/opt/gbrain
 REPOSITORY=https://github.com/lchany/GBrain-self-evolution.git
 BRANCH=gbrain-review-ui
 BINARY=/usr/local/bin/gbrain
+BUN="$(command -v bun || true)"
+if [[ -z "${BUN}" ]]; then
+  for candidate in /root/.bun/bin/bun /usr/local/bin/bun; do
+    if [[ -x "${candidate}" ]]; then
+      BUN="${candidate}"
+      break
+    fi
+  done
+fi
 usage() {
   cat <<'USAGE'
 Usage: bootstrap-server.sh [--apply] [--prefix PATH]
@@ -29,6 +38,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+[[ -n "${BUN}" ]] || {
+  printf 'bun executable not found; set PATH or install Bun\n' >&2
+  exit 1
+}
 [[ -d "${ROOT}/.git" ]] || {
   printf 'source checkout is required: %s\n' "${ROOT}" >&2
   exit 1
@@ -60,9 +73,9 @@ if [[ "${APPLY}" == 0 ]]; then
 fi
 
 cd "${ROOT}"
-bun install --frozen-lockfile
-bun run build:admin-embedded
-bun run build
+"${BUN}" install --frozen-lockfile
+"${BUN}" run build:admin-embedded
+"${BUN}" run build
 install -m 0755 "${ROOT}/bin/gbrain" "${BINARY}"
 install -d -m 0755 "${PREFIX}" /opt/gbrain-knowledge/source /etc/gbrain
 install -m 0644 "${ROOT}/deploy/systemd/gbrain-serve-http.service.example" /etc/systemd/system/gbrain-serve-http.service

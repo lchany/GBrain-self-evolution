@@ -13,6 +13,7 @@ describe('deployment scripts', () => {
     expect(bootstrapScript).toContain('bun run build');
     expect(bootstrapScript).toContain('/usr/local/bin/gbrain');
     expect(bootstrapScript).toContain('Preserving existing /etc/gbrain/gbrain-serve.env');
+    expect(bootstrapScript).toContain('/root/.bun/bin/bun');
   });
 
   test('verifies the actual anonymous MCP endpoint', () => {
