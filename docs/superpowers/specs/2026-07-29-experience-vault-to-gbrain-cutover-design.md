@@ -74,15 +74,21 @@ Pending share candidates use `inbox/`, status `draft`, and verification
 The final active legacy set must correspond one-to-one with the final archival
 snapshot.
 
-Reconcile with deterministic identities:
+Reconcile with deterministic identities and the current derivation contract:
 
-1. Exact source path and exact content hash: reuse the existing page.
+1. Exact source path, exact content hash, and an exact match to the current
+   redacted page contract: reuse the existing page.
 2. Exact source path and changed content hash: update the existing page.
 3. Changed path and exact content hash: create the final-path page and
    soft-delete the old-path page.
 4. Source file absent from the final snapshot: soft-delete the stale page.
 5. Different path and different content: create a new page. Never merge by
    fuzzy title.
+
+A source hash proves source identity; it does not prove that an older derived
+page satisfies the current redaction, metadata, or provenance rules. Rebuild
+the expected derivative before reuse. If its strict read-back contract differs,
+update the page in place and verify it as a normal write.
 
 The operation must be idempotent. A repeated run against the same archival
 commit produces no additional active pages.
@@ -154,6 +160,7 @@ Completion requires:
 - pending candidates exist as drafts;
 - every written page reads back with the expected slug, type, status, source
   hash, and sanitized provenance;
+- every active legacy page passes the current redaction-pattern scan;
 - stale pre-snapshot pages are soft-deleted only after all new pages verify;
 - converted references resolve or are reported as sanitized archive pointers;
 - retrieval probes return representative project, incident, knowledge, and
@@ -162,7 +169,9 @@ Completion requires:
 - the legacy skill and rules no longer trigger local vault access.
 
 The permanent report contains counts, the final archival commit, redaction
-category totals, reference-resolution totals, and verification results. The
+category totals, reference-resolution totals, and verification results. A
+same-commit retry validates this report but never overwrites its first-run
+statistics. Later corrective work gets a separate inbox audit record. The
 temporary manifest containing original local paths is deleted after successful
 verification.
 
