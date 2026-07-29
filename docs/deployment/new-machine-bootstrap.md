@@ -41,6 +41,7 @@ sudo systemctl daemon-reload
 编辑 `/etc/gbrain/gbrain-serve.env`，至少填写：
 
 - `GBRAIN_PUBLIC_URL`：TLS 反代后的 HTTPS 地址。
+- `GBRAIN_HOME`：服务用户的数据目录，默认使用 `/var/lib/gbrain`。
 - `GBRAIN_ADMIN_BASIC_USER` 和 `GBRAIN_ADMIN_BASIC_PASSWORD`：admin/review Basic Auth。
 - `GBRAIN_ADMIN_ORIGIN`：浏览器实际访问 admin/review 的精确 origin。
 - `GBRAIN_HTTP_BIND`：反代在同机时使用 `127.0.0.1`。
@@ -56,7 +57,9 @@ sudo deploy/scripts/verify-server.sh
 
 如果已有旧的脏源码目录，先保留它，再把目标分支 clone 到独立目录；不要
 在脏工作树上直接 build。`bootstrap-server.sh --apply` 会拒绝错误仓库、错误
-分支和脏工作树，并在目标 checkout 内重新构建和安装二进制。
+分支和脏工作树，创建 `gbrain` 服务用户，将旧 `/root/.gbrain` 配置迁移到
+`/var/lib/gbrain`（目标目录不存在时），修正知识库目录权限，并在目标
+checkout 内重新构建和安装二进制。
 
 ## 3. 云防火墙和 TLS 要求
 

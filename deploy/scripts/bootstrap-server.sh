@@ -78,11 +78,25 @@ cd "${ROOT}"
 "${BUN}" run build
 install -m 0755 "${ROOT}/bin/gbrain" "${BINARY}"
 install -d -m 0755 "${PREFIX}" /opt/gbrain-knowledge/source /etc/gbrain
+if ! getent group gbrain >/dev/null; then
+  groupadd --system gbrain
+fi
+if ! getent passwd gbrain >/dev/null; then
+  useradd --system --gid gbrain --home-dir /var/lib/gbrain --shell /usr/sbin/nologin gbrain
+fi
+install -d -o gbrain -g gbrain -m 0700 /var/lib/gbrain /run/gbrain
+if [[ -d /root/.gbrain && ! -e /var/lib/gbrain/config.json ]]; then
+  cp -a /root/.gbrain/. /var/lib/gbrain/
+fi
+chown -R gbrain:gbrain /var/lib/gbrain /opt/gbrain-knowledge /run/gbrain
 install -m 0644 "${ROOT}/deploy/systemd/gbrain-serve-http.service.example" /etc/systemd/system/gbrain-serve-http.service
 if [[ ! -e /etc/gbrain/gbrain-serve.env ]]; then
   install -m 0600 "${ROOT}/deploy/env/gbrain-serve.env.example" /etc/gbrain/gbrain-serve.env
 else
   printf 'Preserving existing /etc/gbrain/gbrain-serve.env\n'
+fi
+if ! grep -q '^GBRAIN_HOME=' /etc/gbrain/gbrain-serve.env; then
+  printf '\nGBRAIN_HOME=/var/lib/gbrain\n' >> /etc/gbrain/gbrain-serve.env
 fi
 rm -f /etc/systemd/system/gbrain-serve-http.service.d/20-http-basic.conf
 systemctl daemon-reload
