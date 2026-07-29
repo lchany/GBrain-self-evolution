@@ -215,6 +215,24 @@ describe('Experience Vault migration mapping', () => {
       ...readBack,
       type: 'incident',
     })).toMatch(/type/);
+
+    const reconciled = {
+      ...readBack,
+      frontmatter: {
+        ...frontmatter,
+        source_refs: ['<legacy-corpus>/knowledge/safe-retry.md'],
+        migrated_from: 'knowledge/safe-retry.md',
+        non_applicable: ['daily-legacy-vault-flow'],
+      },
+    };
+    expect(validateLegacyPageReadBack(built, reconciled)).not.toBeNull();
+    expect(validateLegacyPageReadBack(built, reconciled, {
+      allowReconciledMetadata: true,
+      allowedMigratedFrom: [
+        'knowledge/safe-retry.md',
+        sanitizeLegacyPath('knowledge/safe-retry.md'),
+      ],
+    })).toBeNull();
   });
 
   test('reuses a valid permanent report instead of overwriting first-run statistics', () => {

@@ -13,6 +13,7 @@ import {
   loadLegacyInventory,
   matchExistingLegacyPage,
   planLegacyReconciliation,
+  sanitizeLegacyPath,
   selectPermanentMigrationReport,
   validateLegacyPageReadBack,
   type BuiltLegacyPage,
@@ -225,10 +226,15 @@ function buildReportPage(input: {
 async function verifyFinalSet(
   pages: readonly BuiltLegacyPage[],
   callTool: MigrationToolCaller,
+  allowedMigratedFromBySlug?: ReadonlyMap<string, readonly string[]>,
 ): Promise<void> {
   for (const [index, expected] of pages.entries()) {
     const page = await callTool('get_page', { slug: expected.slug });
-    const mismatch = validateLegacyPageReadBack(expected, page);
+    const allowedMigratedFrom = allowedMigratedFromBySlug?.get(expected.slug);
+    const mismatch = validateLegacyPageReadBack(expected, page, {
+      allowReconciledMetadata: allowedMigratedFrom !== undefined,
+      allowedMigratedFrom,
+    });
     if (mismatch !== null) {
       throw new Error(`final verification failed for ${expected.slug}: ${mismatch}`);
     }
@@ -291,6 +297,12 @@ async function main(): Promise<void> {
       archiveCommit: options.archiveCommit,
       importedPathToSlug: pathToSlug,
       slug: pathToSlug.get(record.relativePath),
+    }));
+    const allowedMigratedFromBySlug = new Map(inventory.core.map((record) => {
+      return [
+        pathToSlug.get(record.relativePath) ?? legacySlug(record.relativePath),
+        [record.relativePath, sanitizeLegacyPath(record.relativePath)],
+      ] as const;
     }));
     const pendingPages = inventory.pending.map((record) => {
       return buildPendingDraft(record, options.archiveCommit);
@@ -375,7 +387,8 @@ async function main(): Promise<void> {
       callTool,
       sampleSize: options.sampleSize,
     });
-    await verifyFinalSet([...allCorePages, ...pendingPages], callTool);
+    await verifyFinalSet(allCorePages, callTool, allowedMigratedFromBySlug);
+    await verifyFinalSet(pendingPages, callTool);
     const finalReportReadBack = await callTool('get_page', { slug: reportPage.slug });
     const finalPermanentReport = selectPermanentMigrationReport({
       generated: reportPage,

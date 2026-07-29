@@ -537,6 +537,10 @@ function sameField(left: unknown, right: unknown): boolean {
 export function validateLegacyPageReadBack(
   expected: BuiltLegacyPage,
   readBack: unknown,
+  options: {
+    readonly allowReconciledMetadata?: boolean;
+    readonly allowedMigratedFrom?: readonly string[];
+  } = {},
 ): string | null {
   if (typeof readBack !== 'object' || readBack === null) {
     return 'read-back result is not an object';
@@ -557,21 +561,57 @@ export function validateLegacyPageReadBack(
     : null;
   if (!actualFrontmatter) return 'frontmatter is missing';
 
-  for (const field of [
-    'status',
-    'sensitivity',
-    'verification',
-    'applicability',
-    'non_applicable',
-    'source_refs',
-    'migrated_from',
-  ]) {
+  for (const field of ['status', 'sensitivity', 'verification']) {
     if (!sameField(actualFrontmatter[field], expectedFrontmatter[field])) {
       return `${field} does not match`;
     }
   }
   if (actual.type !== expectedFrontmatter.type) {
     return 'top-level type does not match';
+  }
+  if (!options.allowReconciledMetadata) {
+    for (const field of [
+      'applicability',
+      'non_applicable',
+      'source_refs',
+      'migrated_from',
+    ]) {
+      if (!sameField(actualFrontmatter[field], expectedFrontmatter[field])) {
+        return `${field} does not match`;
+      }
+    }
+    return null;
+  }
+
+  const expectedApplicability = expectedFrontmatter.applicability;
+  const actualApplicability = actualFrontmatter.applicability;
+  if (
+    !Array.isArray(expectedApplicability)
+    || !Array.isArray(actualApplicability)
+    || !expectedApplicability.every((value) => actualApplicability.includes(value))
+  ) {
+    return 'applicability does not include the required values';
+  }
+  if (
+    !options.allowedMigratedFrom?.some((value) => {
+      return sameField(actualFrontmatter.migrated_from, value);
+    })
+  ) {
+    return 'migrated_from is not an allowed exact source path';
+  }
+  const sourceRefs = actualFrontmatter.source_refs;
+  if (
+    !Array.isArray(sourceRefs)
+    || sourceRefs.length === 0
+    || !sourceRefs.every((value) => {
+      return typeof value === 'string'
+        && (
+          (value.startsWith('legacy-archive:') && redactLegacyText(value).text === value)
+          || /^<legacy-corpus>\/(?:projects|incidents|knowledge|runbooks)\//.test(value)
+        );
+    })
+  ) {
+    return 'source_refs contains unsanitized provenance';
   }
   return null;
 }
