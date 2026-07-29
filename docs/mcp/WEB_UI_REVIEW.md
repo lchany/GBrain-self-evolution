@@ -69,7 +69,7 @@ JSON 与 URL-encoded 解析错误返回 400 `{ error: 'review_error', message: '
 ## Origin/CSRF 规则
 
 - 每个 `/admin/api/review/*` POST（plan、confirm）在请求体解析**之前**执行严格同源 `Origin` 校验。
-- 期望来源 `expectedAdminOrigin` 只取自服务端配置的 `issuerUrl.origin`，**绝不**从 `Host` 或 `X-Forwarded-*` 请求头推导；伪造这些头不会改变期望来源。
+- 期望来源 `expectedAdminOrigin` 取自显式 `GBRAIN_ADMIN_ORIGIN`，未设置时回退到 `issuerUrl.origin`，**绝不**从 `Host` 或 `X-Forwarded-*` 请求头推导；伪造这些头不会改变期望来源。
 - 以下情况一律返回固定 403（JSON `{ error: 'forbidden', message: '请求来源不被允许。' }`；`Accept: text/html` 客户端得到同文案 HTML 页）：缺失 `Origin`、`Origin: null`、畸形 Origin、多个 Origin（逗号连接）、与期望来源不匹配（含尾部斜杠等任何非精确相等的形式）。
 - 校验失败的请求不会到达 `planReview`、writer 会话或 delete 路径。
 
