@@ -84,9 +84,12 @@ fi
 if ! getent passwd gbrain >/dev/null; then
   useradd --system --gid gbrain --home-dir /var/lib/gbrain --shell /usr/sbin/nologin gbrain
 fi
-install -d -o gbrain -g gbrain -m 0700 /var/lib/gbrain /run/gbrain
-if [[ -d /root/.gbrain && ! -e /var/lib/gbrain/config.json ]]; then
-  cp -a /root/.gbrain/. /var/lib/gbrain/
+install -d -o gbrain -g gbrain -m 0700 /var/lib/gbrain /var/lib/gbrain/.gbrain /run/gbrain
+if [[ -f /var/lib/gbrain/config.json && ! -e /var/lib/gbrain/.gbrain/config.json ]]; then
+  find /var/lib/gbrain -mindepth 1 -maxdepth 1 ! -name .gbrain -exec mv -t /var/lib/gbrain/.gbrain -- {} +
+fi
+if [[ -d /root/.gbrain && ! -e /var/lib/gbrain/.gbrain/config.json ]]; then
+  cp -a /root/.gbrain/. /var/lib/gbrain/.gbrain/
 fi
 chown -R gbrain:gbrain /var/lib/gbrain /opt/gbrain-knowledge /run/gbrain
 install -m 0644 "${ROOT}/deploy/systemd/gbrain-serve-http.service.example" /etc/systemd/system/gbrain-serve-http.service
@@ -97,6 +100,20 @@ else
 fi
 if ! grep -q '^GBRAIN_HOME=' /etc/gbrain/gbrain-serve.env; then
   printf '\nGBRAIN_HOME=/var/lib/gbrain\n' >> /etc/gbrain/gbrain-serve.env
+fi
+if ! grep -q '^GBRAIN_HTTP_PORT=' /etc/gbrain/gbrain-serve.env; then
+  printf 'GBRAIN_HTTP_PORT=3131\n' >> /etc/gbrain/gbrain-serve.env
+fi
+if ! grep -q '^GBRAIN_HTTP_BIND=' /etc/gbrain/gbrain-serve.env; then
+  printf 'GBRAIN_HTTP_BIND=0.0.0.0\n' >> /etc/gbrain/gbrain-serve.env
+fi
+if ! grep -q '^GBRAIN_PUBLIC_URL=' /etc/gbrain/gbrain-serve.env; then
+  admin_origin="$(awk -F= '$1 == "GBRAIN_ADMIN_ORIGIN" { print substr($0, index($0, "=") + 1) }' /etc/gbrain/gbrain-serve.env)"
+  [[ -n "${admin_origin}" ]] || {
+    printf 'GBRAIN_PUBLIC_URL is required when GBRAIN_ADMIN_ORIGIN is unset\n' >&2
+    exit 1
+  }
+  printf 'GBRAIN_PUBLIC_URL=%s\n' "${admin_origin}" >> /etc/gbrain/gbrain-serve.env
 fi
 rm -f /etc/systemd/system/gbrain-serve-http.service.d/20-http-basic.conf
 systemctl daemon-reload

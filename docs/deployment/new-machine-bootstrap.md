@@ -41,7 +41,8 @@ sudo systemctl daemon-reload
 编辑 `/etc/gbrain/gbrain-serve.env`，至少填写：
 
 - `GBRAIN_PUBLIC_URL`：TLS 反代后的 HTTPS 地址。
-- `GBRAIN_HOME`：服务用户的数据目录，默认使用 `/var/lib/gbrain`。
+- `GBRAIN_HOME`：服务用户的数据目录父目录，配置实际位于
+  `/var/lib/gbrain/.gbrain/`。
 - `GBRAIN_ADMIN_BASIC_USER` 和 `GBRAIN_ADMIN_BASIC_PASSWORD`：admin/review Basic Auth。
 - `GBRAIN_ADMIN_ORIGIN`：浏览器实际访问 admin/review 的精确 origin。
 - `GBRAIN_HTTP_BIND`：反代在同机时使用 `127.0.0.1`。

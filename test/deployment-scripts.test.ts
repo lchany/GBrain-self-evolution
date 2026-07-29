@@ -16,6 +16,8 @@ describe('deployment scripts', () => {
     expect(bootstrapScript).toContain('/root/.bun/bin/bun');
     expect(bootstrapScript).toContain('useradd --system');
     expect(bootstrapScript).toContain('GBRAIN_HOME=/var/lib/gbrain');
+    expect(bootstrapScript).toContain('/var/lib/gbrain/.gbrain/config.json');
+    expect(bootstrapScript).toContain('GBRAIN_PUBLIC_URL is required');
   });
 
   test('verifies the actual anonymous MCP endpoint', () => {
