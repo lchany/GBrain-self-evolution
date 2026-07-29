@@ -533,20 +533,43 @@ function pageText(result: unknown): string {
 async function writeAndVerifyPage(
   page: BuiltLegacyPage,
   callTool: MigrationToolCaller,
+  retryDelayMs: number,
 ): Promise<void> {
   await callTool('search', {
     query: page.slug,
     include_prefixes: [page.slug],
     limit: 5,
   });
-  await callTool('put_page', { slug: page.slug, content: page.markdown });
-  const readBack = await callTool('get_page', { slug: page.slug });
-  const slug = typeof readBack === 'object' && readBack !== null
-    ? (readBack as Record<string, unknown>).slug
-    : undefined;
-  if (slug !== page.slug || !pageText(readBack).includes(`${HASH_MARKER}:${page.rawSha256}`)) {
-    throw new Error(`round-trip verification failed for ${page.slug}`);
+  const writeResult = await callTool('put_page', { slug: page.slug, content: page.markdown });
+  if (typeof writeResult === 'object' && writeResult !== null) {
+    const resultSlug = (writeResult as Record<string, unknown>).slug;
+    if (typeof resultSlug === 'string' && resultSlug !== page.slug) {
+      throw new Error(`put_page returned a different slug for ${page.slug}: ${resultSlug}`);
+    }
   }
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 8; attempt += 1) {
+    try {
+      const readBack = await callTool('get_page', { slug: page.slug });
+      const slug = typeof readBack === 'object' && readBack !== null
+        ? (readBack as Record<string, unknown>).slug
+        : undefined;
+      if (
+        slug === page.slug
+        && pageText(readBack).includes(`${HASH_MARKER}:${page.rawSha256}`)
+      ) {
+        return;
+      }
+      lastError = new Error('read-back content did not match');
+    } catch (error) {
+      lastError = error;
+    }
+    if (attempt < 8 && retryDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
+  }
+  const detail = lastError instanceof Error ? `: ${lastError.message}` : '';
+  throw new Error(`round-trip verification failed for ${page.slug}${detail}`);
 }
 
 export async function applyLegacyPages(options: {
@@ -554,6 +577,7 @@ export async function applyLegacyPages(options: {
   readonly staleSlugs: readonly string[];
   readonly callTool: MigrationToolCaller;
   readonly sampleSize?: number;
+  readonly retryDelayMs?: number;
 }): Promise<{ readonly written: number; readonly verified: number; readonly deleted: number }> {
   const sampleSize = Math.min(
     Math.max(options.sampleSize ?? 8, 0),
@@ -561,14 +585,15 @@ export async function applyLegacyPages(options: {
   );
   const sample = options.pages.slice(0, sampleSize);
   const remainder = options.pages.slice(sampleSize);
+  const retryDelayMs = Math.max(options.retryDelayMs ?? 250, 0);
   let verified = 0;
 
   for (const page of sample) {
-    await writeAndVerifyPage(page, options.callTool);
+    await writeAndVerifyPage(page, options.callTool, retryDelayMs);
     verified += 1;
   }
   for (const page of remainder) {
-    await writeAndVerifyPage(page, options.callTool);
+    await writeAndVerifyPage(page, options.callTool, retryDelayMs);
     verified += 1;
   }
 

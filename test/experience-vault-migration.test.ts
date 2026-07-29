@@ -319,6 +319,7 @@ describe('Experience Vault migration mapping', () => {
       staleSlugs: ['legacy-migration/stale-record-0000000000'],
       callTool,
       sampleSize: 1,
+      retryDelayMs: 0,
     });
 
     expect(report).toEqual({ written: 2, verified: 2, deleted: 1 });
@@ -347,7 +348,41 @@ describe('Experience Vault migration mapping', () => {
       staleSlugs: ['legacy-migration/stale-record-0000000000'],
       callTool,
       sampleSize: 1,
+      retryDelayMs: 0,
     })).rejects.toThrow(/round-trip verification failed/);
     expect(calls).not.toContain('delete_page');
+  });
+
+  test('retries bounded get_page visibility checks without repeating put_page', async () => {
+    const page = buildLegacyPage(record(), {
+      archiveCommit: ARCHIVE_COMMIT,
+      importedPathToSlug: new Map(),
+    });
+    let reads = 0;
+    const calls: string[] = [];
+    const callTool = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+      calls.push(name);
+      if (name === 'search') return { items: [] };
+      if (name === 'put_page') return { slug: args.slug };
+      if (name === 'get_page') {
+        reads += 1;
+        if (reads === 1) throw new Error('page_not_found');
+        return {
+          slug: args.slug,
+          compiled_truth: `legacy-vault-sha256:${page.rawSha256}`,
+        };
+      }
+      throw new Error(`unexpected tool: ${name}`);
+    };
+
+    await expect(applyLegacyPages({
+      pages: [page],
+      staleSlugs: [],
+      callTool,
+      sampleSize: 1,
+      retryDelayMs: 0,
+    })).resolves.toEqual({ written: 1, verified: 1, deleted: 0 });
+    expect(calls.filter((name) => name === 'put_page')).toHaveLength(1);
+    expect(calls.filter((name) => name === 'get_page')).toHaveLength(2);
   });
 });
