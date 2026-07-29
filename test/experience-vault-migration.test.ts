@@ -12,6 +12,8 @@ import {
   planLegacyReconciliation,
   redactLegacyText,
   sanitizeLegacyPath,
+  selectPermanentMigrationReport,
+  validateLegacyPageReadBack,
   type ExistingLegacyPage,
   type BuiltLegacyPage,
   type LegacyRecord,
@@ -171,6 +173,84 @@ describe('Experience Vault migration mapping', () => {
       pendingBuilt.markdown,
       { strictSchema: true },
     )).toEqual({ ok: true });
+  });
+
+  test('verifies all migration identity and lifecycle fields on read-back', () => {
+    const built = buildLegacyPage(record(), {
+      archiveCommit: ARCHIVE_COMMIT,
+      importedPathToSlug: new Map(),
+    });
+    const expected = matter(built.markdown);
+    const readBack = {
+      slug: built.slug,
+      type: expected.data.type,
+      compiled_truth: expected.content,
+      frontmatter: expected.data,
+      deleted_at: null,
+    };
+
+    expect(validateLegacyPageReadBack(built, readBack)).toBeNull();
+    expect(validateLegacyPageReadBack(built, {
+      ...readBack,
+      frontmatter: { ...expected.data, status: 'draft' },
+    })).toMatch(/status/);
+    expect(validateLegacyPageReadBack(built, {
+      ...readBack,
+      frontmatter: { ...expected.data, source_refs: ['legacy-archive:wrong'] },
+    })).toMatch(/source_refs/);
+  });
+
+  test('reuses a valid permanent report instead of overwriting first-run statistics', () => {
+    const firstRun: BuiltLegacyPage = {
+      slug: `inbox/legacy-migration-cutover-report-${ARCHIVE_COMMIT.slice(0, 10)}`,
+      markdown: matter.stringify([
+        '# Legacy experience migration cutover report',
+        '',
+        `Archive commit: \`${ARCHIVE_COMMIT}\``,
+        '',
+        'Records written or updated: 73',
+        '',
+        `Migration identity: \`legacy-vault-sha256:${'1'.repeat(64)}\``,
+        '',
+      ].join('\n'), {
+        type: 'project',
+        status: 'draft',
+        sensitivity: 'internal',
+        verification: 'unverified',
+        applicability: ['migration-cutover-report'],
+        non_applicable: [],
+        source_refs: [`legacy-archive:${ARCHIVE_COMMIT}:migration-summary`],
+        migrated_from: null,
+      }),
+      rawSha256: '1'.repeat(64),
+      references: { resolved: 0, unresolved: 0 },
+      redactions: {},
+    };
+    const retryGenerated: BuiltLegacyPage = {
+      ...firstRun,
+      markdown: firstRun.markdown.replace(
+        'Records written or updated: 73',
+        'Records written or updated: 0',
+      ),
+      rawSha256: '2'.repeat(64),
+    };
+    const parsed = matter(firstRun.markdown);
+    const existingReadBack = {
+      slug: firstRun.slug,
+      type: parsed.data.type,
+      compiled_truth: parsed.content,
+      frontmatter: parsed.data,
+      deleted_at: null,
+    };
+
+    expect(selectPermanentMigrationReport({
+      generated: retryGenerated,
+      archiveCommit: ARCHIVE_COMMIT,
+      existingReadBack,
+    })).toEqual({
+      pageToWrite: null,
+      expectedRawSha256: '1'.repeat(64),
+    });
   });
 
   test('reconciles by path and hash and delays stale deletes until writes verify', () => {
