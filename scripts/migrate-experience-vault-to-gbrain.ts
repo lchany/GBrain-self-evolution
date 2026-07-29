@@ -13,7 +13,7 @@ import {
   loadLegacyInventory,
   matchExistingLegacyPage,
   planLegacyReconciliation,
-  sanitizeLegacyPath,
+  selectLegacyPagesForWrite,
   selectPermanentMigrationReport,
   validateLegacyPageReadBack,
   type BuiltLegacyPage,
@@ -120,10 +120,15 @@ function pageText(page: Record<string, unknown>): string {
 async function loadExistingManagedPages(
   listed: readonly ListedPage[],
   callTool: MigrationToolCaller,
-): Promise<ExistingLegacyPage[]> {
+): Promise<{
+  readonly managed: ExistingLegacyPage[];
+  readonly readBackBySlug: ReadonlyMap<string, unknown>;
+}> {
   const managed: ExistingLegacyPage[] = [];
+  const readBackBySlug = new Map<string, unknown>();
   for (const [index, item] of listed.entries()) {
     const page = await callTool('get_page', { slug: item.slug });
+    readBackBySlug.set(item.slug, page);
     if (!isRecord(page)) throw new Error('get_page returned an unexpected result');
     const rawSha256 = pageText(page).match(/legacy-vault-sha256:([a-f0-9]{64})/)?.[1];
     const frontmatter = isRecord(page.frontmatter) ? page.frontmatter : {};
@@ -136,7 +141,7 @@ async function loadExistingManagedPages(
     }
     if ((index + 1) % 25 === 0) console.error(`[migration] inspected ${index + 1}/${listed.length}`);
   }
-  return managed;
+  return { managed, readBackBySlug };
 }
 
 async function loadPageIfExists(
@@ -226,15 +231,10 @@ function buildReportPage(input: {
 async function verifyFinalSet(
   pages: readonly BuiltLegacyPage[],
   callTool: MigrationToolCaller,
-  allowedMigratedFromBySlug?: ReadonlyMap<string, readonly string[]>,
 ): Promise<void> {
   for (const [index, expected] of pages.entries()) {
     const page = await callTool('get_page', { slug: expected.slug });
-    const allowedMigratedFrom = allowedMigratedFromBySlug?.get(expected.slug);
-    const mismatch = validateLegacyPageReadBack(expected, page, {
-      allowReconciledMetadata: allowedMigratedFrom !== undefined,
-      allowedMigratedFrom,
-    });
+    const mismatch = validateLegacyPageReadBack(expected, page);
     if (mismatch !== null) {
       throw new Error(`final verification failed for ${expected.slug}: ${mismatch}`);
     }
@@ -287,7 +287,8 @@ async function main(): Promise<void> {
 
   try {
     const listed = await listAllLegacyPages(callTool);
-    const existing = await loadExistingManagedPages(listed, callTool);
+    const existingPages = await loadExistingManagedPages(listed, callTool);
+    const existing = existingPages.managed;
     const plan = planLegacyReconciliation(inventory.core, existing);
     const pathToSlug = new Map(inventory.core.map((record) => {
       const existingPage = matchExistingLegacyPage(record, existing);
@@ -297,12 +298,6 @@ async function main(): Promise<void> {
       archiveCommit: options.archiveCommit,
       importedPathToSlug: pathToSlug,
       slug: pathToSlug.get(record.relativePath),
-    }));
-    const allowedMigratedFromBySlug = new Map(inventory.core.map((record) => {
-      return [
-        pathToSlug.get(record.relativePath) ?? legacySlug(record.relativePath),
-        [record.relativePath, sanitizeLegacyPath(record.relativePath)],
-      ] as const;
     }));
     const pendingPages = inventory.pending.map((record) => {
       return buildPendingDraft(record, options.archiveCommit);
@@ -332,15 +327,17 @@ async function main(): Promise<void> {
       }
     }
     const writeByPath = new Set(plan.write.map((record) => record.relativePath));
-    const writePages = allCorePages.filter((page) => {
-      const record = inventory.core.find((candidate) => legacySlug(candidate.relativePath) === page.slug);
-      return record !== undefined && writeByPath.has(record.relativePath);
+    const writePages = selectLegacyPagesForWrite({
+      records: inventory.core,
+      pages: allCorePages,
+      plannedWritePaths: writeByPath,
+      existingReadBackBySlug: existingPages.readBackBySlug,
     });
     const reportPage = buildReportPage({
       archiveCommit: options.archiveCommit,
       coreCount: inventory.core.length,
       pendingCount: inventory.pending.length,
-      reusedCount: plan.reuse.length,
+      reusedCount: inventory.core.length - writePages.length,
       writeCount: writePages.length,
       staleCount: plan.deleteAfterVerifiedWrites.length,
       redactions,
@@ -365,7 +362,8 @@ async function main(): Promise<void> {
       pending_candidates: inventory.pending.length,
       existing_legacy_pages: listed.length,
       managed_existing_pages: existing.length,
-      exact_reuse: plan.reuse.length,
+      source_identity_matches: plan.reuse.length,
+      exact_reuse: inventory.core.length - writePages.length,
       writes_or_updates: writePages.length,
       pending_writes: pendingWritePages.length,
       stale_soft_deletes: plan.deleteAfterVerifiedWrites.length,
@@ -387,7 +385,7 @@ async function main(): Promise<void> {
       callTool,
       sampleSize: options.sampleSize,
     });
-    await verifyFinalSet(allCorePages, callTool, allowedMigratedFromBySlug);
+    await verifyFinalSet(allCorePages, callTool);
     await verifyFinalSet(pendingPages, callTool);
     const finalReportReadBack = await callTool('get_page', { slug: reportPage.slug });
     const finalPermanentReport = selectPermanentMigrationReport({

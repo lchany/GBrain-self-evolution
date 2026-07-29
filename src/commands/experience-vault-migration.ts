@@ -394,6 +394,23 @@ export function planLegacyReconciliation(
   return { reuse, write, deleteAfterVerifiedWrites };
 }
 
+export function selectLegacyPagesForWrite(options: {
+  readonly records: readonly LegacyRecord[];
+  readonly pages: readonly BuiltLegacyPage[];
+  readonly plannedWritePaths: ReadonlySet<string>;
+  readonly existingReadBackBySlug: ReadonlyMap<string, unknown>;
+}): BuiltLegacyPage[] {
+  if (options.records.length !== options.pages.length) {
+    throw new Error('legacy record and built-page inventories are not aligned');
+  }
+  return options.pages.filter((page, index) => {
+    const record = options.records[index];
+    if (!record || options.plannedWritePaths.has(record.relativePath)) return true;
+    const readBack = options.existingReadBackBySlug.get(page.slug);
+    return validateLegacyPageReadBack(page, readBack) !== null;
+  });
+}
+
 export function matchExistingLegacyPage(
   record: LegacyRecord,
   existing: readonly ExistingLegacyPage[],
