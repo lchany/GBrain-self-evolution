@@ -105,7 +105,7 @@ describe('restorePage', () => {
     expect(await engine.restorePage('people/dave')).toBe(false);
   });
 
-  test('putPage reactivates a soft-deleted slug while updating its content', async () => {
+  test('putPage preserves a soft-delete tombstone while updating its content', async () => {
     await seedPage(engine, 'people/reimported');
     await engine.softDeletePage('people/reimported');
 
@@ -117,10 +117,11 @@ describe('restorePage', () => {
       frontmatter: {},
     });
 
-    const page = await engine.getPage('people/reimported');
-    expect(page).not.toBeNull();
-    expect(page!.deleted_at).toBeFalsy();
-    expect(page!.compiled_truth).toBe('Fresh content from a legitimate re-import');
+    expect(await engine.getPage('people/reimported')).toBeNull();
+    const hidden = await engine.getPage('people/reimported', { includeDeleted: true });
+    expect(hidden).not.toBeNull();
+    expect(hidden!.deleted_at).toBeInstanceOf(Date);
+    expect(hidden!.compiled_truth).toBe('Fresh content from a legitimate re-import');
   });
 });
 

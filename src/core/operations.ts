@@ -885,6 +885,18 @@ const put_page: Operation = {
       ingested_via: provenanceVia,
     });
 
+    // An explicit put_page is the writer's last-write-wins signal, so it may
+    // intentionally reuse a slug that is still inside the soft-delete recovery
+    // window. importFromContent updates the tombstoned row but the engine-level
+    // putPage primitive deliberately preserves deleted_at so background syncs
+    // cannot silently resurrect deleted files. Restore only on this explicit
+    // operation path, before write-through reads the row back.
+    if (result.status !== 'error') {
+      await ctx.engine.restorePage(result.slug, {
+        sourceId: ctx.sourceId ?? 'default',
+      });
+    }
+
     // v0.39 T13 — auto-prompt on first unknown-type write.
     //
     // Contract (codex finding #8 honored — 7 cases covered):

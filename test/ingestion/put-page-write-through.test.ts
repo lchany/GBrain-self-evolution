@@ -124,6 +124,30 @@ describe('put_page write-through — happy path', () => {
     // is `ingested_via: 'mcp:put_page'`. Match the value substring.
     expect(onDisk).toMatch(/ingested_via:\s*['"]?mcp:put_page['"]?/);
   });
+
+  test('explicit put_page restores a soft-deleted slug before write-through', async () => {
+    const slug = 'inbox/revive-through-put';
+    await engine.putPage(slug, {
+      type: 'note' as any,
+      title: 'Old',
+      compiled_truth: 'old body',
+      timeline: '',
+      frontmatter: {},
+    });
+    await engine.softDeletePage(slug);
+
+    const result = (await putPage.handler(makeCtx({ remote: true }), {
+      slug,
+      content: '---\ntitle: Revived\n---\n\nfresh body',
+    })) as { write_through?: { written: boolean; path?: string } };
+
+    const revived = await engine.getPage(slug);
+    expect(revived).not.toBeNull();
+    expect(revived!.deleted_at).toBeFalsy();
+    expect(revived!.compiled_truth).toContain('fresh body');
+    expect(result.write_through?.written).toBe(true);
+    expect(fs.readFileSync(result.write_through!.path!, 'utf8')).toContain('fresh body');
+  });
 });
 
 describe('put_page write-through — trust gating', () => {

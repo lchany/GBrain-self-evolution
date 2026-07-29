@@ -696,8 +696,8 @@ export interface BrainEngine {
    * is included in the INSERT column list so ON CONFLICT (source_id, slug)
    * DO UPDATE actually targets the intended row instead of fabricating a
    * duplicate at (default, slug). Multi-source brains MUST pass sourceId.
-   * Re-importing an existing soft-deleted slug reactivates that row; otherwise
-   * a successful put remains permanently hidden behind its old tombstone.
+   * This primitive preserves `deleted_at`; public operations that intentionally
+   * revive a tombstone must call `restorePage` explicitly.
    */
   putPage(slug: string, page: PageInput, opts?: { sourceId?: string }): Promise<Page>;
   /**
