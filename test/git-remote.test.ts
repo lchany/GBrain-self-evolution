@@ -32,7 +32,7 @@ function writeFakeGit(): void {
   writeFileSync(FAKE_GIT_LOG, '');
   const script = `#!/usr/bin/env bash
 # Fake git for git-remote.test.ts
-{ printf '['; for arg in "$@"; do printf '%s,' "$(printf '%s' "$arg" | jq -Rs .)"; done; printf 'null]\\n'; } >> "${FAKE_GIT_LOG}"
+bun -e 'const fs = require("node:fs"); fs.appendFileSync(process.argv[1], JSON.stringify(process.argv.slice(2)) + "\\n")' -- "${FAKE_GIT_LOG}" "$@"
 mode=$(cat "${FAKE_GIT_MODE}" 2>/dev/null || echo ok)
 case "$mode" in
   fail) exit 1 ;;
@@ -53,8 +53,7 @@ function readArgvLog(): string[][] {
     .split('\n')
     .filter(Boolean)
     .map(line => {
-      const arr = JSON.parse(line) as (string | null)[];
-      return arr.filter((x): x is string => x !== null);
+      return JSON.parse(line) as string[];
     });
 }
 

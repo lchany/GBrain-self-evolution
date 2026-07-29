@@ -269,7 +269,8 @@ export type RepoState =
  * Classify the on-disk state of a clone. Used by performSync to decide
  * whether to run pull (healthy), re-clone (missing/no-git/not-a-dir),
  * refuse with corruption error (corrupted), or refuse with rebase-clone
- * hint (url-drift).
+ * hint (url-drift). Local-only sources with no expected remote are healthy
+ * when Git can resolve their repository metadata; they do not need origin.
  */
 export function validateRepoState(
   repoPath: string,
@@ -285,6 +286,19 @@ export function validateRepoState(
   if (!stat.isDirectory()) return 'not-a-dir';
   if (!existsSync(join(repoPath, '.git'))) return 'no-git';
 
+  if (expectedRemoteUrl === undefined) {
+    try {
+      execFileSync('git', ['-C', repoPath, 'rev-parse', '--git-dir'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 10_000,
+        env: { ...process.env, ...GIT_ENV },
+      });
+      return 'healthy';
+    } catch {
+      return 'corrupted';
+    }
+  }
+
   let remoteUrl: string;
   try {
     const out = execFileSync('git', ['-C', repoPath, 'remote', 'get-url', 'origin'], {
@@ -297,7 +311,7 @@ export function validateRepoState(
     return 'corrupted';
   }
 
-  if (expectedRemoteUrl !== undefined && remoteUrl !== expectedRemoteUrl) {
+  if (remoteUrl !== expectedRemoteUrl) {
     return 'url-drift';
   }
   return 'healthy';
