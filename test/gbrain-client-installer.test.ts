@@ -34,6 +34,8 @@ describe('gbrain install-client', () => {
       expect(opencodeRules).toContain('只读召回');
       expect(opencodeRules).toContain('第 2 次');
       expect(opencodeRules).toContain('5 分钟');
+      expect(opencodeRules).toContain('.gbrain-project.yaml');
+      expect(opencodeRules).toContain('project_id');
       expect(codexRules).toContain('默认使用中文');
       expect(codexRules).toContain('只读召回');
       expect(codexRules).toContain('第 2 次');
@@ -63,6 +65,8 @@ describe('gbrain install-client', () => {
       expect(opencodeCapture).toContain('预分类建议');
       expect(opencodeCapture).toContain('5 分钟没有任何回复');
       expect(opencodeCapture).toContain('重新计算 5 分钟');
+      expect(opencodeCapture).toContain('project_binding');
+      expect(opencodeCapture).toContain('gbrain project match');
       expect(opencodeCapture).not.toContain('gbrain capture');
 
       expect(opencodeReview).toContain('list_pages');
@@ -70,6 +74,8 @@ describe('gbrain install-client', () => {
       expect(opencodeReview).toContain('只调整分类');
       expect(opencodeReview).toContain('不得修改已确认正文');
       expect(opencodeReview).toContain('拒绝或退回');
+      expect(opencodeReview).toContain('projects/<project_id>/');
+      expect(opencodeReview).toContain('source_project_ids');
       expect(opencodeReview).not.toContain('gbrain review');
       expect(opencodeReview).not.toContain('PROMOTE <target-slug>');
     } finally {

@@ -20,6 +20,8 @@ function validInboxContent(overrides: readonly string[] = [], body = 'Distilled 
     'source_refs:',
     '  - test:evidence-pointer',
     'migrated_from: null',
+    'project_binding: pending',
+    'project_id: null',
     ...overrides,
     '---',
   ];
@@ -43,6 +45,27 @@ function migratedFromContent(status: string, migratedFrom: string | null): strin
     '---',
     '',
     '# Safe draft',
+    '',
+    'Distilled conclusion.',
+  ].join('\n');
+}
+
+function projectContent(lines: readonly string[], status = 'reviewed', verification = 'verified'): string {
+  return [
+    '---',
+    'type: project',
+    'date: 2026-07-26',
+    `status: ${status}`,
+    'sensitivity: internal',
+    `verification: ${verification}`,
+    'applicability: [project-scoped]',
+    'non_applicable: []',
+    'source_refs: [test:evidence-pointer]',
+    'migrated_from: null',
+    ...lines,
+    '---',
+    '',
+    '# Safe project record',
     '',
     'Distilled conclusion.',
   ].join('\n');
@@ -160,5 +183,37 @@ describe('put_page validation gate', () => {
     const body = `Assistant: here is the raw tool output\nThe fake token is ${FAKE_SECRET}.`;
     const payload = await putPageError('inbox/combined-unsafe-probe', validInboxContent([], body));
     expectSafeError(payload);
+  });
+
+  test('accepts a canonical project registry page', async () => {
+    const content = projectContent([
+      'record_kind: project-registry',
+      'project_id: prj-0123456789abcdef',
+      'project_name: Example Widget',
+      'project_aliases: [widget]',
+      'repository_refs: [github.com/example/widget]',
+      'environment_refs: []',
+    ]);
+    const payload = await putPage('projects/prj-0123456789abcdef/index', content);
+    expect(payload).toMatchObject({ dry_run: true, slug: 'projects/prj-0123456789abcdef/index' });
+  });
+
+  test('rejects project experience outside its project id directory', async () => {
+    const content = projectContent([
+      'record_kind: project-experience',
+      'project_binding: bound',
+      'project_id: prj-0123456789abcdef',
+    ]);
+    const payload = await putPageError('projects/prj-fedcba9876543210/retry-rule', content);
+    expect(String(payload.message)).toContain('project_path_mismatch');
+  });
+
+  test('requires explicit pending or bound project state for inbox drafts', async () => {
+    const content = projectContent([
+      'project_binding: null',
+      'project_id: null',
+    ], 'draft', 'unverified');
+    const payload = await putPageError('inbox/unbound-project-note', content);
+    expect(String(payload.message)).toContain('project_binding_required');
   });
 });

@@ -50,7 +50,39 @@ describe('gbrain capture structured candidate', () => {
     expect(parsed.data.verification).toBe('unverified');
     expect(parsed.data.sensitivity).toBe('internal');
     expect(parsed.data.source_refs).toEqual(['session:example-safe']);
+    expect(parsed.data.project_binding).toBe('pending');
+    expect(parsed.data.project_id).toBeNull();
     expect(parsed.content).toContain('requested_verification: verified');
+  });
+
+  test('binds a project candidate in machine-readable frontmatter', () => {
+    const candidate = structuredCaptureTesting.buildCandidate({
+      title: 'Project Scoped Retry Rule',
+      suggestedType: 'project',
+      summary: 'Apply only inside the bound project.',
+      evidenceRefs: ['session:project-safe'],
+      requestedVerification: 'verified',
+      sensitivity: 'internal',
+      projectId: 'prj-0123456789abcdef',
+      now: new Date('2026-07-26T00:00:00Z'),
+    });
+    const parsed = matter(structuredCaptureTesting.buildCandidateMarkdown(candidate));
+    expect(parsed.data.record_kind).toBe('project-experience');
+    expect(parsed.data.project_binding).toBe('bound');
+    expect(parsed.data.project_id).toBe('prj-0123456789abcdef');
+  });
+
+  test('rejects malformed project ids before capture', () => {
+    expect(() => structuredCaptureTesting.buildCandidate({
+      title: 'Invalid Project Binding',
+      suggestedType: 'project',
+      summary: 'Must fail before any writer call.',
+      evidenceRefs: ['session:project-safe'],
+      requestedVerification: 'unverified',
+      sensitivity: 'internal',
+      projectId: 'project-widget',
+      now: new Date('2026-07-26T00:00:00Z'),
+    })).toThrow(/project_id_invalid/);
   });
 
   test('rejects any explicit slug outside inbox', () => {
