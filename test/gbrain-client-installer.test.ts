@@ -24,17 +24,54 @@ describe('gbrain install-client', () => {
       expect(first).toBe(0);
       expect(second).toBe(0);
       expect(existsSync(join(root, 'xdg', 'gbrain'))).toBe(false);
-      expect(readFileSync(join(root, 'xdg', 'opencode', 'AGENTS.md'), 'utf8')).toContain('GBRAIN_CLIENT_RULES_START');
-      expect(readFileSync(join(root, 'codex', 'AGENTS.md'), 'utf8')).toContain('GBRAIN_CLIENT_RULES_START');
-      const captureSkill = readFileSync(join(root, 'xdg', 'opencode', 'skills', 'gbrain-capture', 'SKILL.md'), 'utf8');
-      const reviewSkill = readFileSync(join(root, 'codex', 'skills', 'gbrain-review', 'SKILL.md'), 'utf8');
-      expect(captureSkill).toContain('put_page');
-      expect(captureSkill).toContain('inbox/');
-      expect(captureSkill).not.toContain('gbrain capture');
-      expect(reviewSkill).toContain('list_pages');
-      expect(reviewSkill).toContain('authenticated admin review');
-      expect(reviewSkill).not.toContain('gbrain review');
-      expect(reviewSkill).not.toContain('PROMOTE <target-slug>');
+      const opencodeRules = readFileSync(join(root, 'xdg', 'opencode', 'AGENTS.md'), 'utf8');
+      const codexRules = readFileSync(join(root, 'codex', 'AGENTS.md'), 'utf8');
+      expect(opencodeRules).toContain('GBRAIN_CLIENT_RULES_START');
+      expect(codexRules).toContain('GBRAIN_CLIENT_RULES_START');
+      expect(opencodeRules.match(/GBRAIN_CLIENT_RULES_START/g)).toHaveLength(1);
+      expect(codexRules.match(/GBRAIN_CLIENT_RULES_START/g)).toHaveLength(1);
+      expect(opencodeRules).toContain('默认使用中文');
+      expect(opencodeRules).toContain('只读召回');
+      expect(opencodeRules).toContain('第 2 次');
+      expect(opencodeRules).toContain('5 分钟');
+      expect(codexRules).toContain('默认使用中文');
+      expect(codexRules).toContain('只读召回');
+      expect(codexRules).toContain('第 2 次');
+      expect(codexRules).toContain('5 分钟');
+
+      const opencodeCapture = readFileSync(
+        join(root, 'xdg', 'opencode', 'skills', 'gbrain-capture', 'SKILL.md'),
+        'utf8',
+      );
+      const codexCapture = readFileSync(join(root, 'codex', 'skills', 'gbrain-capture', 'SKILL.md'), 'utf8');
+      const opencodeReview = readFileSync(
+        join(root, 'xdg', 'opencode', 'skills', 'gbrain-review', 'SKILL.md'),
+        'utf8',
+      );
+      const codexReview = readFileSync(join(root, 'codex', 'skills', 'gbrain-review', 'SKILL.md'), 'utf8');
+      expect(opencodeCapture).toBe(codexCapture);
+      expect(opencodeReview).toBe(codexReview);
+
+      expect(opencodeCapture).toContain('put_page');
+      expect(opencodeCapture).toContain('inbox/');
+      expect(opencodeCapture).toContain('## 场景与目标');
+      expect(opencodeCapture).toContain('## 适用条件');
+      expect(opencodeCapture).toContain('## 不适用条件');
+      expect(opencodeCapture).toContain('## 召回提示');
+      expect(opencodeCapture).toContain('applicability');
+      expect(opencodeCapture).toContain('non_applicable');
+      expect(opencodeCapture).toContain('预分类建议');
+      expect(opencodeCapture).toContain('5 分钟没有任何回复');
+      expect(opencodeCapture).toContain('重新计算 5 分钟');
+      expect(opencodeCapture).not.toContain('gbrain capture');
+
+      expect(opencodeReview).toContain('list_pages');
+      expect(opencodeReview).toContain('认证的管理员审核界面');
+      expect(opencodeReview).toContain('只调整分类');
+      expect(opencodeReview).toContain('不得修改已确认正文');
+      expect(opencodeReview).toContain('拒绝或退回');
+      expect(opencodeReview).not.toContain('gbrain review');
+      expect(opencodeReview).not.toContain('PROMOTE <target-slug>');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
