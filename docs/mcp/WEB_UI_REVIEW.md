@@ -33,6 +33,12 @@ GBrain 在 `http://<server>:3132/admin/review` 提供一套只读浏览 + 写操
 
 如果 writer 凭证缺失，写操作会失败并返回 `503 service_unavailable` 或错误页面。
 
+systemd 部署通过 `LoadCredential` 将 root-owned 的
+`/etc/gbrain/clients/local-writer.env` 作为只读 credential 暴露给服务。
+非 systemd 部署可用 `GBRAIN_REVIEW_WRITER_ENV_PATH` 指定文件。审核 writer
+连接 `GBRAIN_REVIEW_WRITER_MCP_URL`（默认建议
+`http://127.0.0.1:3131/mcp`），不得从公网 issuer 或浏览器 Host 隐式推导。
+
 ### 2.3 浏览器侧安全
 
 - 页面不会嵌入 bearer token、client secret 或 MCP URL。
@@ -230,7 +236,8 @@ GBrain 在 `http://<server>:3132/admin/review` 提供一套只读浏览 + 写操
 
 | 现象 | 可能原因 | 处理 |
 | --- | --- | --- |
-| 页面提示“服务不可用” | 服务端 `local-writer.env` 缺失或 token 失效 | 检查服务端 `~/.config/gbrain/local-writer.env` 和 token endpoint |
+| 页面提示“服务不可用” | 服务端 `local-writer.env` 缺失或 token 失效 | systemd 检查 credential；非 systemd 检查 `GBRAIN_REVIEW_WRITER_ENV_PATH` 和 token endpoint |
+| 点击废弃等写操作一直失败 | 服务进程读不到 writer credential，或 writer MCP URL 与 attestation URL 不一致 | 检查 systemd `LoadCredential`、`GBRAIN_REVIEW_WRITER_MCP_URL` 和 `GBRAIN_LOOPBACK_MCP_URL` |
 | 门禁失败 | 草稿未经验证、重复目标、unsafe content | 按门禁 code 修正后重新 plan |
 | 确认执行返回 400 | 确认短语不匹配 | 输入完整的 `PROMOTE <target-slug>` 或 `MERGE <target-slug>` |
 | 列表为空 | 没有 inbox 草稿或全部被软删除 | 检查 `gbrain review list` 是否一致 |

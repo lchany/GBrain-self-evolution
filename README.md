@@ -14,11 +14,18 @@
 
 来自本次 `gbrain-no-hook-capture-implementation` 计划。核心路径是：`capture -> inbox/draft -> review -> keep/promote/merge/reject/repair/cleanup`。客户端只安装规则和技能，不依赖 OpenCode/Codex 生命周期 hook 自动沉淀。
 
+### Wave 3：review UI reliability and light theme
+
+修复 Web UI 执行 `reject` 等写操作时，服务进程无法读取 root-owned writer
+凭据以及公网/loopback MCP URL attestation 不一致的问题；systemd 改用
+`LoadCredential`，审核 writer 显式连接 loopback MCP。同时将审核页面改为极简
+灰白主题，并移除客户端 Skill 与视觉测试中的开发机绝对路径。
+
 ## 源仓库基线
 
 ### GBrain
 
-- 路径：`/home/l30002999/source_code/gbrain`（归档生成时的本地路径，仅溯源；部署时改用下方 remote clone）
+- 来源：归档生成时的 GBrain 源工作树（本机路径不作为部署输入；部署时使用下方 remote clone）
 - HEAD：`1fabbb9849f23703ee2898699868ce8101e7b61d`
 - remote：`origin https://github.com/garrytan/gbrain.git`
 - 归档补丁：`patches/gbrain-self-evolution.patch`
@@ -26,7 +33,7 @@
 
 ### oh-my-openagent
 
-- 路径：`/home/l30002999/source_code/oh-my-openagent`（归档生成时的本地路径，仅溯源；部署时改用下方 remote clone）
+- 来源：归档生成时的 oh-my-openagent 源工作树（本机路径不作为部署输入；部署时使用下方 remote clone）
 - HEAD：`e3556c35d2c3879aeec1d7043ecc52e37bf1d3d3`
 - remote：`origin https://github.com/code-yeongyu/oh-my-openagent.git`，`fork https://github.com/code-yeongyu/oh-my-openagent.git`
 - 归档补丁：`patches/oh-my-openagent-gbrain.patch`
@@ -39,6 +46,7 @@ GBrain-self-evolution/
 ├── README.md
 ├── patches/
 │   ├── gbrain-self-evolution.patch
+│   ├── gbrain-review-ui-portability.patch
 │   └── oh-my-openagent-gbrain.patch
 ├── docs/
 │   ├── EVIDENCE.md
@@ -74,6 +82,20 @@ cd oh-my-openagent
 git checkout e3556c35d2c3879aeec1d7043ecc52e37bf1d3d3
 git apply --check /path/to/GBrain-self-evolution/patches/oh-my-openagent-gbrain.patch
 git apply /path/to/GBrain-self-evolution/patches/oh-my-openagent-gbrain.patch
+```
+
+### 应用审核 UI 修复补丁
+
+该补丁基于本仓库 `gbrain-review-ui` 源码分支的
+`681866e2f91c3e874d76b95eeb4e484dd902d7fd`：
+
+```bash
+git clone --branch gbrain-review-ui \
+  https://github.com/lchany/GBrain-self-evolution.git gbrain-review-ui
+cd gbrain-review-ui
+git checkout 681866e2f91c3e874d76b95eeb4e484dd902d7fd
+git apply --check /path/to/GBrain-self-evolution/patches/gbrain-review-ui-portability.patch
+git apply /path/to/GBrain-self-evolution/patches/gbrain-review-ui-portability.patch
 ```
 
 这些文件是 `git diff` 格式补丁，推荐用 `git apply`。如果审阅流程要求 `git am`，请先由审阅者把补丁封装成邮件格式 commit，再执行 `git am`。

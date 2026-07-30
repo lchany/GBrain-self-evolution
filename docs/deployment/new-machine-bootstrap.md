@@ -47,6 +47,21 @@ git clone https://github.com/lchany/GBrain-self-evolution.git /opt/gbrain-self-e
 
 这一步是**把补丁应用到 GBrain 源码检出**，而不是直接写入 `/opt/gbrain`。先在临时构建目录完成源码准备，再在第 5 步同步到 `/opt/gbrain`。
 
+当前审核 UI 部署优先使用已经整合 Wave 1/2 的 `gbrain-review-ui` 分支，再应用
+Wave 3 修复：
+
+```bash
+cd /opt/gbrain-self-evolution
+git clone --branch gbrain-review-ui \
+  https://github.com/lchany/GBrain-self-evolution.git gbrain-checkout
+cd gbrain-checkout
+git checkout 681866e2f91c3e874d76b95eeb4e484dd902d7fd
+git apply --check ../patches/gbrain-review-ui-portability.patch
+git apply ../patches/gbrain-review-ui-portability.patch
+```
+
+下面的上游基线方式只用于复现历史 Wave 1/2，不包含最新审核 UI 修复：
+
 ```bash
 cd /opt/gbrain-self-evolution
 git clone https://github.com/garrytan/gbrain.git gbrain-checkout

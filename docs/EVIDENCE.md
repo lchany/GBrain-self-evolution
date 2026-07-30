@@ -1,6 +1,6 @@
 # GBrain 自进化归档证据摘要
 
-本文件汇总 `/home/l30002999/source_code/oh-my-openagent/.omo/evidence/20260726-gbrain-no-hook-capture/` 中 Todo 12 INDEX 和 final-wave F1-F5 的审阅结论；该路径仅为内部归档生成证据位置，不是部署输入。这里不收录原始 transcript、密集日志、token、真实 IP 或环境 dump。
+本文件汇总归档生成阶段 Todo 12 INDEX 和 final-wave F1-F5 的审阅结论；原始内部 evidence 路径不是部署输入，也不写入可移植交付物。这里不收录原始 transcript、密集日志、token、真实 IP 或环境 dump。
 
 ## 功能地图
 

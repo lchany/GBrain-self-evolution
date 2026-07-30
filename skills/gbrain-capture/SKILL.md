@@ -50,8 +50,8 @@ description: "Capture durable GBrain candidates into inbox drafts. Use when a ta
    - 可复用成功经验：`knowledge/`、`runbooks/`、相关 `decisions/`、`projects/`。
    - 禁止重犯事项：相关 `incidents/`、失败错题、已验证无效方案。
 3. 选择模板：
-   - 成功案例参考 `/mnt/disk2t/l30002999/gbrain-knowledge/source/templates/success-case.md`。
-   - 失败错题参考 `/mnt/disk2t/l30002999/gbrain-knowledge/source/templates/wrong-answer.md`。
+   - 成功案例使用本文件“内容结构”中的成功案例模板。
+   - 失败错题使用本文件“内容结构”中的失败错题模板。
 4. 需要直接通过 MCP 写页面时，先加载 `gbrain-knowledge-writer`，执行 search-before-create，再用 MCP `put_page`。
 5. 优先使用已实现的结构化 CLI 写 `inbox/` 草稿：
 

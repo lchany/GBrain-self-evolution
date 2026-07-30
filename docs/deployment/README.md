@@ -72,6 +72,13 @@
 
 默认查询排除 `inbox/`；显式 `include_prefixes: ["inbox/"]` 才能列出草稿。`promote` 必须人工输入 `PROMOTE <target-slug>`。
 
+### Wave 3：审核 UI 可靠性与浅色主题
+
+`patches/gbrain-review-ui-portability.patch` 修复 Web UI 写操作的 writer
+credential/loopback attestation 链路，使用 systemd `LoadCredential` 保护
+root-owned 凭据，并将审核页面统一为极简灰白主题。补丁基线和应用命令见归档
+根目录 README。
+
 基线、范围与补丁应用命令详见归档根目录 [README.md](../../README.md)。
 
 ## 按角色选择文档

@@ -18,6 +18,8 @@ User=gbrain
 Group=gbrain
 WorkingDirectory=/opt/gbrain
 EnvironmentFile=/etc/gbrain/gbrain-serve.env
+# writer 凭据在磁盘上保持 root:root 0600；systemd 仅向本服务暴露只读副本。
+LoadCredential=gbrain-local-writer.env:/etc/gbrain/clients/local-writer.env
 
 # GBRAIN_HTTP_BIND_FLAGS 可设置为 "--bind <BIND_ADDRESS>"；保持空值表示使用 CLI 默认绑定。
 # GBRAIN_PUBLIC_URL 供操作文档记录公网入口；实际是否需要传入 CLI 请以 `gbrain --help` 为准。
