@@ -42,6 +42,24 @@ bun src/cli.ts install-client --json
 它不会读取或生成 `local-read.env`、`local-writer.env`、Bearer token 或
 client secret。
 
+安装后的规则默认要求 Agent 使用中文说明经验召回、候选总结、预分类和
+审核结论。命令、代码、路径、协议字段和错误原文可以保留英文。
+
+经验工作流区分只读召回和写入：
+
+1. 非平凡任务开始时，Agent 先通过 MCP 只读召回已有经验。
+2. 关键失败只触发故障召回；同类故障第 2 次独立出现时，Agent 停止盲目
+   重试并整理错误总结。
+3. 候选经验先完成搜索去重、自动脱敏、固定模板整理和预分类。
+4. Agent 展示完整正文，并告知用户 5 分钟确认期限。
+5. 用户明确同意时立即写入；完整预览展示后 5 分钟没有任何回复时继续
+   写入；拒绝、要求修改或含义不明的回复不会触发写入。
+6. 所有草稿只写入 `inbox/`。写入后的正文锁定，后续人工审核只修改分类；
+   正文有问题时退回并重新生成，不能在分类审核时静默修改。
+
+固定模板位于安装后的 `gbrain-capture/SKILL.md`。其中适用条件、不适用
+条件和召回提示都是必填项，用来避免后续仅凭相似错误文本误用经验。
+
 ## 3. 配置 OpenCode
 
 先确认 OpenCode 已安装：
@@ -70,11 +88,12 @@ opencode mcp list
 ```text
 get_brain_identity
 search
-put_page
 ```
 
-三个调用都应能到达服务端；admin client 管理、审核页面和其他 admin 操作
-仍需通过浏览器访问 `/admin/review` 并使用 Basic Auth。
+两个只读调用都应能到达服务端。验证 `put_page` 时，必须先让 Agent 按
+`gbrain-capture` 展示完整脱敏预览和预分类，并执行 5 分钟限时审核；也可以
+由用户明确声明仅本次连接测试免除逐条确认。admin client 管理、审核页面和
+其他 admin 操作仍需通过浏览器访问 `/admin/review` 并使用 Basic Auth。
 
 ## 4. 配置 Codex
 
@@ -98,7 +117,8 @@ codex mcp add gbrain --url https://<PUBLIC_GBRAIN_HOST>/mcp
 codex mcp list
 ```
 
-然后让 Codex 调用 `get_brain_identity`、`search` 和 `put_page` 做实际验证。
+然后让 Codex 调用 `get_brain_identity` 和 `search` 做只读验证。需要验证
+`put_page` 时，遵循与 OpenCode 相同的预览、限时审核和 `inbox/` 写入规则。
 
 ## 5. 验证客户端路径
 
@@ -107,11 +127,11 @@ codex mcp list
 ```text
 get_brain_identity
 search
-put_page
 ```
 
-匿名 MCP 客户端只有 `read+write` 权限；admin 操作仍需通过服务器 admin
-Basic Auth 或本机管理员 CLI。若调用超时，按以下顺序排查：
+只读调用成功后，再按 `gbrain-capture` 工作流验证一次 `put_page`。匿名
+MCP 客户端只有 `read+write` 权限；admin 操作仍需通过服务器 admin Basic
+Auth 或本机管理员 CLI。若调用超时，按以下顺序排查：
 
 1. 客户端出口 IP 是否在云服务器防火墙白名单。
 2. `https://<PUBLIC_GBRAIN_HOST>/health` 是否返回 200。
