@@ -3,9 +3,9 @@
 ## Outcome
 
 GBrain becomes the only active experience system. The legacy Markdown vault is
-frozen after one final GitHub archival commit, remains available locally for a
-seven-day observation period, and is deleted only after a separate human
-decision. The GitHub repository remains as inactive historical evidence.
+frozen after one final GitHub archival commit and retained locally in an
+inactive state. The GitHub repository also remains as inactive historical
+evidence.
 
 Future agents read and write experience through the existing MCP connection.
 They do not invoke the legacy vault script or depend on a local GBrain CLI.
@@ -131,7 +131,7 @@ Cutover begins by disabling the old read path:
    deleting it.
 2. Remove the legacy Experience Vault block from the global agent rules.
 3. Update project-memory instructions so long-term experience uses GBrain.
-4. Keep the legacy repository itself unchanged during the observation period.
+4. Keep the legacy repository itself unchanged and retained.
 
 The active GBrain client workflow is MCP-native:
 
@@ -175,11 +175,13 @@ statistics. Later corrective work gets a separate inbox audit record. The
 temporary manifest containing original local paths is deleted after successful
 verification.
 
-## Observation and Deletion
+## Retention
 
-Successful cutover starts a seven-day observation period. No unattended
-deletion job is installed.
+The local legacy repository, the disabled legacy skill, and the GitHub archive
+are retained indefinitely. They are not deletion candidates, and deletion is
+not a migration milestone, acceptance criterion, or follow-up task.
 
-After seven days, a human rechecks retrieval and migration completeness, then
-decides whether to delete the exact local legacy repository and disabled skill
-paths. The GitHub archive is retained.
+No cron job, systemd timer, lifecycle hook, reminder, or unattended cleanup is
+installed for them. The disabled skill stays outside the active skill path, so
+retention does not restore the legacy read path or change the completed GBrain
+cutover.
