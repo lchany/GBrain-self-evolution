@@ -69,8 +69,9 @@ import {
 export const HEALTH_TIMEOUT_MS = 3000;
 
 export function selectMcpOperations(allowAnonymousMcp: boolean): typeof operations {
-  return operations.filter(op =>
-    !op.localOnly && (!allowAnonymousMcp || op.scope === 'read' || op.scope === 'write'),
+  const remotelyExposed = operations.filter(op => !op.localOnly);
+  return remotelyExposed.filter(op =>
+    !allowAnonymousMcp || op.scope === 'read' || op.scope === 'write',
   );
 }
 

@@ -5,8 +5,7 @@ import { renderReviewPage } from './frontmatter.ts';
 export function buildTargetPage(action: ReviewAction, source: ParsedReviewPage, existingTarget?: ParsedReviewPage): BuiltReviewPage | null {
   switch (action.kind) {
     case 'keep':
-    case 'promote':
-      {
+    case 'promote': {
       const projectId = typeof source.frontmatter.project_id === 'string' ? source.frontmatter.project_id : undefined;
       const promotesGlobally = projectId !== undefined && action.targetType !== 'project';
       const nextFrontmatter = { ...source.frontmatter };
@@ -14,7 +13,7 @@ export function buildTargetPage(action: ReviewAction, source: ParsedReviewPage, 
         delete nextFrontmatter.project_id;
         delete nextFrontmatter.project_binding;
         delete nextFrontmatter.record_kind;
-      }
+    }
       return materializePage({
         slug: action.targetSlug,
         type: action.targetType,
@@ -34,6 +33,10 @@ export function buildTargetPage(action: ReviewAction, source: ParsedReviewPage, 
       }
     case 'merge': {
       if (existingTarget === undefined) return null;
+      const sourceProjectId = typeof source.frontmatter.project_id === 'string'
+        ? source.frontmatter.project_id
+        : undefined;
+      const mergesGlobally = sourceProjectId !== undefined && action.targetType !== 'project';
       return materializePage({
         slug: action.targetSlug,
         type: action.targetType,
@@ -46,6 +49,9 @@ export function buildTargetPage(action: ReviewAction, source: ParsedReviewPage, 
           type: action.targetType,
           source_refs: mergeList(existingTarget.frontmatter.source_refs, source.frontmatter.source_refs),
           merged_from: mergeList(existingTarget.frontmatter.merged_from, [source.slug]),
+          ...(mergesGlobally
+            ? { source_project_ids: mergeList(existingTarget.frontmatter.source_project_ids, [sourceProjectId]) }
+            : {}),
         },
       });
     }

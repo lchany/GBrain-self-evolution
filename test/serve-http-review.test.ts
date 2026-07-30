@@ -1542,7 +1542,8 @@ describe('review target validation', () => {
     expect(generateReviewTargetSlug('inbox/Alpha---Unsafe $$ Target', 'runbook')).toBe('runbooks/alpha-unsafe-target');
     expect(generateReviewTargetSlug('inbox/Alpha---Unsafe $$ Target', 'incident')).toBe('incidents/alpha-unsafe-target');
     expect(generateReviewTargetSlug('inbox/Alpha---Unsafe $$ Target', 'decision')).toBe('decisions/alpha-unsafe-target');
-    expect(generateReviewTargetSlug('inbox/Alpha---Unsafe $$ Target', 'project')).toBe('projects/alpha-unsafe-target');
+    expect(generateReviewTargetSlug('inbox/Alpha---Unsafe $$ Target', 'project')).toBeNull();
+    expect(generateReviewTargetSlug('inbox/Alpha---Unsafe $$ Target', 'project', 'prj-0123456789abcdef')).toBe('projects/prj-0123456789abcdef/alpha-unsafe-target');
     expect(generateReviewTargetSlug('inbox/Alpha---Unsafe $$ Target', 'environment')).toBe('environments/alpha-unsafe-target');
     expect(generateReviewTargetSlug('inbox/Alpha---Unsafe $$ Target', 'agent-skill')).toBe('agent-skills/alpha-unsafe-target');
     expect(generateReviewTargetSlug('inbox/---', 'incident')).toBeNull();

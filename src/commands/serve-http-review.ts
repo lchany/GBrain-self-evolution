@@ -613,7 +613,7 @@ export function parseReviewTargetType(value: unknown): ReviewTargetType | null {
   }
 }
 
-export function generateReviewTargetSlug(sourceSlug: string, targetType: ReviewTargetType): string | null {
+export function generateReviewTargetSlug(sourceSlug: string, targetType: ReviewTargetType, projectId?: string): string | null {
   if (!sourceSlug.startsWith('inbox/')) return null;
   const tail = sourceSlug.slice('inbox/'.length)
     .toLowerCase()
@@ -621,7 +621,9 @@ export function generateReviewTargetSlug(sourceSlug: string, targetType: ReviewT
     .replace(/-+/g, '-')
     .replace(/^-+|-+$/g, '');
   if (tail.length === 0) return null;
-  const slug = `${REVIEW_TARGET_PREFIXES[targetType]}${tail}`
+  if (targetType === 'project' && (projectId === undefined || !/^prj-[0-9a-f]{16}$/.test(projectId))) return null;
+  const prefix = targetType === 'project' ? `projects/${projectId}/` : REVIEW_TARGET_PREFIXES[targetType];
+  const slug = `${prefix}${tail}`
     .slice(0, 80)
     .replace(/-+$/g, '')
     .replace(/\/+$/g, '');
@@ -872,7 +874,14 @@ async function renderTargetSelector(engine: BrainEngine, sourceId: string, sourc
       <details><summary>高级：手动输入已有目标 slug</summary><form method="get" action="${actionPath}"><input type="hidden" name="action" value="merge" /><input type="hidden" name="target_type" value="${targetType}" /><label>目标 slug<input name="target" required /></label><button type="submit">验证已有目标</button></form></details>`;
   }
 
-  const generatedSlug = generateReviewTargetSlug(sourceSlug, targetType);
+  const sourceProjectId = targetType === 'project'
+    ? (await engine.getPage(sourceSlug, { sourceId }))?.frontmatter.project_id
+    : undefined;
+  const generatedSlug = generateReviewTargetSlug(
+    sourceSlug,
+    targetType,
+    typeof sourceProjectId === 'string' ? sourceProjectId : undefined,
+  );
   if (generatedSlug === null) {
     return `<h1>选择审核目标</h1><p class="warn">无法生成有效目标 slug，请使用高级手动输入。</p>${typeForm}<details open><summary>高级：手动输入目标 slug</summary>${renderManualTargetForm(actionPath, action, targetType, '')}</details>`;
   }

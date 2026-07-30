@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { existsSync, lstatSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, lstatSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { isTrustedDotfile } from './path-confine.ts';
 
@@ -37,9 +37,8 @@ export function readProjectMarker(startDir: string = process.cwd()): ProjectMark
       const marker = parseProjectMarker(readFileSync(markerPath, 'utf8'));
       return marker === null ? null : { ...marker, marker_path: markerPath };
     } catch (error) {
-      if (existsSync(markerPath)) return null;
+      if (!isMissingFileError(error)) return null;
       // Missing marker: continue walking toward the project root.
-      void error;
     }
     const parent = dirname(dir);
     if (parent === dir) break;
@@ -62,11 +61,15 @@ export function writeProjectMarker(projectRoot: string, projectId: string): stri
   const tempPath = join(root, `.${PROJECT_MARKER}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
   try {
     writeFileSync(tempPath, buildProjectMarker(projectId), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-    renameSync(tempPath, markerPath);
+    linkSync(tempPath, markerPath);
   } finally {
-    try { unlinkSync(tempPath); } catch { /* rename or cleanup already completed */ }
+    try { unlinkSync(tempPath); } catch { /* link or cleanup already completed */ }
   }
   return markerPath;
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
 }
 
 export function normalizeRepositoryRef(value: string): string | null {

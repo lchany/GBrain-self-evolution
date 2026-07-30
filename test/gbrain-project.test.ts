@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import matter from 'gray-matter';
 import { runGbrainProject, type ProjectToolCaller } from '../src/commands/gbrain-project.ts';
 
@@ -74,5 +74,58 @@ describe('gbrain project command', () => {
     expect(parsed.data.record_kind).toBe('project-registry');
     expect(parsed.data.repository_refs).toEqual(['github.com/example/widget']);
     expect(readFileSync(join(root, '.gbrain-project.yaml'), 'utf8')).toContain('prj-0123456789abcdef');
+  });
+
+  test('match lists the canonical prefix and hydrates registry frontmatter read-only', async () => {
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const callTool: ProjectToolCaller = async (name, args) => {
+      calls.push({ name, args });
+      if (name === 'list_pages') {
+        return {
+          items: [{ slug: 'projects/prj-0123456789abcdef/index', title: 'Example Widget' }],
+          has_more: false,
+          next_offset: null,
+        };
+      }
+      return {
+        slug: String(args.slug),
+        frontmatter: {
+          record_kind: 'project-registry',
+          project_id: 'prj-0123456789abcdef',
+          project_name: 'Example Widget',
+          project_aliases: [basename(root)],
+          repository_refs: [],
+        },
+      };
+    };
+    const output: string[] = [];
+    const code = await runGbrainProject(['match', '--json'], {
+      cwd: root,
+      callTool,
+      stdout: (text) => output.push(text),
+    });
+    expect(code).toBe(0);
+    expect(calls[0]).toEqual({
+      name: 'list_pages',
+      args: { type: 'project', include_prefixes: ['projects/'], limit: 100, offset: 0 },
+    });
+    expect(calls[1]).toEqual({
+      name: 'get_page',
+      args: { slug: 'projects/prj-0123456789abcdef/index' },
+    });
+    expect(JSON.parse(output.join(''))).toMatchObject({
+      status: 'confirmation_required',
+      candidates: [{ project_id: 'prj-0123456789abcdef' }],
+    });
+  });
+
+  test('rejects unexpected positional arguments', async () => {
+    const output: string[] = [];
+    const code = await runGbrainProject(['current', 'surprise', '--json'], {
+      cwd: root,
+      stdout: (text) => output.push(text),
+    });
+    expect(code).toBe(1);
+    expect(JSON.parse(output.join('')).code).toBe('project_argument_invalid');
   });
 });

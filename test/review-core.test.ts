@@ -85,6 +85,32 @@ project_id: ${projectId}
     expect(result.plan?.targetPage?.frontmatter.project_binding).toBeUndefined();
   });
 
+  test('Given a project draft When merged globally Then source_project_ids is merged', async () => {
+    const projectId = 'prj-0123456789abcdef';
+    const source = page('inbox/project-merge-rule', `${frontmatter({ type: 'project' })}record_kind: project-experience
+project_binding: bound
+project_id: ${projectId}
+`);
+    const target = page('knowledge/project-merge-rule', `${frontmatter({ type: 'knowledge', status: 'verified' })}source_project_ids:
+  - prj-fedcba9876543210
+`);
+    const result = await planReview(deps([source, target]), {
+      action: {
+        kind: 'merge',
+        sourceSlug: source.slug,
+        targetSlug: target.slug,
+        targetType: 'knowledge',
+        humanConfirmation: true,
+      },
+      reviewDate: REVIEW_DATE,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.plan?.targetPage?.frontmatter.source_project_ids).toEqual([
+      'prj-fedcba9876543210',
+      projectId,
+    ]);
+  });
+
   test('Given an incident draft When keep is planned Then target/review/delete steps are reusable by CLI and Web', async () => {
     // given
     const source = page('inbox/incident-one', frontmatter());

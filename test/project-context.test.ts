@@ -44,6 +44,18 @@ describe('project identity context', () => {
     });
   });
 
+  test('an invalid nearer marker fails closed instead of inheriting a parent binding', () => {
+    writeFileSync(join(root, '.gbrain-project.yaml'), buildProjectMarker('prj-0123456789abcdef'));
+    const nested = join(root, 'packages', 'api');
+    mkdirSync(nested, { recursive: true });
+    writeFileSync(join(root, 'packages', '.gbrain-project.yaml'), 'project_id: malformed\n');
+    expect(readProjectMarker(nested)).toBeNull();
+  });
+
+  test('repository normalization rejects credential-bearing URLs', () => {
+    expect(normalizeRepositoryRef('https://user:secret@github.com/example/widget.git')).toBeNull();
+  });
+
   test('writes a minimal marker atomically and refuses a conflicting binding', () => {
     const markerPath = writeProjectMarker(root, 'prj-0123456789abcdef');
     expect(readFileSync(markerPath, 'utf8')).toBe('schema_version: 1\nproject_id: prj-0123456789abcdef\n');

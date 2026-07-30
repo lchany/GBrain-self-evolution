@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import matter from 'gray-matter';
 import {
   assertProjectId,
@@ -69,17 +69,16 @@ export async function runGbrainProject(args: readonly string[], deps: Partial<Pr
 
 function validateCommandArgs(args: readonly string[]): void {
   const command = args[0];
-  const allowed = command === 'init'
-    ? new Set(['--name', '--repo', '--json'])
-    : command === 'current' || command === 'match' || command === 'bind'
-      ? new Set(['--json'])
-      : new Set<string>();
-  const positionalLimit = command === 'bind' ? 2 : 1;
-  for (let index = positionalLimit; index < args.length; index++) {
+  if (command !== 'current' && command !== 'match' && command !== 'bind' && command !== 'init') return;
+  for (let index = 1; index < args.length; index++) {
     const arg = args[index];
-    if (!arg.startsWith('--')) continue;
-    if (!allowed.has(arg)) throw new Error(`project_argument_invalid: unknown argument ${arg}`);
-    if (arg === '--name' || arg === '--repo') index++;
+    if (arg === '--json') continue;
+    if (command === 'bind' && index === 1 && !arg.startsWith('--')) continue;
+    if (command === 'init' && (arg === '--name' || arg === '--repo')) {
+      requiredPositional(args, ++index, arg);
+      continue;
+    }
+    throw new Error(`project_argument_invalid: unexpected argument ${arg}`);
   }
 }
 
@@ -93,8 +92,8 @@ async function matchProject(deps: ProjectCommandDeps): Promise<Record<string, un
   const current = currentProject(deps.cwd);
   if (current.status === 'bound') return current;
   const repositoryRef = detectRepositoryRef(deps.cwd);
-  const projectName = findProjectRoot(deps.cwd).split('/').at(-1)?.toLowerCase() ?? '';
-  const candidates = projectRegistryPages(await deps.callTool('list_pages', { prefix: 'projects/' }))
+  const projectName = basename(findProjectRoot(deps.cwd)).toLowerCase();
+  const candidates = (await loadProjectRegistries(deps.callTool))
     .filter((page) => {
       const refs = stringList(page.frontmatter.repository_refs);
       const aliases = [page.frontmatter.project_name, ...stringList(page.frontmatter.project_aliases)]
@@ -135,7 +134,7 @@ async function initProject(args: readonly string[], deps: ProjectCommandDeps): P
   const repoArg = flagValue(args, '--repo');
   const repositoryRef = repoArg ? normalizeRepositoryRef(repoArg) : detectRepositoryRef(deps.cwd);
   if (repoArg && repositoryRef === null) throw new Error('repository_ref_invalid: --repo must be a supported Git remote URL');
-  const registries = projectRegistryPages(await deps.callTool('list_pages', { prefix: 'projects/' }));
+  const registries = await loadProjectRegistries(deps.callTool);
   const duplicate = registries.find((page) => {
     const names = [page.frontmatter.project_name, ...stringList(page.frontmatter.project_aliases)]
       .filter((value): value is string => typeof value === 'string')
@@ -202,14 +201,37 @@ function detectRepositoryRef(cwd: string): string | null {
   }
 }
 
-function projectRegistryPages(result: unknown): Array<{ slug: string; frontmatter: Record<string, unknown> }> {
+async function loadProjectRegistries(callTool: ProjectToolCaller): Promise<Array<{ slug: string; frontmatter: Record<string, unknown> }>> {
+  const hydrated: Array<{ slug: string; frontmatter: Record<string, unknown> }> = [];
+  let offset = 0;
+  for (let page = 0; page < 100; page++) {
+    const result = await callTool('list_pages', { type: 'project', include_prefixes: ['projects/'], limit: 100, offset });
+    const indexSlugs = pageSummaries(result).map((entry) => entry.slug).filter((slug) => slug.endsWith('/index'));
+    const loaded = await Promise.all(indexSlugs.map((slug) => callTool('get_page', { slug })));
+    hydrated.push(...loaded.map(pageFrom).filter((entry): entry is { slug: string; frontmatter: Record<string, unknown> } =>
+      entry !== null && entry.frontmatter.record_kind === 'project-registry'));
+    const nextOffset = envelopeNextOffset(result);
+    if (nextOffset === null) break;
+    offset = nextOffset;
+  }
+  return hydrated;
+}
+
+function pageSummaries(result: unknown): Array<{ slug: string }> {
   const values = Array.isArray(result)
     ? result
-    : typeof result === 'object' && result !== null && 'pages' in result && Array.isArray(result.pages)
-      ? result.pages
+    : typeof result === 'object' && result !== null && 'items' in result && Array.isArray(result.items)
+      ? result.items
       : [];
-  return values.map(pageFrom).filter((page): page is { slug: string; frontmatter: Record<string, unknown> } =>
-    page !== null && page.frontmatter.record_kind === 'project-registry');
+  return values.flatMap((value) =>
+    typeof value === 'object' && value !== null && 'slug' in value && typeof value.slug === 'string'
+      ? [{ slug: value.slug }]
+      : []);
+}
+
+function envelopeNextOffset(result: unknown): number | null {
+  if (typeof result !== 'object' || result === null || !('has_more' in result) || result.has_more !== true) return null;
+  return 'next_offset' in result && typeof result.next_offset === 'number' ? result.next_offset : null;
 }
 
 function pageFrom(value: unknown): { slug: string; frontmatter: Record<string, unknown> } | null {
