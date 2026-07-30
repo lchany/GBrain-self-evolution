@@ -36,10 +36,13 @@ describe('gbrain install-client', () => {
       expect(opencodeRules).toContain('5 分钟');
       expect(opencodeRules).toContain('.gbrain-project.yaml');
       expect(opencodeRules).toContain('project_id');
+      expect(opencodeRules).toContain('match_project');
+      expect(opencodeRules).toContain('gbrain project bind <project_id> --confirmed');
       expect(codexRules).toContain('默认使用中文');
       expect(codexRules).toContain('只读召回');
       expect(codexRules).toContain('第 2 次');
       expect(codexRules).toContain('5 分钟');
+      expect(codexRules).toContain('match_project');
 
       const opencodeCapture = readFileSync(
         join(root, 'xdg', 'opencode', 'skills', 'gbrain-capture', 'SKILL.md'),
@@ -67,6 +70,10 @@ describe('gbrain install-client', () => {
       expect(opencodeCapture).toContain('重新计算 5 分钟');
       expect(opencodeCapture).toContain('project_binding');
       expect(opencodeCapture).toContain('gbrain project match');
+      expect(opencodeCapture).toContain('match_project');
+      expect(opencodeCapture).toContain('gbrain project bind <project_id> --confirmed');
+      expect(opencodeCapture).toContain('即使只有一个候选');
+      expect(opencodeCapture).not.toContain('本地 writer 凭据');
       expect(opencodeCapture).not.toContain('gbrain capture');
 
       expect(opencodeReview).toContain('list_pages');

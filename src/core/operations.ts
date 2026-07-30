@@ -25,6 +25,7 @@ import { bumpLastRetrievedAt } from './last-retrieved.ts';
 import { isSearchMode } from './search/mode.ts';
 import { stampEvidence } from './search/evidence.ts';
 import { requiredProjectRegistrySlug, validatePutPageWrite } from './put-page-validation.ts';
+import { normalizeRepositoryRef, PROJECT_ID_RE } from './project-context.ts';
 import type { Page, SearchResult } from './types.ts';
 import { CJK_SLUG_CHARS } from './cjk.ts';
 import * as db from './db.ts';
@@ -1666,6 +1667,159 @@ const list_pages: Operation = {
   },
   scope: 'read',
   cliHints: { name: 'list' },
+};
+
+interface ProjectMatchCandidate {
+  project_id: string;
+  project_name: string;
+  registry_slug: string;
+  match_reason: 'repository_ref' | 'name_or_alias';
+}
+
+function projectRegistryIdentity(page: Page): {
+  project_id: string;
+  project_name: string;
+  repository_refs: string[];
+  names: string[];
+} | null {
+  const slugMatch = /^projects\/(prj-[0-9a-f]{16})\/index$/.exec(page.slug);
+  if (!slugMatch || page.frontmatter.record_kind !== 'project-registry') return null;
+  const projectId = page.frontmatter.project_id;
+  const projectName = page.frontmatter.project_name;
+  if (
+    typeof projectId !== 'string'
+    || !PROJECT_ID_RE.test(projectId)
+    || projectId !== slugMatch[1]
+    || typeof projectName !== 'string'
+    || projectName.trim().length === 0
+  ) {
+    return null;
+  }
+  const repositoryRefs = Array.isArray(page.frontmatter.repository_refs)
+    ? page.frontmatter.repository_refs.flatMap((value) => {
+      if (typeof value !== 'string') return [];
+      const normalized = normalizeRepositoryRef(value);
+      return normalized === null ? [] : [normalized];
+    })
+    : [];
+  const aliases = Array.isArray(page.frontmatter.project_aliases)
+    ? page.frontmatter.project_aliases.filter((value): value is string => typeof value === 'string')
+    : [];
+  return {
+    project_id: projectId,
+    project_name: projectName.trim(),
+    repository_refs: [...new Set(repositoryRefs)],
+    names: [projectName, ...aliases].map((value) => value.trim().toLowerCase()).filter(Boolean),
+  };
+}
+
+async function listProjectRegistries(ctx: OperationContext): Promise<Page[]> {
+  const pages: Page[] = [];
+  const scope = sourceScopeOpts(ctx);
+  let offset = 0;
+  for (let batchIndex = 0; batchIndex < 100; batchIndex++) {
+    const batch = await ctx.engine.listPages({
+      type: 'project',
+      limit: 100,
+      offset,
+      sort: 'slug',
+      ...scope,
+    });
+    pages.push(...batch);
+    if (batch.length < 100) break;
+    offset += batch.length;
+  }
+  return pages;
+}
+
+const match_project: Operation = {
+  name: 'match_project',
+  description:
+    '使用客户端提供的脱敏仓库引用和项目名称匹配规范项目登记页。'
+    + '只返回候选；本地绑定前必须由用户明确确认。',
+  params: {
+    repository_ref: {
+      type: 'string',
+      maxLength: 2048,
+      pattern: '^[^\\u0000-\\u001F\\u007F]*$',
+      description: 'Git remote 或规范化的 host/owner/repository 引用；拒绝凭据和 URL 查询数据。',
+    },
+    project_name: {
+      type: 'string',
+      maxLength: 200,
+      pattern: '^[^\\u0000-\\u001F\\u007F]*$',
+      description: '本地项目名称；仅在没有仓库精确候选时用于名称或别名匹配。',
+    },
+  },
+  handler: async (ctx, p) => {
+    const rawRepositoryRef = typeof p.repository_ref === 'string' ? p.repository_ref.trim() : '';
+    const rawProjectName = typeof p.project_name === 'string' ? p.project_name.trim() : '';
+    if (
+      rawRepositoryRef.length > 2048
+      || rawProjectName.length > 200
+      || /[\u0000-\u001f\u007f]/.test(rawRepositoryRef)
+      || /[\u0000-\u001f\u007f]/.test(rawProjectName)
+    ) {
+      throw new OperationError('invalid_params', 'project_match_input_invalid: 匹配输入包含控制字符或超过长度限制');
+    }
+    const repositoryRef = rawRepositoryRef ? normalizeRepositoryRef(rawRepositoryRef) : null;
+    if (rawRepositoryRef && repositoryRef === null) {
+      throw new OperationError(
+        'invalid_params',
+        'repository_ref_invalid: 请使用不含密码、查询参数或片段的 Git remote',
+      );
+    }
+    const projectName = rawProjectName.toLowerCase();
+    if (repositoryRef === null && !projectName) {
+      throw new OperationError(
+        'invalid_params',
+        'project_match_input_required: 请提供 repository_ref 或 project_name',
+      );
+    }
+
+    const registries = (await listProjectRegistries(ctx))
+      .flatMap((page) => {
+        const identity = projectRegistryIdentity(page);
+        return identity === null ? [] : [{ page, identity }];
+      });
+    const repositoryMatches = repositoryRef === null
+      ? []
+      : registries.filter(({ identity }) => identity.repository_refs.includes(repositoryRef));
+    const matched = repositoryMatches.length > 0
+      ? repositoryMatches.map(({ page, identity }): ProjectMatchCandidate => ({
+        project_id: identity.project_id,
+        project_name: identity.project_name,
+        registry_slug: page.slug,
+        match_reason: 'repository_ref',
+      }))
+      : registries
+        .filter(({ identity }) => projectName && identity.names.includes(projectName))
+        .map(({ page, identity }): ProjectMatchCandidate => ({
+          project_id: identity.project_id,
+          project_name: identity.project_name,
+          registry_slug: page.slug,
+          match_reason: 'name_or_alias',
+        }));
+    const candidates = [...new Map(
+      matched
+        .sort((left, right) => left.project_id.localeCompare(right.project_id))
+        .map((candidate) => [candidate.project_id, candidate]),
+    ).values()];
+    return candidates.length === 0
+      ? {
+        ok: true,
+        status: 'unmatched',
+        code: 'project_match_not_found',
+        candidates: [],
+      }
+      : {
+        ok: true,
+        status: 'confirmation_required',
+        code: 'project_match_confirmation_required',
+        candidates,
+      };
+  },
+  scope: 'read',
 };
 
 // --- Search ---
@@ -5635,7 +5789,7 @@ const chronicle_backfill: Operation = {
 
 export const operations: Operation[] = [
   // Page CRUD
-  get_page, put_page, delete_page, list_pages,
+  get_page, put_page, delete_page, list_pages, match_project,
   // v0.26.5 destructive-guard ops (page-level soft-delete + recovery + admin purge)
   restore_page, purge_deleted_pages,
   // Search

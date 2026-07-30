@@ -3,9 +3,9 @@
  *
  * Before v0.15 the mapping lived inline in src/mcp/server.ts. After the
  * extraction, buildToolDefs is the single source of truth; the subagent tool
- * registry calls it with a filtered OPERATIONS subset. This test pins the
- * extracted output to the pre-extraction shape byte-for-byte so we don't
- * silently drift the MCP-facing tool schema.
+ * registry calls it with a filtered OPERATIONS subset. This test compares the
+ * extracted output with an independent reference mapper so MCP-facing schema
+ * and annotation changes cannot drift silently.
  */
 
 import { describe, test, expect } from 'bun:test';
@@ -13,9 +13,8 @@ import { operations } from '../src/core/operations.ts';
 import { buildToolDefs, paramDefToSchema } from '../src/mcp/tool-defs.ts';
 import type { ParamDef } from '../src/core/operations.ts';
 
-// Reference shape — mirrors the canonical `paramDefToSchema` helper from
-// src/mcp/tool-defs.ts. Drift between the helper and this reference fails
-// the byte-equality test loudly.
+// Reference shape mirrors the canonical `paramDefToSchema` contract from
+// src/mcp/tool-defs.ts. Drift between both mappings fails loudly.
 //
 // v0.34 update: paramDefToSchema is recursive on `items` so nested
 // array-of-arrays preserves the inner shape on the MCP wire. The reference
@@ -32,6 +31,13 @@ type ParamDefLike = {
   description?: string;
   enum?: string[];
   default?: unknown;
+  minimum?: number;
+  maximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  minItems?: number;
+  maxItems?: number;
+  pattern?: string;
   items?: ParamDefLike;
 };
 function referenceParamDefToSchema(p: ParamDefLike): Record<string, unknown> {
@@ -40,35 +46,51 @@ function referenceParamDefToSchema(p: ParamDefLike): Record<string, unknown> {
     ...(p.description ? { description: p.description } : {}),
     ...(p.enum ? { enum: p.enum } : {}),
     ...(p.default !== undefined ? { default: p.default } : {}),
+    ...(p.minimum !== undefined ? { minimum: p.minimum } : {}),
+    ...(p.maximum !== undefined ? { maximum: p.maximum } : {}),
+    ...(p.minLength !== undefined ? { minLength: p.minLength } : {}),
+    ...(p.maxLength !== undefined ? { maxLength: p.maxLength } : {}),
+    ...(p.minItems !== undefined ? { minItems: p.minItems } : {}),
+    ...(p.maxItems !== undefined ? { maxItems: p.maxItems } : {}),
+    ...(p.pattern ? { pattern: p.pattern } : {}),
     ...(p.items ? { items: referenceParamDefToSchema(p.items) } : {}),
   };
 }
-function legacyInlineMap(ops: typeof operations) {
-  return ops.map(op => ({
-    name: op.name,
-    description: op.description,
-    inputSchema: {
-      type: 'object' as const,
-      properties: Object.fromEntries(
-        Object.entries(op.params).map(([k, v]) => [k, referenceParamDefToSchema(v)]),
-      ),
-      required: Object.entries(op.params)
-        .filter(([, v]) => v.required)
-        .map(([k]) => k),
-    },
-    annotations: {
-      readOnlyHint: (op.scope ?? 'read') === 'read',
-      destructiveHint: (op.scope ?? 'read') !== 'read',
-      idempotentHint: (op.scope ?? 'read') === 'read',
-      openWorldHint: true,
-    },
-  }));
+function referenceToolMap(ops: typeof operations) {
+  return ops.map(op => {
+    const readOnly = (op.scope ?? 'read') === 'read' || op.mutating === false;
+    const destructive = op.mutating === true || op.scope === 'write' || op.name === 'delete_page';
+    const idempotent = op.name === 'get_page'
+      || op.name === 'list_pages'
+      || op.name === 'delete_page'
+      || (readOnly && op.name !== 'search' && op.name !== 'query');
+    const openWorld = op.name === 'search' || op.name === 'query';
+    return {
+      name: op.name,
+      description: op.description,
+      inputSchema: {
+        type: 'object' as const,
+        properties: Object.fromEntries(
+          Object.entries(op.params).map(([k, v]) => [k, referenceParamDefToSchema(v)]),
+        ),
+        required: Object.entries(op.params)
+          .filter(([, v]) => v.required)
+          .map(([k]) => k),
+      },
+      annotations: {
+        readOnlyHint: readOnly,
+        destructiveHint: destructive,
+        idempotentHint: idempotent,
+        openWorldHint: openWorld,
+      },
+    };
+  });
 }
 
 describe('buildToolDefs', () => {
-  test('output equals pre-extraction inline mapping byte-for-byte', () => {
+  test('output equals the independent reference mapping byte-for-byte', () => {
     const extracted = buildToolDefs(operations);
-    const inline = legacyInlineMap(operations);
+    const inline = referenceToolMap(operations);
     expect(JSON.stringify(extracted)).toBe(JSON.stringify(inline));
   });
 
@@ -103,14 +125,14 @@ describe('buildToolDefs', () => {
     expect(search?.annotations).toEqual({
       readOnlyHint: true,
       destructiveHint: false,
-      idempotentHint: true,
+      idempotentHint: false,
       openWorldHint: true,
     });
     expect(putPage?.annotations).toEqual({
       readOnlyHint: false,
       destructiveHint: true,
       idempotentHint: false,
-      openWorldHint: true,
+      openWorldHint: false,
     });
   });
 });

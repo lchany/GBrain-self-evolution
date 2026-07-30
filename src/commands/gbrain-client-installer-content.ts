@@ -16,7 +16,7 @@ export const GBRAIN_CLIENT_RULES = `${GBRAIN_RULES_BLOCK_START}
 - 使用 GBrain MCP 的 \`list_pages\` 和 \`get_page\` 检查草稿。晋升只能在认证的管理员审核界面完成，匿名 MCP 客户端不得晋升。
 - 不为 GBrain 采集或审核添加生命周期钩子，不安装本地 GBrain CLI，不创建本地离线队列，也不索取客户端凭据作为降级方案。
 - 客户端网络访问由云防火墙白名单控制；安装器不创建或分发凭据。
-- 进入项目目录或开始项目任务时，只读检查祖先目录中的 \`.gbrain-project.yaml\`，并运行 \`gbrain project current --json\`；没有绑定时运行 \`gbrain project match --json\`，候选匹配必须由用户确认。
+- 进入项目目录或开始项目任务时，只读检查祖先目录中的 \`.gbrain-project.yaml\`，并运行 \`gbrain project current --json\`。已绑定时通过 GBrain MCP \`get_page\` 验证 \`projects/<project_id>/index\`；未绑定时运行 \`gbrain project match --json\` 取得脱敏参数，再调用已连接 MCP 的 \`match_project\`。即使只有一个候选也必须由用户确认；确认后运行 \`gbrain project bind <project_id> --confirmed --json\`。
 - 写入项目经验前必须完成硬绑定：\`project_id\` 使用 \`prj-\` 加 16 位小写十六进制，草稿同时写入 \`project_binding: bound\`。无唯一匹配时保持 \`project_binding: pending\`，不得猜测或静默创建项目 ID。
 
 建议技能：\`gbrain-capture\`、\`gbrain-review\`。
@@ -87,9 +87,13 @@ description: 将经过验证、脱敏和人工审核的持久经验写入 GBrain
 都只能使用 \`inbox/<slug>\`；不得直接写入最终 \`knowledge/\`、
 \`runbooks/\`、\`incidents/\` 或其他晋升目录。
 
-项目经验写入前先运行 \`gbrain project current --json\`；未绑定时运行
-\`gbrain project match --json\`。匹配是只读阶段，候选即使唯一也要人工确认。
-确认后使用规范 \`project_id\`，无法确认时写
+项目经验写入前先运行 \`gbrain project current --json\`。已有绑定时，调用
+MCP \`get_page\` 验证 \`projects/<project_id>/index\`。未绑定时运行
+\`gbrain project match --json\` 取得脱敏后的 \`repository_ref\` 和
+\`project_name\`，再使用这些参数调用已连接 MCP 的 \`match_project\`。
+完整展示候选 ID、名称和匹配依据；即使只有一个候选也要人工确认。确认后运行
+\`gbrain project bind <project_id> --confirmed --json\`，再重新读取当前绑定。
+无法确认时写
 \`project_binding: pending\` 和 \`project_id: null\`，不得猜测。
 
 ## 四、固定经验模板

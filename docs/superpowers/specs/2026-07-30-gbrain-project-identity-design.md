@@ -329,16 +329,19 @@ resolve-project-context
 gbrain project current [--json]
 gbrain project match [--json]
 gbrain project init --name <name> [--repo <url>]
-gbrain project bind <project_id>
+gbrain project bind <project_id> --confirmed
 ```
 
 - `current` 只读解析当前绑定；
-- `match` 只读展示候选；
+- `match` 只读生成脱敏后的 MCP 交接参数；
 - `init` 展示创建计划并要求确认；
 - `bind` 展示绑定计划并要求确认。
 
-非交互模式下，`init` 和 `bind` 没有明确确认参数时必须失败关闭。远程 MCP
-不读取服务端工作目录，也不解析客户端 `.gbrain-project.yaml`。
+客户端把 `match` 返回的参数传给已连接 MCP 的 `match_project`，由服务端
+在调用方 Source 范围内返回候选。即使只有一个候选也必须人工确认。
+`bind` 缺少 `--confirmed` 时必须失败关闭。远程 MCP 不读取服务端工作目录，
+也不解析客户端 `.gbrain-project.yaml`。完整契约见
+`2026-07-30-mcp-project-matching-design.md`。
 
 审核界面增加：
 

@@ -23,20 +23,24 @@ interface ProjectCommandDeps {
   readonly stderr: (text: string) => void;
 }
 
-const HELP = `gbrain project — resolve and bind stable business-project identity
+const HELP = `gbrain project — 解析并绑定稳定的业务项目身份
 
-Usage:
+用法：
   gbrain project current [--json]
   gbrain project match [--json]
   gbrain project init --name <name> [--repo <url>] [--json]
-  gbrain project bind <project_id> [--json]
+  gbrain project bind <project_id> --confirmed [--json]
 `;
 
 export async function runGbrainProject(args: readonly string[], deps: Partial<ProjectCommandDeps> = {}): Promise<number> {
+  let localWriterCaller: ProjectToolCaller | undefined;
   const resolved: ProjectCommandDeps = {
     cwd: deps.cwd ?? process.cwd(),
     ...(deps.projectRoot ? { projectRoot: deps.projectRoot } : {}),
-    callTool: deps.callTool ?? createLocalWriterToolCaller(),
+    callTool: deps.callTool ?? ((name, toolArgs) => {
+      localWriterCaller ??= createLocalWriterToolCaller();
+      return localWriterCaller(name, toolArgs);
+    }),
     generateId: deps.generateId ?? generateProjectId,
     now: deps.now ?? (() => new Date()),
     stdout: deps.stdout ?? ((text) => process.stdout.write(text)),
@@ -55,14 +59,14 @@ export async function runGbrainProject(args: readonly string[], deps: Partial<Pr
     else if (command === 'match') result = await matchProject(resolved);
     else if (command === 'bind') result = await bindProject(args, resolved);
     else if (command === 'init') result = await initProject(args, resolved);
-    else throw new Error(`unknown project command: ${command}`);
+    else throw new Error(`project_command_unknown: 未知项目命令 ${command}`);
     printResult(result, json, resolved.stdout);
     return result.ok === false ? 2 : 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const result = { ok: false, code: errorCode(message), message };
     if (json) resolved.stdout(`${JSON.stringify(result, null, 2)}\n`);
-    else resolved.stderr(`gbrain project failed: ${message}\n`);
+    else resolved.stderr(`gbrain project 失败：${message}\n`);
     return 1;
   }
 }
@@ -73,12 +77,13 @@ function validateCommandArgs(args: readonly string[]): void {
   for (let index = 1; index < args.length; index++) {
     const arg = args[index];
     if (arg === '--json') continue;
+    if (command === 'bind' && arg === '--confirmed') continue;
     if (command === 'bind' && index === 1 && !arg.startsWith('--')) continue;
     if (command === 'init' && (arg === '--name' || arg === '--repo')) {
       requiredPositional(args, ++index, arg);
       continue;
     }
-    throw new Error(`project_argument_invalid: unexpected argument ${arg}`);
+    throw new Error(`project_argument_invalid: 不支持的参数 ${arg}`);
   }
 }
 
@@ -93,47 +98,34 @@ async function matchProject(deps: ProjectCommandDeps): Promise<Record<string, un
   if (current.status === 'bound') return current;
   const repositoryRef = detectRepositoryRef(deps.cwd);
   const projectName = basename(findProjectRoot(deps.cwd)).toLowerCase();
-  const candidates = (await loadProjectRegistries(deps.callTool))
-    .filter((page) => {
-      const refs = stringList(page.frontmatter.repository_refs);
-      const aliases = [page.frontmatter.project_name, ...stringList(page.frontmatter.project_aliases)]
-        .filter((value): value is string => typeof value === 'string')
-        .map((value) => value.toLowerCase());
-      return (repositoryRef !== null && refs.includes(repositoryRef)) || aliases.includes(projectName);
-    })
-    .map((page) => ({
-      project_id: page.frontmatter.project_id,
-      project_name: page.frontmatter.project_name,
-      slug: page.slug,
-      match_reason: repositoryRef !== null && stringList(page.frontmatter.repository_refs).includes(repositoryRef) ? 'repository_ref' : 'name_or_alias',
-    }));
   return {
     ok: true,
-    status: candidates.length === 0 ? 'unmatched' : 'confirmation_required',
-    code: candidates.length === 0 ? 'project_match_not_found' : 'project_match_confirmation_required',
-    repository_ref: repositoryRef,
-    candidates,
+    status: 'mcp_required',
+    code: 'project_match_via_mcp',
+    tool: 'match_project',
+    arguments: {
+      ...(repositoryRef === null ? {} : { repository_ref: repositoryRef }),
+      project_name: projectName,
+    },
   };
 }
 
 async function bindProject(args: readonly string[], deps: ProjectCommandDeps): Promise<Record<string, unknown>> {
-  const projectId = assertProjectId(requiredPositional(args, 1, 'project_id'));
-  const registrySlug = `projects/${projectId}/index`;
-  const registry = pageFrom(await deps.callTool('get_page', { slug: registrySlug }));
-  if (registry === null || registry.slug !== registrySlug || registry.frontmatter.record_kind !== 'project-registry' || registry.frontmatter.project_id !== projectId) {
-    throw new Error(`project_registry_not_found: ${registrySlug}`);
+  if (!args.includes('--confirmed')) {
+    throw new Error('project_confirmation_required: 用户确认 MCP 候选后才能使用 --confirmed 完成本地绑定');
   }
+  const projectId = assertProjectId(requiredPositional(args, 1, 'project_id'));
   const markerPath = writeProjectMarker(deps.projectRoot ?? findProjectRoot(deps.cwd), projectId);
   return { ok: true, status: 'bound', code: 'ok', project_id: projectId, marker_path: markerPath };
 }
 
 async function initProject(args: readonly string[], deps: ProjectCommandDeps): Promise<Record<string, unknown>> {
   const name = flagValue(args, '--name');
-  if (!name?.trim()) throw new Error('project_name_required: --name is required');
-  if (readProjectMarker(deps.cwd) !== null) throw new Error('project_binding_conflict: this project is already bound');
+  if (!name?.trim()) throw new Error('project_name_required: 必须提供 --name');
+  if (readProjectMarker(deps.cwd) !== null) throw new Error('project_binding_conflict: 当前项目已经绑定');
   const repoArg = flagValue(args, '--repo');
   const repositoryRef = repoArg ? normalizeRepositoryRef(repoArg) : detectRepositoryRef(deps.cwd);
-  if (repoArg && repositoryRef === null) throw new Error('repository_ref_invalid: --repo must be a supported Git remote URL');
+  if (repoArg && repositoryRef === null) throw new Error('repository_ref_invalid: --repo 必须是受支持的 Git remote URL');
   const registries = await loadProjectRegistries(deps.callTool);
   const duplicate = registries.find((page) => {
     const names = [page.frontmatter.project_name, ...stringList(page.frontmatter.project_aliases)]
@@ -256,7 +248,7 @@ function flagValue(args: readonly string[], flag: string): string | undefined {
 
 function requiredPositional(args: readonly string[], index: number, label: string): string {
   const value = args[index];
-  if (!value || value.startsWith('--')) throw new Error(`${label}_required: missing ${label}`);
+  if (!value || value.startsWith('--')) throw new Error(`${label}_required: 缺少 ${label}`);
   return value;
 }
 

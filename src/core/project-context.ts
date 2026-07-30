@@ -76,11 +76,15 @@ export function normalizeRepositoryRef(value: string): string | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
   const scp = /^(?:[^@/\s]+@)?([^:/\s]+):(.+)$/.exec(trimmed);
+  const canonical = /^([a-z0-9.-]+)\/([a-z0-9._~/-]+)$/i.exec(trimmed);
   let host: string;
   let path: string;
   if (scp && !trimmed.includes('://')) {
     host = scp[1];
     path = scp[2];
+  } else if (canonical) {
+    host = canonical[1];
+    path = canonical[2];
   } else {
     try {
       const url = new URL(trimmed);

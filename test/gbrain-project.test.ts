@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 import matter from 'gray-matter';
 import { runGbrainProject, type ProjectToolCaller } from '../src/commands/gbrain-project.ts';
 
@@ -26,26 +27,35 @@ describe('gbrain project command', () => {
     expect(JSON.parse(output.join(''))).toMatchObject({ status: 'unbound', code: 'project_unbound' });
   });
 
-  test('bind verifies the canonical registry before writing the marker', async () => {
+  test('bind requires explicit confirmation before writing the marker', async () => {
+    const output: string[] = [];
+    const code = await runGbrainProject(['bind', 'prj-0123456789abcdef', '--json'], {
+      cwd: root,
+      projectRoot: root,
+      stdout: (text) => output.push(text),
+    });
+    expect(code).toBe(1);
+    expect(JSON.parse(output.join(''))).toMatchObject({
+      ok: false,
+      code: 'project_confirmation_required',
+    });
+    expect(existsSync(join(root, '.gbrain-project.yaml'))).toBe(false);
+  });
+
+  test('confirmed bind writes locally without calling MCP or local writer', async () => {
     const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
     const callTool: ProjectToolCaller = async (name, args) => {
       calls.push({ name, args });
-      return {
-        slug: 'projects/prj-0123456789abcdef/index',
-        frontmatter: { record_kind: 'project-registry', project_id: 'prj-0123456789abcdef' },
-      };
+      throw new Error('network caller must not run');
     };
-    const code = await runGbrainProject(['bind', 'prj-0123456789abcdef', '--json'], {
+    const code = await runGbrainProject(['bind', 'prj-0123456789abcdef', '--confirmed', '--json'], {
       cwd: root,
       projectRoot: root,
       callTool,
       stdout: () => {},
     });
     expect(code).toBe(0);
-    expect(calls).toEqual([{
-      name: 'get_page',
-      args: { slug: 'projects/prj-0123456789abcdef/index' },
-    }]);
+    expect(calls).toEqual([]);
     expect(readFileSync(join(root, '.gbrain-project.yaml'), 'utf8')).toContain('prj-0123456789abcdef');
   });
 
@@ -76,27 +86,16 @@ describe('gbrain project command', () => {
     expect(readFileSync(join(root, '.gbrain-project.yaml'), 'utf8')).toContain('prj-0123456789abcdef');
   });
 
-  test('match lists the canonical prefix and hydrates registry frontmatter read-only', async () => {
+  test('match returns a sanitized MCP handoff without calling MCP or local writer', async () => {
+    execFileSync('git', ['init'], { cwd: root, stdio: 'ignore' });
+    execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:Example/Widget.git'], {
+      cwd: root,
+      stdio: 'ignore',
+    });
     const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
     const callTool: ProjectToolCaller = async (name, args) => {
       calls.push({ name, args });
-      if (name === 'list_pages') {
-        return {
-          items: [{ slug: 'projects/prj-0123456789abcdef/index', title: 'Example Widget' }],
-          has_more: false,
-          next_offset: null,
-        };
-      }
-      return {
-        slug: String(args.slug),
-        frontmatter: {
-          record_kind: 'project-registry',
-          project_id: 'prj-0123456789abcdef',
-          project_name: 'Example Widget',
-          project_aliases: [basename(root)],
-          repository_refs: [],
-        },
-      };
+      throw new Error('network caller must not run');
     };
     const output: string[] = [];
     const code = await runGbrainProject(['match', '--json'], {
@@ -105,17 +104,15 @@ describe('gbrain project command', () => {
       stdout: (text) => output.push(text),
     });
     expect(code).toBe(0);
-    expect(calls[0]).toEqual({
-      name: 'list_pages',
-      args: { type: 'project', include_prefixes: ['projects/'], limit: 100, offset: 0 },
-    });
-    expect(calls[1]).toEqual({
-      name: 'get_page',
-      args: { slug: 'projects/prj-0123456789abcdef/index' },
-    });
+    expect(calls).toEqual([]);
     expect(JSON.parse(output.join(''))).toMatchObject({
-      status: 'confirmation_required',
-      candidates: [{ project_id: 'prj-0123456789abcdef' }],
+      status: 'mcp_required',
+      code: 'project_match_via_mcp',
+      tool: 'match_project',
+      arguments: {
+        repository_ref: 'github.com/example/widget',
+        project_name: expect.any(String),
+      },
     });
   });
 

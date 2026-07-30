@@ -31,6 +31,7 @@ describe('project identity context', () => {
   test('normalizes HTTPS and SCP-style GitHub remotes to one repository ref', () => {
     expect(normalizeRepositoryRef('https://github.com/Example/Widget.git')).toBe('github.com/example/widget');
     expect(normalizeRepositoryRef('git@github.com:Example/Widget.git')).toBe('github.com/example/widget');
+    expect(normalizeRepositoryRef('github.com/Example/Widget')).toBe('github.com/example/widget');
   });
 
   test('walks ancestors for a trusted project marker', () => {
