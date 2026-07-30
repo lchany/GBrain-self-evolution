@@ -34,6 +34,57 @@ function deps(pages: readonly ReviewSourcePage[], duplicateSlugs: readonly strin
 }
 
 describe('review core planning', () => {
+  test('Given a bound project draft When kept Then target must stay under the same project id', async () => {
+    const projectId = 'prj-0123456789abcdef';
+    const source = page('inbox/project-rule', `${frontmatter({ type: 'project' })}record_kind: project-experience
+project_binding: bound
+project_id: ${projectId}
+`);
+    const wrong = await planReview(deps([source]), {
+      action: {
+        kind: 'keep',
+        sourceSlug: source.slug,
+        targetSlug: 'projects/prj-fedcba9876543210/project-rule',
+        targetType: 'project',
+      },
+      reviewDate: REVIEW_DATE,
+    });
+    const right = await planReview(deps([source]), {
+      action: {
+        kind: 'keep',
+        sourceSlug: source.slug,
+        targetSlug: `projects/${projectId}/project-rule`,
+        targetType: 'project',
+      },
+      reviewDate: REVIEW_DATE,
+    });
+    expect(wrong.code).toBe('project_path_mismatch');
+    expect(right.ok).toBe(true);
+    expect(right.plan?.targetPage?.frontmatter.project_id).toBe(projectId);
+  });
+
+  test('Given a project draft When promoted globally Then source_project_ids is preserved', async () => {
+    const projectId = 'prj-0123456789abcdef';
+    const source = page('inbox/project-general-rule', `${frontmatter({ type: 'project' })}record_kind: project-experience
+project_binding: bound
+project_id: ${projectId}
+`);
+    const result = await planReview(deps([source]), {
+      action: {
+        kind: 'promote',
+        sourceSlug: source.slug,
+        targetSlug: 'knowledge/project-general-rule',
+        targetType: 'knowledge',
+        humanConfirmation: true,
+      },
+      reviewDate: REVIEW_DATE,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.plan?.targetPage?.frontmatter.source_project_ids).toEqual([projectId]);
+    expect(result.plan?.targetPage?.frontmatter.project_id).toBeUndefined();
+    expect(result.plan?.targetPage?.frontmatter.project_binding).toBeUndefined();
+  });
+
   test('Given an incident draft When keep is planned Then target/review/delete steps are reusable by CLI and Web', async () => {
     // given
     const source = page('inbox/incident-one', frontmatter());

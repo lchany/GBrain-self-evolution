@@ -34,6 +34,8 @@ export type ReviewGateCode =
   | 'target_slug_required'
   | 'target_slug_invalid'
   | 'target_type_invalid'
+  | 'project_binding_required'
+  | 'project_path_mismatch'
   | 'promote_confirmation_required'
   | 'unverified_promote'
   | 'duplicate_target'

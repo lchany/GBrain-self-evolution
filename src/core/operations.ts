@@ -24,7 +24,7 @@ import { getContentFlag } from './quarantine.ts';
 import { bumpLastRetrievedAt } from './last-retrieved.ts';
 import { isSearchMode } from './search/mode.ts';
 import { stampEvidence } from './search/evidence.ts';
-import { validatePutPageWrite } from './put-page-validation.ts';
+import { requiredProjectRegistrySlug, validatePutPageWrite } from './put-page-validation.ts';
 import type { Page, SearchResult } from './types.ts';
 import { CJK_SLUG_CHARS } from './cjk.ts';
 import * as db from './db.ts';
@@ -801,6 +801,21 @@ const put_page: Operation = {
     const validation = validatePutPageWrite(slug, content, { strictSchema: ctx.remote !== false });
     if (!validation.ok) {
       throw new OperationError('invalid_params', validation.message, validation.suggestion, 'gbrain://schema/page');
+    }
+    const registrySlug = requiredProjectRegistrySlug(slug, content);
+    if (registrySlug !== null) {
+      const registry = await ctx.engine.getPage(registrySlug, { sourceId: ctx.sourceId ?? 'default' });
+      const expectedProjectId = registrySlug.split('/')[1];
+      if (registry === null
+        || registry.frontmatter?.record_kind !== 'project-registry'
+        || registry.frontmatter?.project_id !== expectedProjectId) {
+        throw new OperationError(
+          'invalid_params',
+          `project_registry_not_found: canonical project registry ${registrySlug} does not exist.`,
+          'Create or bind the canonical project registry before writing project experience.',
+          'gbrain://schema/page',
+        );
+      }
     }
 
     // v0.39.3.0 CV6 trust gate for provenance write-through (WARN-8).

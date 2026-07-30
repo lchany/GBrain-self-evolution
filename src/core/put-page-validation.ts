@@ -1,6 +1,7 @@
 import { assessContentSanity } from './content-sanity.ts';
 import { classifyForbiddenContent } from './forbidden-content.ts';
 import { parseMarkdown } from './markdown.ts';
+import { PROJECT_ID_RE } from './project-context.ts';
 
 const REQUIRED_FRONTMATTER_FIELDS = [
   'type',
@@ -207,6 +208,68 @@ function validateStatusPathAndMigration(slug: string, frontmatter: Record<string
   return { ok: true };
 }
 
+function projectError(code: string, message: string, suggestion: string): PutPageValidationResult {
+  return fail(`${code}: ${message}`, suggestion);
+}
+
+function validProjectIdList(value: unknown): boolean {
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'string' && PROJECT_ID_RE.test(entry));
+}
+
+function validateProjectIdentity(slug: string, frontmatter: Record<string, unknown>): PutPageValidationResult {
+  if ('source_project_ids' in frontmatter && !validProjectIdList(frontmatter.source_project_ids)) {
+    return projectError('source_project_ids_invalid', 'source_project_ids must contain canonical project IDs.', 'Use a YAML list of prj- followed by 16 lowercase hexadecimal characters.');
+  }
+
+  if (slug.startsWith('inbox/')) {
+    const binding = frontmatter.project_binding;
+    if (binding !== 'pending' && binding !== 'bound') {
+      return projectError('project_binding_required', 'inbox drafts must declare project_binding as pending or bound.', 'Set project_binding: pending with project_id: null, or bind a canonical project ID before writing.');
+    }
+    if (binding === 'pending' && !isNullish(frontmatter.project_id)) {
+      return projectError('project_binding_invalid', 'pending drafts cannot carry a project_id.', 'Set project_id: null until the project is matched and confirmed.');
+    }
+    if (binding === 'bound' && (typeof frontmatter.project_id !== 'string' || !PROJECT_ID_RE.test(frontmatter.project_id))) {
+      return projectError('project_id_invalid', 'bound drafts require a canonical project_id.', 'Use a project ID such as prj-0123456789abcdef.');
+    }
+    if (frontmatter.type === 'project' && frontmatter.record_kind !== 'project-experience') {
+      return projectError('record_kind_required', 'project drafts must use record_kind: project-experience.', 'Add record_kind: project-experience without changing the reviewed body.');
+    }
+    return { ok: true };
+  }
+
+  if (!slug.startsWith('projects/')) return { ok: true };
+  const segments = slug.split('/');
+  const pathProjectId = segments[1] ?? '';
+  if (!PROJECT_ID_RE.test(pathProjectId)) {
+    return projectError('project_path_invalid', 'project pages must be nested under projects/<project_id>/.', 'Use projects/prj-0123456789abcdef/<slug>.');
+  }
+  if (frontmatter.project_id !== pathProjectId) {
+    return projectError('project_path_mismatch', 'frontmatter project_id does not match the project directory.', `Set project_id: ${pathProjectId} or move the page to the matching project directory.`);
+  }
+  if (segments.length === 3 && segments[2] === 'index') {
+    if (frontmatter.record_kind !== 'project-registry') {
+      return projectError('record_kind_invalid', 'project index pages must be canonical registry records.', 'Set record_kind: project-registry.');
+    }
+    if (typeof frontmatter.project_name !== 'string' || frontmatter.project_name.trim().length === 0) {
+      return projectError('project_name_required', 'project registries require project_name.', 'Set a non-empty human-readable project_name.');
+    }
+    for (const field of ['project_aliases', 'repository_refs', 'environment_refs'] as const) {
+      if (!Array.isArray(frontmatter[field]) || !frontmatter[field].every((entry) => typeof entry === 'string')) {
+        return projectError('project_registry_invalid', `project registry field ${field} must be a string list.`, `Set ${field}: [] when no values are known.`);
+      }
+    }
+    return { ok: true };
+  }
+  if (frontmatter.record_kind !== 'project-experience') {
+    return projectError('record_kind_invalid', 'project experience pages require record_kind: project-experience.', 'Set record_kind: project-experience.');
+  }
+  if (frontmatter.project_binding !== 'bound') {
+    return projectError('project_binding_required', 'reviewed project experiences must be bound.', 'Set project_binding: bound after confirming the canonical project registry.');
+  }
+  return { ok: true };
+}
+
 function validateForbiddenContent(title: string, compiledTruth: string, timeline: string): PutPageValidationResult {
   const body = `${title}\n${compiledTruth}\n${timeline}`;
   const forbidden = classifyForbiddenContent(body);
@@ -251,5 +314,18 @@ export function validatePutPageWrite(slug: string, content: string, opts: PutPag
   if (!valuesResult.ok) return valuesResult;
   const statusResult = validateStatusPathAndMigration(slug, frontmatter);
   if (!statusResult.ok) return statusResult;
+  const projectResult = validateProjectIdentity(slug, frontmatter);
+  if (!projectResult.ok) return projectResult;
   return { ok: true };
+}
+
+export function requiredProjectRegistrySlug(slug: string, content: string): string | null {
+  if (!slug.startsWith('projects/') || slug.endsWith('/index')) return null;
+  const parsed = parseMarkdown(content, `${slug}.md`, { validate: true, expectedSlug: slug });
+  const projectId = parsed.frontmatter.project_id;
+  return parsed.frontmatter.record_kind === 'project-experience'
+    && typeof projectId === 'string'
+    && PROJECT_ID_RE.test(projectId)
+    ? `projects/${projectId}/index`
+    : null;
 }

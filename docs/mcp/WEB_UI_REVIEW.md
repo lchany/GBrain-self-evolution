@@ -12,6 +12,11 @@
 6. **审核结果** — 浏览器表单提交（`Accept: text/html`）返回 HTML 结果页；其他客户端返回浏览器安全 JSON（见下文契约）。
 7. **审核历史** `GET /admin/review/history` — 读取 `decisions/reviews/*`，展示操作含义、来源、目标、状态与日期。
 
+项目经验额外受项目身份门禁约束：已绑定草稿只能写入
+`projects/<project_id>/` 下与 frontmatter 一致的目录；晋升到全局
+`knowledge/` 或 `runbooks/` 时删除活动绑定字段，但必须保留
+`source_project_ids` 作为来源追踪。
+
 ## HTML 结果页面
 
 确认执行的回执是中文审计回执，只包含固定九字段：

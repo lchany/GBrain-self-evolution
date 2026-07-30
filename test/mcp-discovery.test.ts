@@ -54,4 +54,13 @@ describe('MCP discovery catalog', () => {
   test('rejects unknown resource URIs', () => {
     expect(() => readResource('gbrain://unknown')).toThrow();
   });
+
+  test('page schema documents project binding and canonical registry paths', () => {
+    const result = readResource('gbrain://schema/page');
+    const content = result.contents[0];
+    const text = content !== undefined && 'text' in content ? content.text : '';
+    expect(text).toContain('project_binding');
+    expect(text).toContain('projects/<project_id>/index');
+    expect(text).toContain('source_project_ids');
+  });
 });

@@ -31,7 +31,7 @@ export async function planReview(deps: ReviewCoreDeps, request: ReviewPlanReques
   gates.push(frontmatterGate);
   if (!frontmatterGate.ok) return fail(frontmatterGate, gates);
 
-  const targetGate = validateTargetSlugAndType(action);
+  const targetGate = validateTargetSlugAndType(action, loaded.page);
   gates.push(targetGate);
   if (!targetGate.ok) return fail(targetGate, gates);
 

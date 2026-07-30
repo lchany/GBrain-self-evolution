@@ -84,6 +84,11 @@ async function putPageError(slug: string, content: string): Promise<Record<strin
   return payload;
 }
 
+async function putPageWithEngine(engine: BrainEngine, slug: string, content: string): Promise<Record<string, unknown>> {
+  const result = await dispatchToolCall(engine, 'put_page', { slug, content, dry_run: true }, { remote: true, sourceId: 'default' });
+  return JSON.parse(result.content[0]?.text ?? '{}') as Record<string, unknown>;
+}
+
 function expectSafeError(payload: Record<string, unknown>): void {
   const text = JSON.stringify(payload);
   expect(text).not.toContain(FAKE_SECRET);
@@ -215,5 +220,17 @@ describe('put_page validation gate', () => {
     ], 'draft', 'unverified');
     const payload = await putPageError('inbox/unbound-project-note', content);
     expect(String(payload.message)).toContain('project_binding_required');
+  });
+
+  test('rejects a bound project experience when its canonical registry is missing', async () => {
+    const content = projectContent([
+      'record_kind: project-experience',
+      'project_binding: bound',
+      'project_id: prj-0123456789abcdef',
+    ]);
+    const engine = { getPage: async () => null } as unknown as BrainEngine;
+    const payload = await putPageWithEngine(engine, 'projects/prj-0123456789abcdef/retry-rule', content);
+    expect(payload.error).toBe('invalid_params');
+    expect(String(payload.message)).toContain('project_registry_not_found');
   });
 });

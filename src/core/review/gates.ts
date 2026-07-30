@@ -1,6 +1,7 @@
 import { assessContentSanity } from '../content-sanity.ts';
 import { scrubPii } from '../eval-capture-scrub.ts';
 import type { ParsedReviewPage, ReviewAction, ReviewCoreDeps, ReviewGateResult, ReviewTargetType } from './types.ts';
+import { PROJECT_ID_RE } from '../project-context.ts';
 
 export const REVIEW_TARGET_PREFIXES: Record<ReviewTargetType, string> = {
   knowledge: 'knowledge/',
@@ -19,7 +20,7 @@ export function validateSourceSlug(sourceSlug: string): ReviewGateResult {
   return { ok: true, code: 'ok', message: '来源 slug 属于 inbox。' };
 }
 
-export function validateTargetSlugAndType(action: ReviewAction): ReviewGateResult {
+export function validateTargetSlugAndType(action: ReviewAction, source?: ParsedReviewPage): ReviewGateResult {
   switch (action.kind) {
     case 'reject':
     case 'needs_evidence':
@@ -38,6 +39,15 @@ export function validateTargetSlugAndType(action: ReviewAction): ReviewGateResul
       const prefix = REVIEW_TARGET_PREFIXES[action.targetType];
       if (!action.targetSlug.startsWith(prefix)) {
         return { ok: false, code: 'target_type_invalid', message: `目标类型 ${action.targetType} 必须写入 ${prefix}。` };
+      }
+      if (action.targetType === 'project' && source !== undefined) {
+        const projectId = source.frontmatter.project_id;
+        if (source.frontmatter.project_binding !== 'bound' || typeof projectId !== 'string' || !PROJECT_ID_RE.test(projectId)) {
+          return { ok: false, code: 'project_binding_required', message: '项目经验在审核前必须绑定规范 project_id。' };
+        }
+        if (!action.targetSlug.startsWith(`projects/${projectId}/`)) {
+          return { ok: false, code: 'project_path_mismatch', message: `项目经验只能写入 projects/${projectId}/。` };
+        }
       }
       return { ok: true, code: 'ok', message: '目标 slug 与类型匹配。' };
     }

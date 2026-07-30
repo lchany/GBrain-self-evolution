@@ -1,4 +1,5 @@
 import matter from 'gray-matter';
+import { assertProjectId } from '../core/project-context.ts';
 
 export const SUGGESTED_TYPES = [
   'knowledge',
@@ -86,6 +87,7 @@ export function buildCandidate(input: BuildCandidateInput): CaptureCandidate {
   if (!input.title.trim()) throw new Error('title is required');
   if (!input.summary.trim()) throw new Error('summary is required');
   if (evidenceRefs.length === 0) throw new Error('at least one evidence ref is required');
+  if (input.projectId) assertProjectId(input.projectId);
   const candidate: CaptureCandidate = {
     schema_version: 1,
     title: input.title.trim(),
@@ -132,6 +134,11 @@ export function buildCandidateMarkdown(candidate: CaptureCandidate): string {
     non_applicable: [],
     source_refs: [...candidate.evidence_refs],
     migrated_from: null,
+    ...(candidate.suggested_type === 'project' || candidate.project_id
+      ? { record_kind: 'project-experience' }
+      : {}),
+    project_binding: candidate.project_id ? 'bound' : 'pending',
+    project_id: candidate.project_id ?? null,
   });
 }
 

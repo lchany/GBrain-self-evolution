@@ -6,6 +6,15 @@ export function buildTargetPage(action: ReviewAction, source: ParsedReviewPage, 
   switch (action.kind) {
     case 'keep':
     case 'promote':
+      {
+      const projectId = typeof source.frontmatter.project_id === 'string' ? source.frontmatter.project_id : undefined;
+      const promotesGlobally = projectId !== undefined && action.targetType !== 'project';
+      const nextFrontmatter = { ...source.frontmatter };
+      if (promotesGlobally) {
+        delete nextFrontmatter.project_id;
+        delete nextFrontmatter.project_binding;
+        delete nextFrontmatter.record_kind;
+      }
       return materializePage({
         slug: action.targetSlug,
         type: action.targetType,
@@ -14,13 +23,15 @@ export function buildTargetPage(action: ReviewAction, source: ParsedReviewPage, 
         compiledTruth: source.compiledTruth,
         timeline: source.timeline,
         frontmatter: {
-          ...source.frontmatter,
+          ...nextFrontmatter,
           type: action.targetType,
           status: source.frontmatter.verification === 'verified' ? 'verified' : 'reviewed',
           verification: source.frontmatter.verification,
           reviewed_from: source.slug,
+          ...(promotesGlobally ? { source_project_ids: mergeList(source.frontmatter.source_project_ids, [projectId]) } : {}),
         },
       });
+      }
     case 'merge': {
       if (existingTarget === undefined) return null;
       return materializePage({

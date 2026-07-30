@@ -71,6 +71,7 @@ const WORKFLOW_TEXT = `# GBrain MCP workflow
 3. Use \`put_page\` only with write scope. Update an existing canonical slug instead of duplicating it.
 4. Treat permission errors as credential-scope problems; do not work around them.
 5. Never send credentials, tokens, private keys, or raw authentication files to GBrain.
+6. Before project work, resolve the nearest \`.gbrain-project.yaml\`. Match is read-only; creation and binding require explicit confirmation.
 `;
 
 const PAGE_SCHEMA_TEXT = `# GBrain page schema
@@ -86,6 +87,16 @@ Canonical pages are Markdown with frontmatter fields:
 - non_applicable
 - source_refs
 - migrated_from
+
+Every inbox draft also declares:
+
+- \`project_binding: pending\` with \`project_id: null\`; or
+- \`project_binding: bound\` with a canonical \`project_id\` matching \`^prj-[0-9a-f]{16}$\`.
+
+Project registries live at \`projects/<project_id>/index\` with
+\`record_kind: project-registry\`. Project experiences use
+\`record_kind: project-experience\` and live below the same project ID.
+Cross-project promotion keeps \`source_project_ids\`.
 
 Use \`source_refs\` for evidence pointers. New analysis remains unverified until tested.
 `;
