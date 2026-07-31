@@ -1,94 +1,123 @@
-# 项目身份自动匹配或创建设计
+# 项目身份严格匹配或创建设计
 
 日期：2026-07-31  
 状态：待书面复核
 
 ## 结论
 
-项目经验写入前仍须具备有效 `project_id` 和规范项目登记页，但缺少项目身份
-不再阻塞正常流程。客户端在真正准备写入项目经验时，通过新的写权限 MCP
-操作 `ensure_project` 请求服务端原子“匹配或创建”：
+项目身份只由 `project_id` 决定。Git remote、仓库路径、目录名、项目名称和
+别名都不参与项目身份匹配，也不能作为自动绑定依据。
 
-- 精确仓库匹配时自动复用；
-- 没有精确仓库匹配，但名称或别名只有一个候选时自动复用；
-- 完全无匹配时自动创建项目登记页和规范 ID；
-- 多个候选冲突且无法唯一判断时，返回候选并等待人工选择。
+客户端准备写入项目经验时执行：
 
-服务端返回唯一项目 ID 后，客户端自动在当前 Git 项目根目录原子写入
-`.gbrain-project.yaml`，然后继续经验审核和 `put_page`。本地标记写入失败
-只影响后续会话复用，不阻塞当前任务使用服务端已经确认的 ID。
+- 本地 `.gbrain-project.yaml` 已包含 `project_id`：服务端只按该 ID 精确
+  查找当前 source 的登记页；存在则复用，不存在则使用同一个 ID 创建登记页。
+- 本地没有 `project_id`：服务端生成新的规范 ID，创建登记页并返回；客户端
+  把返回值原子写入 `.gbrain-project.yaml`。
+- 精确 ID 对应的 slug 已存在但不是合法登记页：返回冲突，禁止覆盖。
 
-## 问题
+`put_page` 的项目硬绑定校验继续保留。自动创建先补齐项目 ID 和登记页，
+不允许待绑定项目经验绕过门禁。
 
-当前客户端和服务端共同执行硬绑定门禁：
+## 身份原则
 
-1. 客户端发现本地没有 `.gbrain-project.yaml`；
-2. 客户端通过只读 MCP `match_project` 搜索登记页；
-3. 没有候选时只能停止；
-4. 服务端 `put_page` 拒绝未绑定项目经验。
+`project_id` 是不可变的业务项目身份：
 
-硬绑定保护了项目归属，但“无候选即停止”要求用户额外执行管理员初始化。
-这与“缺少项目 ID 时自动创建且不阻塞”的操作规则冲突。
+```text
+prj-0123456789abcdef
+```
 
-不能通过放宽 `put_page` 解决这个问题。允许待绑定项目经验进入 inbox 会重新
-引入归属不明确的页面。正确做法是在写入项目经验前自动补齐项目登记页和
-项目 ID。
+它匹配：
 
-## 已考虑方案
+```text
+^prj-[0-9a-f]{16}$
+```
 
-### 方案一：新增写权限 MCP `ensure_project`
+以下内容只属于元数据或本地环境，不是身份：
 
-`match_project` 保持只读。`ensure_project` 使用相同的输入规范化和匹配逻辑，
-但在无候选时执行受控创建。
+- Git remote；
+- Git 仓库；
+- 工作目录；
+- 项目名称；
+- 项目别名；
+- 客户名称；
+- 环境名称；
+- source 中的相似页面。
 
-优点：
+因此：
 
-- 读写权限清晰；
-- 可以独立审计、限流和测试自动创建；
-- 服务端能在同一事务中完成查重和创建；
-- 客户端不需要生成或猜测项目 ID。
+- 一个业务项目可以使用多个 Git 仓库；
+- 一个 Git 仓库可以承载多个业务项目；
+- 仓库迁移、改名或拆分不改变项目 ID；
+- 同名项目不会因为名称相同而自动合并；
+- 服务端不会执行仓库、名称、别名或语义模糊匹配。
 
-采用此方案。
-
-### 方案二：给 `match_project` 增加 `create_if_missing`
-
-该方案少一个工具，但同一个 MCP 操作会根据参数在 read 和 write 之间切换。
-工具声明、OAuth scope、审计语义和调用方预期都会变得不明确，不采用。
-
-### 方案三：客户端生成 ID 并调用 `put_page`
-
-多个客户端可能同时生成不同 ID 并创建重复项目。客户端也可能绕过统一匹配、
-source 限定和服务端审计，不采用。
+Git 的唯一作用是帮助客户端确定把 `.gbrain-project.yaml` 写在哪个本地项目
+根目录。Git 信息不会发送给严格项目身份 MCP 操作。
 
 ## 触发时机
 
-项目上下文检测和项目创建保持分离。
+进入目录、收到非平凡任务或执行只读 GBrain 召回时，只读取本地标记，不创建
+项目。
 
-以下只读场景不会创建项目：
-
-- 进入项目目录；
-- 开始非平凡任务；
-- 执行项目级召回；
-- 单纯查看、下载或诊断仓库；
-- 尚未形成需要持久化的项目经验。
-
-只有准备写入以下内容，且本地项目仍未绑定时，客户端才调用
-`ensure_project`：
+只有准备持久化以下项目经验，且需要补齐项目身份时，才调用自动创建流程：
 
 - 客户或项目规则；
 - 项目任务或里程碑总结；
 - 项目决策；
 - 项目专属 runbook；
-- 重复项目故障或已验证根因；
+- 重复项目故障；
+- 已验证的项目根因；
 - 其他 `type: project`、`record_kind: project-experience` 的经验。
 
-因此，自动创建不会因普通浏览或只读召回产生无用项目。
+普通浏览、下载、诊断、召回和一次性操作不会创建项目 ID。
 
-## MCP 契约
+## MCP 操作
 
-### 操作声明
+### `match_project`
 
-新增操作：
+`match_project` 保持只读，但改为只接受规范 `project_id`：
+
+```json
+{
+  "project_id": "prj-0123456789abcdef"
+}
+```
+
+它只读取当前 source 的精确路径：
+
+```text
+projects/prj-0123456789abcdef/index
+```
+
+合法时返回：
+
+```json
+{
+  "ok": true,
+  "status": "matched",
+  "code": "ok",
+  "project_id": "prj-0123456789abcdef",
+  "registry_slug": "projects/prj-0123456789abcdef/index"
+}
+```
+
+不存在时返回：
+
+```json
+{
+  "ok": true,
+  "status": "unmatched",
+  "code": "project_match_not_found",
+  "project_id": "prj-0123456789abcdef"
+}
+```
+
+它不接受 `repository_ref` 或 `project_name`，也不返回候选列表。
+
+### `ensure_project`
+
+新增写权限 MCP 操作：
 
 ```text
 ensure_project
@@ -98,124 +127,113 @@ ensure_project
 
 - `scope: write`；
 - `mutating: true`；
-- 允许远程 MCP 客户端调用；
-- 使用现有 HTTP MCP 身份、source 限定、云防火墙和速率限制；
+- 只查询和写入当前 source；
 - 不读取客户端文件系统；
-- 不接收客户端指定的 `project_id`。
+- 不接收仓库引用；
+- 不执行名称、别名或语义匹配。
 
-输入：
+输入分为两种。
 
-```json
-{
-  "repository_ref": "github.com/example/project",
-  "project_name": "project"
-}
-```
-
-至少提供一个字段。限制与 `match_project` 一致：
-
-- `repository_ref` 最长 2048 字符；
-- `project_name` 最长 200 字符；
-- 拒绝控制字符；
-- 仓库引用必须经过 `normalizeRepositoryRef`；
-- 拒绝密码、查询参数、URL fragment 和无效路径。
-
-### 返回结果
-
-复用已有项目：
+已有本地 ID：
 
 ```json
 {
-  "ok": true,
-  "status": "matched",
-  "code": "ok",
   "project_id": "prj-0123456789abcdef",
-  "project_name": "project",
-  "registry_slug": "projects/prj-0123456789abcdef/index",
-  "match_reason": "repository_ref"
+  "project_name": "可选显示名称"
 }
 ```
 
-创建新项目：
+没有本地 ID：
 
 ```json
 {
-  "ok": true,
-  "status": "created",
-  "code": "ok",
-  "project_id": "prj-0123456789abcdef",
-  "project_name": "project",
-  "registry_slug": "projects/prj-0123456789abcdef/index"
+  "creation_key": "当前创建请求的随机幂等键",
+  "project_name": "可选显示名称"
 }
 ```
 
-多个冲突候选：
+`project_name` 只用于展示，不参与身份匹配。未提供时，登记页暂时使用
+`project_id` 作为显示名称，后续管理员可以改名。
 
-```json
-{
-  "ok": false,
-  "status": "ambiguous",
-  "code": "project_match_ambiguous",
-  "candidates": [
-    {
-      "project_id": "prj-0123456789abcdef",
-      "project_name": "project",
-      "registry_slug": "projects/prj-0123456789abcdef/index",
-      "match_reason": "name_or_alias"
-    }
-  ]
-}
+## 严格决策
+
+### 客户端已有 `project_id`
+
+服务端执行：
+
+1. 校验 ID 格式；
+2. 读取当前 source 的 `projects/<project_id>/index`；
+3. 页面不存在时，使用同一个 ID 创建登记页；
+4. 页面存在且是合法登记页时，返回 `matched`；
+5. 页面存在但类型、路径或 frontmatter ID 不一致时，返回
+   `project_registry_conflict`；
+6. 不搜索其他 ID，不生成候选，不改用新 ID。
+
+### 客户端没有 `project_id`
+
+服务端执行：
+
+1. 校验 `creation_key`；
+2. 根据当前 source 和 `creation_key` 生成规范项目 ID；
+3. 读取该 ID 的精确登记页路径；
+4. 不存在时创建；
+5. 已存在且合法时返回同一个 ID；
+6. 已存在但不合法时返回冲突。
+
+`creation_key` 只用于同一次创建动作的请求重试和并发去重，不是项目身份，
+也不用于搜索其他项目。客户端在成功写入本地 YAML 前必须为重试复用同一个
+`creation_key`。
+
+### 不存在多候选
+
+严格 ID 模型不会返回“多个候选”，因为每次只检查一个规范 ID 对应的精确
+slug。只有两种异常需要人工处理：
+
+- 本地已经绑定另一个不同 ID；
+- 精确 ID 的登记页路径已被不合法页面占用。
+
+## ID 生成和幂等
+
+有本地 ID 时，服务端必须原样使用该 ID，不得重新生成。
+
+没有本地 ID 时，服务端根据：
+
+```text
+当前 source + creation_key
 ```
 
-歧义结果不创建页面。
+生成稳定的 16 位小写十六进制值，并加上 `prj-` 前缀。相同 source 和
+`creation_key` 得到相同 ID；不同创建请求使用不同 key。
 
-## 匹配决策
+`creation_key`：
 
-`ensure_project` 只读取当前写入 source。它不跨 source 猜测，也不从
-`allowedSources` 中选择其他 source 的登记页。
+- 由客户端为一次创建动作随机生成；
+- 不包含仓库、目录、项目名、客户名或其他业务信息；
+- 最长 200 字符；
+- 只允许安全的 UUID 或随机标识符字符；
+- 不写入登记页；
+- 不写入日志正文；
+- 成功写入 `.gbrain-project.yaml` 后即可丢弃。
 
-决策顺序：
+服务端在数据库事务中：
 
-1. 规范化仓库引用和项目名称；
-2. 查找当前 source 的合法 `project-registry` 页面；
-3. 精确仓库候选为一个时自动复用；
-4. 精确仓库候选超过一个时返回歧义；
-5. 没有仓库候选时，名称或别名候选为一个则自动复用；
-6. 名称或别名候选超过一个时返回歧义；
-7. 没有任何候选时创建新项目。
+1. 对 `当前 source + project_id` 获取 transaction advisory lock；
+2. 获得锁后重新读取精确登记页；
+3. 合法页面存在时返回 `matched`；
+4. 不存在时创建登记页；
+5. 冲突页面存在时拒绝覆盖。
 
-候选合法性保持现有要求：
+Postgres 使用 `pg_advisory_xact_lock`。PGLite 使用单连接事务串行执行。
 
-- slug 精确为 `projects/<project_id>/index`；
-- `record_kind: project-registry`；
-- slug ID 与 frontmatter `project_id` 一致；
-- `project_name` 非空；
-- `project_id` 匹配 `^prj-[0-9a-f]{16}$`。
+本次不增加数据库表或数据库迁移。
 
-## 原子创建与幂等
+## 登记页
 
-服务端以“当前 source + 规范化仓库引用；没有仓库时使用规范化项目名称”
-作为创建身份键。
+规范路径：
 
-创建流程：
-
-1. 在数据库事务中获取该身份键的 transaction advisory lock；
-2. 获得锁后重新读取当前 source 的项目登记页；
-3. 再次执行完整匹配决策；
-4. 如果另一请求已经创建登记页，返回 `matched`；
-5. 仍无候选时使用 `generateProjectId()` 生成规范随机 ID；
-6. 检查 `projects/<project_id>/index` 不存在；发生极小概率碰撞时重新生成；
-7. 在同一事务中写入规范登记页；
-8. 提交事务后执行现有 Markdown write-through；文件写穿失败不回滚数据库
-   登记页，但会进入结构化警告。
-
-Postgres 使用 `pg_advisory_xact_lock`。PGLite 通过单连接事务串行执行同一
-进程内的匹配和创建。相同输入的重复调用必须返回同一个项目 ID，不得创建
-重复登记页。
-
-本次不增加数据库表或迁移。
-
-## 登记页内容
+```text
+projects/<project_id>/index
+```
 
 服务端生成：
 
@@ -234,243 +252,254 @@ source_refs:
 migrated_from: null
 record_kind: project-registry
 project_id: <project_id>
-project_name: <project_name>
+project_name: <显示名称或 project_id>
 project_aliases: []
-repository_refs:
-  - <规范化 repository_ref>
+repository_refs: []
 environment_refs: []
 ---
 ```
 
-正文只包含通用登记说明，不保存本地绝对路径、凭据、原始 remote URL 或
-其他未脱敏环境信息。
+`repository_refs` 固定为空。服务端不从 Git remote 推导或保存任何仓库关系。
 
-`project_name` 缺失但提供了仓库引用时，服务端使用仓库最后一个路径段作为
-名称。名称经过 trim、长度和控制字符校验。
+登记页正文只包含通用登记说明，不保存本地路径、凭据、原始会话或环境信息。
 
-## 远程登记页写入边界
+## 远程写入边界
 
-远程客户端不得直接通过 `put_page` 创建或更新
-`projects/<project_id>/index`。远程请求遇到
+远程客户端不能通过普通 `put_page` 创建或修改项目登记页。远程请求写入
 `record_kind: project-registry` 时返回：
 
 ```text
 project_registry_managed
 ```
 
-提示调用 `ensure_project`。
+并提示调用 `ensure_project`。
 
-可信本地管理员流程 `gbrain project init` 继续可用。`ensure_project`
-由服务端构造登记页并直接走受控内部写入路径，不依赖远程客户端提交登记页
-正文。
+可信本地管理员流程 `gbrain project init` 保持兼容。自动 MCP 流程由服务端
+构造登记页，不接受客户端提交登记页正文。
 
-项目经验的现有服务端门禁不放宽：
+项目经验的服务端门禁保持不变：
 
-- `type: project`；
-- `record_kind: project-experience`；
-- `project_binding: bound`；
-- 规范 `project_id`；
-- 当前写入 source 存在一致登记页。
+```yaml
+type: project
+record_kind: project-experience
+project_binding: bound
+project_id: prj-0123456789abcdef
+```
 
-## 客户端与本地标记
+服务端仍验证当前 source 中存在相同 ID 的合法登记页。
 
-客户端写项目经验前执行：
+## 客户端流程
 
-1. `gbrain project current --json`；
-2. 已绑定时，通过 MCP `get_page` 验证登记页；
-3. 未绑定时，运行 `gbrain project match --json` 取得脱敏参数；
-4. 使用这些参数调用 `ensure_project`；
-5. 返回 `matched` 或 `created` 时，运行：
+### 已有本地标记
+
+1. 运行 `gbrain project current --json`；
+2. 取得本地 `project_id`；
+3. 调用 `match_project({project_id})`；
+4. 已存在时继续；
+5. 不存在时调用 `ensure_project({project_id})`，使用同一个 ID 创建；
+6. 重新用 `get_page` 验证登记页；
+7. 继续经验正文审核和 `put_page`。
+
+### 没有本地标记
+
+1. 运行 `gbrain project current --json`；
+2. 客户端为当前创建动作生成随机 `creation_key`；
+3. 调用 `ensure_project({creation_key, project_name?})`；
+4. 服务端返回 `project_id`；
+5. 客户端运行：
 
    ```bash
    gbrain project bind <project_id> --resolved --json
    ```
 
 6. 重新运行 `gbrain project current --json`；
-7. 使用 MCP `get_page` 验证登记页；
-8. 继续展示完整经验正文、预分类建议和 5 分钟写入前审核；
+7. 通过 MCP `get_page` 验证精确登记页；
+8. 继续完整经验预览、预分类和 5 分钟写入前审核；
 9. 审核通过后调用 `put_page`。
 
-`bind` 增加 `--resolved`，表示项目 ID 来自服务端唯一匹配或原子创建结果。
-已有 `--confirmed` 保留，用于用户从歧义候选中明确选择的场景。
+客户端不运行 Git remote 匹配，不调用名称候选搜索，也不要求用户选择相似
+项目。
 
-两种参数都只授权本地写标记，不改变服务端权限。CLI 仍校验 ID 格式和已有
-标记冲突。
+## 本地 `.gbrain-project.yaml`
 
-本地标记内容：
+内容：
 
 ```yaml
 schema_version: 1
 project_id: prj-0123456789abcdef
 ```
 
-写入继续复用现有临时文件、`0600` 权限和原子链接逻辑。
+要求：
 
-`.gbrain-project.yaml` 是本机绑定状态，加入项目 `.gitignore`，不推送
-GitHub。
+- 写入当前项目根目录；
+- 权限为 `0600`；
+- 使用现有临时文件和原子链接逻辑；
+- 相同 ID 保持幂等；
+- 不同 ID 不自动覆盖；
+- 无效标记不静默替换；
+- 加入项目 `.gitignore`；
+- 不推送 GitHub。
+
+`gbrain project bind` 增加：
+
+```bash
+gbrain project bind <project_id> --resolved --json
+```
+
+`--resolved` 表示 ID 已经由服务端精确匹配或创建。已有 `--confirmed` 保持兼容，
+用于人工修复冲突。
 
 ### 本地标记写入失败
 
-服务端登记页成功后，如果本地目录不可写：
+如果服务端登记页已创建，但本地目录不可写：
 
-- 返回并展示 `project_marker_write_failed`；
-- 当前任务把服务端返回的 `project_id` 保留在内存中；
-- 当前项目经验继续使用该 ID，不阻塞审核和写入；
+- 展示 `project_marker_write_failed`；
+- 展示并保留服务端返回的 `project_id`；
+- 当前任务继续使用该 ID，不阻塞经验审核和写入；
 - 不创建本地离线队列；
-- 下一次任务重新调用 `ensure_project`，服务端会复用已有登记页。
+- 提示用户修复权限后执行 `bind --resolved`。
+
+如果下次会话既没有 YAML，也没有保存上次返回的 ID，严格模型不会根据仓库
+或名称找回它。客户端必须明确展示这一限制，不能通过猜测恢复。
 
 ### 已有冲突标记
 
-本地已经绑定不同项目 ID 时，不自动覆盖。这属于身份冲突，不是缺少 ID：
+本地已经绑定不同 ID 时：
 
-- 停止自动绑定；
-- 展示当前 ID 和服务端候选；
-- 等待人工决定保留或修复本地标记。
+- 不自动覆盖；
+- 不生成另一个 ID；
+- 展示当前 ID；
+- 等待人工决定是否修复本地标记。
+
+## CLI 变化
+
+`gbrain project match --json` 不再读取 Git remote 或目录名。它只处理已有
+本地 ID：
+
+- 已绑定：输出调用 `match_project` 所需的精确 `project_id`；
+- 未绑定：输出 `project_id: null` 和需要调用 `ensure_project` 的状态；
+- 不输出 `repository_ref` 或 `project_name` 匹配参数。
+
+`gbrain project init --name --repo` 作为可信本地管理员兼容入口保留，但
+`--repo` 只写元数据，不参与身份判断。
 
 ## 客户端规则和技能
 
-安装器生成的 `AGENTS.md` 与 `gbrain-capture` 同步改为：
+安装器生成的 `AGENTS.md` 与 `gbrain-capture` 改为：
 
-- 非平凡任务开始仍只读检测，不自动创建；
-- 准备写项目经验且未绑定时调用 `ensure_project`；
-- 唯一匹配或新建结果不再要求逐次人工确认；
-- 多个冲突候选才要求人工选择；
-- 自动执行本地 `bind --resolved`；
-- 标记写入失败时使用内存 ID 继续；
+- 面向用户默认使用中文；
+- 非平凡任务开始只读取本地项目 ID；
+- 不使用 Git、目录名、项目名称或别名匹配 ID；
+- 有本地 ID 时严格验证；服务端缺失则使用同一 ID 创建；
+- 无本地 ID 时调用 `ensure_project` 生成新 ID；
+- 自动执行 `bind --resolved`；
+- 标记写入失败时使用内存 ID 继续当前任务；
 - 不安装本地 GBrain CLI；
 - 不索取 writer 凭据；
 - 不创建本地离线队列；
-- 项目经验仍执行脱敏、固定模板和 5 分钟写入前审核。
+- 保留脱敏、固定经验模板、写入前审核和 5 分钟规则。
 
-MCP 页面 schema、工作流资源、项目身份设计、匹配设计和 `KEY_FILES.md`
-同步更新，删除“完全无匹配时保持 pending 并停止”的旧描述。
+同步修改：
 
-## 错误与审计
-
-稳定错误或状态代码：
-
-- `project_match_input_required`；
-- `project_match_input_invalid`；
-- `repository_ref_invalid`；
-- `project_match_ambiguous`；
-- `project_registry_collision`；
-- `project_registry_write_failed`；
-- `project_registry_managed`；
-- `project_marker_write_failed`；
-- `project_binding_conflict`。
-
-`ensure_project` 记录服务端审计信息：
-
-- 操作名；
-- 当前 source；
-- 结果为 `matched`、`created` 或 `ambiguous`；
-- 返回的项目 ID；
-- 匹配依据。
-
-日志不得保存凭据、原始带认证 remote URL、本地路径或客户端提交的未脱敏
-环境信息。
+- MCP discovery 和页面 schema；
+- 项目身份设计；
+- MCP 项目匹配设计；
+- 项目写入硬绑定设计；
+- `KEY_FILES.md`；
+- CLI 帮助；
+- 客户端安装器测试。
 
 ## 安全边界
 
-- `ensure_project` 要求 write scope，不通过 read token 创建项目；
-- 输入经过长度、控制字符和仓库引用规范化校验；
-- 创建仅发生在当前写入 source；
-- 客户端不能指定 ID；
-- 事务锁与锁内二次匹配防止并发重复；
-- ID 碰撞检查防止覆盖已有登记页；
-- 多候选时失败关闭，不自动选择；
-- 远程 `put_page` 不能绕过受控创建路径；
-- 现有 HTTP MCP 限流和云防火墙策略继续生效；
+- `match_project` 只需要 read scope；
+- `ensure_project` 必须具有 write scope；
+- 所有 ID 进行规范格式校验；
+- 只访问当前 source 的精确 slug；
+- 不读取或记录 Git remote；
+- 不执行名称、别名或语义匹配；
+- 不覆盖冲突页面；
+- 事务锁防止同一 ID 并发重复创建；
+- `creation_key` 只做创建请求幂等，不成为业务身份；
+- 远程 `put_page` 不能直接维护登记页；
+- 继续使用现有 HTTP 限流和云防火墙；
 - 不新增凭据，不改变管理员审核权限。
 
 ## 测试策略
 
 实现遵循 TDD。
 
-### MCP 操作测试
+### 严格匹配测试
 
-- `ensure_project` 声明为 write scope、mutating；
-- read scope 客户端不能调用；
-- 精确仓库唯一候选自动复用；
-- 唯一名称或别名候选自动复用；
-- 多个仓库候选返回歧义且不写入；
-- 多个名称候选返回歧义且不写入；
-- 无候选时创建规范登记页和随机 ID；
-- 缺少名称时从仓库路径推导名称；
-- 重复相同请求返回同一 ID；
+- `match_project` 只接受规范 ID；
+- 精确登记页存在时返回 matched；
+- 精确登记页不存在时返回 unmatched；
+- 错误 record kind、路径 ID 或 frontmatter ID 返回冲突；
+- 不读取其他项目页面；
+- 不接受 repository/name 参数；
+- 查询只发生在当前 source。
+
+### 自动创建测试
+
+- 有 ID且登记页存在时复用；
+- 有 ID且登记页不存在时使用同一 ID 创建；
+- 无 ID时通过 `creation_key` 生成规范 ID；
+- 相同 `creation_key` 重试返回同一 ID；
 - 并发相同请求只创建一个登记页；
-- ID 碰撞时重试；
-- 创建只查询和写入当前 source；
-- 控制字符、凭据 URL、超长输入被拒绝；
-- dry-run 不创建登记页。
+- 不同 `creation_key` 生成不同 ID；
+- 不把 `creation_key` 写入登记页；
+- 冲突页面不被覆盖；
+- dry-run 不创建；
+- read scope 不能调用 `ensure_project`。
 
 ### 写入门禁测试
 
-- 远程 `put_page` 拒绝直接创建登记页；
-- 可信本地 `put_page` 或 `project init` 保持兼容；
+- 远程 `put_page` 拒绝直接维护登记页；
+- 可信本地 `project init` 保持兼容；
 - 待绑定项目经验仍被拒绝；
-- `ensure_project` 创建后，绑定项目经验通过登记页检查；
-- 多 source 中只接受当前写入 source 的登记页。
+- 自动创建后，绑定项目经验通过登记页校验；
+- 其他 source 的同 ID 登记页不能满足当前 source 校验。
 
-### CLI 测试
+### CLI 和安装器测试
 
-- `bind --resolved` 原子创建 `.gbrain-project.yaml`；
+- `project match` 不读取或输出 Git remote；
+- 未绑定时输出 ensure 状态；
+- `bind --resolved` 原子创建 YAML；
 - `bind --confirmed` 保持兼容；
-- 两个标志都缺少时拒绝；
-- 已绑定相同 ID 保持幂等；
-- 已绑定不同 ID 时拒绝覆盖；
-- 标记权限为 `0600`；
-- `.gbrain-project.yaml` 被 Git 忽略。
+- YAML 权限为 `0600`；
+- 不同 ID 不覆盖；
+- 客户端规则不包含仓库、名称或别名匹配；
+- Codex 与 OpenCode 规则均使用 `ensure_project`；
+- 不引入凭据或离线队列。
 
-### 安装器和技能测试
+## 发布和验收顺序
 
-- Codex 与 OpenCode 规则包含 `ensure_project`；
-- 只有多候选才要求人工选择；
-- 唯一匹配和创建结果执行 `bind --resolved`；
-- 标记失败时继续使用内存 ID；
-- 不再包含“无候选不得调用 `put_page`”的阻塞规则；
-- 不引入本地 writer、凭据或离线队列。
-
-### 回归和验收
-
-- 项目身份、项目匹配、捕获、审核、MCP discovery 和 tool schema 测试；
-- `bun run verify`；
-- `bun run check:all`；
-- 编译 Linux 服务端二进制；
-- 服务器真实 HTTP MCP 验证首次调用创建、第二次调用复用；
-- 验证登记页位于当前 source；
-- 在当前本地仓库生成可读取的 `.gbrain-project.yaml`；
-- 验证多候选路径不创建新项目；
-- 验证待绑定项目经验仍被服务端拒绝。
-
-## 发布顺序
-
-严格按以下顺序执行：
-
-1. 更新本地项目代码、测试和文档；
-2. 运行完整相关验证；
-3. 使用项目安装器同步本机 Codex 和 OpenCode 配置；
-4. 提交全部项目改动；
-5. 拉取 GitHub 远端状态，确认可快进；
+1. 修改本地代码、测试和文档；
+2. 运行定向测试、`bun run verify`、`bun run check:all` 和构建；
+3. 同步本机 Codex 与 OpenCode 配置；
+4. 提交全部改动；
+5. 确认 GitHub 没有远端冲突；
 6. 推送 `gbrain-review-ui`；
-7. 确认 GitHub 提交与本地一致；
+7. 确认本地和 GitHub 提交一致；
 8. 最后备份并更新服务器；
-9. 在服务器构建、测试、切换二进制和重启服务；
-10. 从服务器本机与外部网络执行真实 MCP 验收；
-11. 为当前仓库创建或复用项目 ID，并原子写入本地标记。
+9. 在独立服务器 worktree 中测试和构建；
+10. 保留服务器已有定制文件、`.omo/`、stash 和旧二进制；
+11. 重启并验证健康状态；
+12. 从外部网络调用严格 `match_project` 和 `ensure_project`；
+13. 为当前本地目录生成项目 ID 和 `.gbrain-project.yaml`；
+14. 第二次调用确认返回同一 ID；
+15. 验证待绑定项目经验仍被拒绝。
 
-服务器现有定制文件、`.omo/`、旧二进制备份和 stash 必须保留。已有待绑定
-经验页面不删除、不迁移、不自动修改。
+已有待绑定经验不删除、不迁移、不自动修改。
 
 ## 完成标准
 
-- 缺少项目 ID 不再阻塞项目经验流程；
-- 服务端是项目 ID 和登记页创建的唯一自动化入口；
-- 唯一候选自动复用；
-- 完全无匹配自动创建；
-- 多候选才要求人工选择；
-- 重复或并发请求不产生重复项目；
-- 客户端本地标记自动创建；
-- 本地标记失败不阻塞当前任务；
-- `put_page` 项目硬绑定门禁没有放宽；
+- 项目身份只按 `project_id` 严格匹配；
+- Git、目录、项目名称和别名不参与匹配；
+- 本地有 ID、服务端无登记页时使用同一 ID 创建；
+- 本地无 ID 时由服务端生成新 ID；
+- 同一创建请求重试不产生重复项目；
+- 客户端自动写本地 YAML；
+- YAML 写入失败不阻塞当前任务；
+- 冲突 ID 不自动覆盖；
+- `put_page` 项目门禁不放宽；
 - GitHub 和服务器运行同一已验证提交。
