@@ -1,7 +1,17 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { runInstallClient, type InstallClientDeps } from '../src/commands/gbrain-client-installer.ts';
 
 function tempRoot(): string {
@@ -14,11 +24,46 @@ function deps(root: string): InstallClientDeps {
   };
 }
 
+function runProjectHook(script: string, cwd: string): Record<string, unknown> {
+  const result = spawnSync('python3', [script], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      session_id: 'session-test',
+      cwd,
+      hook_event_name: 'SessionStart',
+      source: 'startup',
+      model: 'test-model',
+    }),
+  });
+  expect(result.status).toBe(0);
+  expect(result.stderr).toBe('');
+  return JSON.parse(result.stdout) as Record<string, unknown>;
+}
+
 describe('gbrain install-client', () => {
-  test('Given an isolated home When installer runs twice Then rules and skills are idempotently installed without credentials', async () => {
+  test('Given an isolated home When installer runs twice Then rules, skills and the Codex hook are idempotently installed without credentials', async () => {
     const root = tempRoot();
     try {
-      const first = await runInstallClient(['--json'], deps(root));
+      const codexRoot = join(root, 'codex');
+      mkdirSync(codexRoot, { recursive: true });
+      writeFileSync(
+        join(codexRoot, 'hooks.json'),
+        JSON.stringify({
+          description: 'existing hooks',
+          hooks: {
+            SessionStart: [{
+              matcher: '^clear$',
+              hooks: [{ type: 'command', command: 'printf existing-session-hook' }],
+            }],
+            PostToolUse: [{
+              matcher: '^Bash$',
+              hooks: [{ type: 'command', command: 'printf existing-post-hook' }],
+            }],
+          },
+        }),
+      );
+      const output: string[] = [];
+      const first = await runInstallClient(['--json'], { ...deps(root), stdout: (text) => output.push(text) });
       const second = await runInstallClient(['--json'], deps(root));
 
       expect(first).toBe(0);
@@ -94,6 +139,101 @@ describe('gbrain install-client', () => {
       expect(opencodeReview).toContain('source_project_ids');
       expect(opencodeReview).not.toContain('gbrain review');
       expect(opencodeReview).not.toContain('PROMOTE <target-slug>');
+
+      const hookScript = join(codexRoot, 'hooks', 'gbrain-project-check.py');
+      const hooksJsonPath = join(codexRoot, 'hooks.json');
+      expect(existsSync(hookScript)).toBe(true);
+      const hooksConfig = JSON.parse(readFileSync(hooksJsonPath, 'utf8')) as {
+        description?: string;
+        hooks: Record<string, Array<{ matcher?: string; hooks?: Array<{ command?: string; statusMessage?: string }> }>>;
+      };
+      expect(hooksConfig.description).toBe('existing hooks');
+      expect(hooksConfig.hooks.PostToolUse[0].hooks?.[0].command).toBe('printf existing-post-hook');
+      expect(hooksConfig.hooks.SessionStart.some((entry) => entry.matcher === '^clear$')).toBe(true);
+      const gbrainHandlers = hooksConfig.hooks.SessionStart.flatMap((entry) => entry.hooks ?? [])
+        .filter((handler) => handler.statusMessage === '检查当前目录的 GBrain 项目 ID');
+      expect(gbrainHandlers).toHaveLength(1);
+      expect(gbrainHandlers[0].command).toContain('gbrain-project-check.py');
+
+      const summary = JSON.parse(output.join('')) as {
+        ok: boolean;
+        surfaces: Array<{ name: string; hook?: { script: string; config: string; trust_required: boolean } }>;
+      };
+      expect(summary.ok).toBe(true);
+      expect(summary.surfaces.find((surface) => surface.name === 'codex')?.hook).toEqual({
+        script: hookScript,
+        config: hooksJsonPath,
+        trust_required: true,
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('Given parent and child directories When the Codex hook runs Then it checks only cwd and never inherits the parent project ID', async () => {
+    const root = tempRoot();
+    try {
+      expect(await runInstallClient(['--json'], deps(root))).toBe(0);
+      const script = join(root, 'codex', 'hooks', 'gbrain-project-check.py');
+      const project = join(root, 'project');
+      const child = join(project, 'child');
+      mkdirSync(child, { recursive: true });
+      writeFileSync(
+        join(project, '.gbrain-project.yaml'),
+        'schema_version: 1\nproject_id: prj-0123456789abcdef\n',
+        { mode: 0o600 },
+      );
+
+      const parentResult = runProjectHook(script, project);
+      expect(JSON.stringify(parentResult)).toContain('prj-0123456789abcdef');
+      expect(JSON.stringify(parentResult)).toContain('已绑定');
+
+      const childResult = runProjectHook(script, child);
+      expect(JSON.stringify(childResult)).toContain('当前目录未找到');
+      expect(JSON.stringify(childResult)).not.toContain('prj-0123456789abcdef');
+      expect(childResult.continue).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('Given invalid or untrusted markers When the Codex hook runs Then it warns without blocking or executing cwd text', async () => {
+    const root = tempRoot();
+    try {
+      expect(await runInstallClient(['--json'], deps(root))).toBe(0);
+      const script = join(root, 'codex', 'hooks', 'gbrain-project-check.py');
+      const sentinel = join(root, 'must-not-exist');
+      const hostile = join(root, 'project-$(touch must-not-exist)');
+      mkdirSync(hostile, { recursive: true });
+
+      writeFileSync(
+        join(hostile, '.gbrain-project.yaml'),
+        'schema_version: 1\nproject_id: PRJ-0123456789ABCDEF\n',
+        { mode: 0o600 },
+      );
+      const invalidResult = runProjectHook(script, hostile);
+      expect(JSON.stringify(invalidResult)).toContain('格式无效');
+      expect(invalidResult.continue).toBe(true);
+      expect(existsSync(sentinel)).toBe(false);
+
+      rmSync(join(hostile, '.gbrain-project.yaml'));
+      const target = join(root, 'marker-target');
+      writeFileSync(target, 'schema_version: 1\nproject_id: prj-0123456789abcdef\n', { mode: 0o600 });
+      symlinkSync(target, join(hostile, '.gbrain-project.yaml'));
+      const symlinkResult = runProjectHook(script, hostile);
+      expect(JSON.stringify(symlinkResult)).toContain('不可信');
+      expect(JSON.stringify(symlinkResult)).not.toContain('prj-0123456789abcdef');
+
+      rmSync(join(hostile, '.gbrain-project.yaml'));
+      writeFileSync(
+        join(hostile, '.gbrain-project.yaml'),
+        'schema_version: 1\nproject_id: prj-0123456789abcdef\n',
+        { mode: 0o600 },
+      );
+      chmodSync(join(hostile, '.gbrain-project.yaml'), 0o606);
+      const writableResult = runProjectHook(script, hostile);
+      expect(JSON.stringify(writableResult)).toContain('不可信');
+      expect(JSON.stringify(writableResult)).not.toContain('prj-0123456789abcdef');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
