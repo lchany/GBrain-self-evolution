@@ -16,6 +16,7 @@ export const GBRAIN_CLIENT_RULES = `${GBRAIN_RULES_BLOCK_START}
 - 使用 GBrain MCP 的 \`list_pages\` 和 \`get_page\` 检查草稿。晋升只能在认证的管理员审核界面完成，匿名 MCP 客户端不得晋升。
 - 不为 GBrain 采集或审核添加生命周期钩子，不安装本地 GBrain CLI，不创建本地离线队列，也不索取客户端凭据作为降级方案。
 - 客户端网络访问由云防火墙白名单控制；安装器不创建或分发凭据。
+- Codex \`SessionStart\` Hook 只检查会话 \`cwd\` 直接目录中的 \`.gbrain-project.yaml\`，不检查父目录或其他目录，不调用 MCP，也不创建项目 ID；缺失或无效时只警告并继续会话。该 Hook 只检查项目身份，不参与经验采集或审核。
 - 进入项目目录或开始项目任务时，只读检查祖先目录中的 \`.gbrain-project.yaml\`，并运行 \`gbrain project current --json\`；普通召回和一次性任务不得因此创建项目 ID。项目身份只认规范 \`project_id\`，不使用 Git、仓库路径、目录名、项目名称、别名或语义相似度匹配。
 - 准备写入项目经验时：本地已有 ID 就调用 MCP \`match_project({project_id})\` 精确验证；登记页不存在时调用 \`ensure_project({project_id})\` 使用同一 ID 创建。本地无 ID 时为本次创建生成随机 \`creation_key\`，调用 \`ensure_project({creation_key})\`，再运行 \`gbrain project bind <project_id> --resolved --json\`。不得通过远程 \`put_page\` 创建或修改项目登记页。
 - 写入项目经验前必须取得规范 ID，并确认当前 source 存在 \`projects/<project_id>/index\`；草稿写入 \`project_binding: bound\` 和相同 \`project_id\`。本地标记写入失败时，报告 \`project_marker_write_failed\`，保留内存中的 \`project_id\` 并继续当前任务，不创建离线队列；下一次会话不得根据 Git 或名称猜测恢复。

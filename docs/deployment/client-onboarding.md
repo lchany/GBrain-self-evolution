@@ -24,7 +24,7 @@ bun run build
 ./bin/gbrain --help
 ```
 
-## 2. 安装规则与 skills
+## 2. 安装规则、skills 与 Codex 启动检查
 
 ```bash
 bun src/cli.ts install-client --json
@@ -38,9 +38,21 @@ bun src/cli.ts install-client --json
 - `~/.codex/AGENTS.md`
 - `~/.codex/skills/gbrain-capture/SKILL.md`
 - `~/.codex/skills/gbrain-review/SKILL.md`
+- `~/.codex/hooks/gbrain-project-check.py`
+- `~/.codex/hooks.json` 中由 GBrain 管理的 `SessionStart` handler
 
 它不会读取或生成 `local-read.env`、`local-writer.env`、Bearer token 或
 client secret。
+
+Codex Hook 在 `startup|resume` 时运行，只检查 Hook 输入 `cwd` 直接目录中的
+`.gbrain-project.yaml`。它不会检查父目录、其他目录或 Git，不调用 MCP，也
+不会自动创建项目 ID。标记缺失、不可信或格式错误时只显示中文警告并继续
+会话。在子目录启动 Codex 时，即使父目录存在标记，也会按“当前目录未绑定”
+处理。
+
+Codex 会对新增或变化的非托管 Hook 执行一次性信任检查。首次安装或更新后，
+在 Codex 中运行 `/hooks`，确认来源和命令后信任该 Hook。此后每次启动或恢复
+会话都会自动执行。
 
 安装后的规则默认要求 Agent 使用中文说明经验召回、候选总结、预分类和
 审核结论。命令、代码、路径、协议字段和错误原文可以保留英文。

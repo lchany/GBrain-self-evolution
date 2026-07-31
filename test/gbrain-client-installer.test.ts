@@ -91,6 +91,9 @@ describe('gbrain install-client', () => {
       expect(codexRules).toContain('第 2 次');
       expect(codexRules).toContain('5 分钟');
       expect(codexRules).toContain('match_project');
+      expect(codexRules).toContain('Codex `SessionStart` Hook');
+      expect(codexRules).toContain('只检查会话 `cwd` 直接目录');
+      expect(codexRules).toContain('不调用 MCP，也不创建项目 ID');
 
       const opencodeCapture = readFileSync(
         join(root, 'xdg', 'opencode', 'skills', 'gbrain-capture', 'SKILL.md'),
