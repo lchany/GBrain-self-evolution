@@ -87,6 +87,12 @@ export function buildCandidate(input: BuildCandidateInput): CaptureCandidate {
   if (!input.title.trim()) throw new Error('title is required');
   if (!input.summary.trim()) throw new Error('summary is required');
   if (evidenceRefs.length === 0) throw new Error('at least one evidence ref is required');
+  if (input.suggestedType === 'project' && !input.projectId) {
+    throw new Error('project_binding_required: project capture requires a confirmed project_id');
+  }
+  if (input.suggestedType !== 'project' && input.projectId) {
+    throw new Error('project_type_required: project_id requires suggested type project');
+  }
   if (input.projectId) assertProjectId(input.projectId);
   const candidate: CaptureCandidate = {
     schema_version: 1,
@@ -134,7 +140,7 @@ export function buildCandidateMarkdown(candidate: CaptureCandidate): string {
     non_applicable: [],
     source_refs: [...candidate.evidence_refs],
     migrated_from: null,
-    ...(candidate.suggested_type === 'project' || candidate.project_id
+    ...(candidate.suggested_type === 'project'
       ? { record_kind: 'project-experience' }
       : {}),
     project_binding: candidate.project_id ? 'bound' : 'pending',

@@ -232,8 +232,16 @@ function validateProjectIdentity(slug: string, frontmatter: Record<string, unkno
     if (binding === 'bound' && (typeof frontmatter.project_id !== 'string' || !PROJECT_ID_RE.test(frontmatter.project_id))) {
       return projectError('project_id_invalid', 'bound drafts require a canonical project_id.', 'Use a project ID such as prj-0123456789abcdef.');
     }
-    if (frontmatter.type === 'project' && frontmatter.record_kind !== 'project-experience') {
+    const isProjectType = frontmatter.type === 'project';
+    const isProjectExperience = frontmatter.record_kind === 'project-experience';
+    if (isProjectType && !isProjectExperience) {
       return projectError('record_kind_required', 'project drafts must use record_kind: project-experience.', 'Add record_kind: project-experience without changing the reviewed body.');
+    }
+    if (!isProjectType && isProjectExperience) {
+      return projectError('record_kind_invalid', 'record_kind: project-experience requires type: project.', 'Set type: project or remove the project-experience record kind.');
+    }
+    if (isProjectExperience && binding !== 'bound') {
+      return projectError('project_binding_required', 'project experience drafts must be bound before writing.', 'Match and confirm a canonical project, then set project_binding: bound with its project_id.');
     }
     return { ok: true };
   }
@@ -320,10 +328,11 @@ export function validatePutPageWrite(slug: string, content: string, opts: PutPag
 }
 
 export function requiredProjectRegistrySlug(slug: string, content: string): string | null {
-  if (!slug.startsWith('projects/') || slug.endsWith('/index')) return null;
+  if (slug.endsWith('/index')) return null;
   const parsed = parseMarkdown(content, `${slug}.md`, { validate: true, expectedSlug: slug });
   const projectId = parsed.frontmatter.project_id;
   return parsed.frontmatter.record_kind === 'project-experience'
+    && parsed.frontmatter.project_binding === 'bound'
     && typeof projectId === 'string'
     && PROJECT_ID_RE.test(projectId)
     ? `projects/${projectId}/index`
