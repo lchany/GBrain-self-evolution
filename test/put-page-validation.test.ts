@@ -76,6 +76,16 @@ async function putPage(slug: string, content: string): Promise<unknown> {
   return JSON.parse(result.content[0]?.text ?? '{}');
 }
 
+async function putPageLocal(slug: string, content: string): Promise<unknown> {
+  const result = await dispatchToolCall(
+    fakeEngine,
+    'put_page',
+    { slug, content, dry_run: true },
+    { remote: false, sourceId: 'default' },
+  );
+  return JSON.parse(result.content[0]?.text ?? '{}');
+}
+
 async function putPageError(slug: string, content: string): Promise<Record<string, unknown>> {
   const result = await dispatchToolCall(fakeEngine, 'put_page', { slug, content, dry_run: true }, { remote: true, sourceId: 'default' });
   expect(result.isError).toBe(true);
@@ -195,7 +205,7 @@ describe('put_page validation gate', () => {
     expectSafeError(payload);
   });
 
-  test('accepts a canonical project registry page', async () => {
+  test('accepts a canonical project registry page from a trusted local caller', async () => {
     const content = projectContent([
       'record_kind: project-registry',
       'project_id: prj-0123456789abcdef',
@@ -204,8 +214,22 @@ describe('put_page validation gate', () => {
       'repository_refs: [github.com/example/widget]',
       'environment_refs: []',
     ]);
-    const payload = await putPage('projects/prj-0123456789abcdef/index', content);
+    const payload = await putPageLocal('projects/prj-0123456789abcdef/index', content);
     expect(payload).toMatchObject({ dry_run: true, slug: 'projects/prj-0123456789abcdef/index' });
+  });
+
+  test('rejects remote project registry maintenance through put_page', async () => {
+    const content = projectContent([
+      'record_kind: project-registry',
+      'project_id: prj-0123456789abcdef',
+      'project_name: Example Widget',
+      'project_aliases: []',
+      'repository_refs: []',
+      'environment_refs: []',
+    ]);
+    const payload = await putPageError('projects/prj-0123456789abcdef/index', content);
+    expect(String(payload.message)).toContain('project_registry_managed');
+    expect(String(payload.suggestion)).toContain('ensure_project');
   });
 
   test('rejects project experience outside its project id directory', async () => {

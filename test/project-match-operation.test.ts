@@ -5,167 +5,149 @@ import {
   operationsByName,
   type OperationContext,
 } from '../src/core/operations.ts';
-import type { Page, PageFilters } from '../src/core/types.ts';
+import type { Page } from '../src/core/types.ts';
 
 const matchProject = operationsByName.match_project;
 
 function registry(
   projectId: string,
-  projectName: string,
-  options: { aliases?: string[]; repositoryRefs?: string[]; slug?: string; recordKind?: string } = {},
+  overrides: {
+    sourceId?: string;
+    slug?: string;
+    recordKind?: string;
+    frontmatterProjectId?: string;
+  } = {},
 ): Page {
   return {
     id: Number.parseInt(projectId.slice(-4), 16),
-    slug: options.slug ?? `projects/${projectId}/index`,
-    title: projectName,
+    slug: overrides.slug ?? `projects/${projectId}/index`,
+    title: projectId,
     type: 'project',
-    compiled_truth: '',
+    compiled_truth: 'Canonical project registry.',
     timeline: '',
     frontmatter: {
-      record_kind: options.recordKind ?? 'project-registry',
-      project_id: projectId,
-      project_name: projectName,
-      project_aliases: options.aliases ?? [],
-      repository_refs: options.repositoryRefs ?? [],
+      record_kind: overrides.recordKind ?? 'project-registry',
+      project_id: overrides.frontmatterProjectId ?? projectId,
+      project_name: projectId,
+      project_aliases: [],
+      repository_refs: [],
+      environment_refs: [],
     },
     content_hash: '',
     file_path: '',
-    created_at: new Date('2026-07-30T00:00:00Z'),
-    updated_at: new Date('2026-07-30T00:00:00Z'),
-    source_id: 'source-a',
+    created_at: new Date('2026-07-31T00:00:00Z'),
+    updated_at: new Date('2026-07-31T00:00:00Z'),
+    source_id: overrides.sourceId ?? 'source-a',
   } as Page;
 }
 
-function context(pages: Page[], calls: PageFilters[]): OperationContext {
-  const engine = {
-    listPages: async (filters: PageFilters) => {
-      calls.push(filters);
-      const offset = filters.offset ?? 0;
-      return pages.slice(offset, offset + (filters.limit ?? pages.length));
-    },
-  } as unknown as BrainEngine;
+function context(engine: BrainEngine, sourceId = 'source-a'): OperationContext {
   return {
     engine,
     config: {} as OperationContext['config'],
     logger: { info() {}, warn() {}, error() {}, debug() {} },
     dryRun: false,
     remote: true,
-    sourceId: 'source-a',
+    sourceId,
     auth: {
       token: 'test-token',
       clientId: 'client-a',
       scopes: ['read'],
-      sourceId: 'source-a',
-      allowedSources: ['source-a', 'shared'],
+      sourceId,
+      allowedSources: [sourceId, 'shared'],
     },
   } as OperationContext;
 }
 
 describe('match_project MCP operation', () => {
-  test('is exposed as a read-only MCP operation', () => {
+  test('is a read-only exact-ID operation without repository or name inputs', () => {
     expect(matchProject).toBeDefined();
     expect(matchProject.scope).toBe('read');
     expect(matchProject.mutating).not.toBe(true);
     expect(matchProject.localOnly).not.toBe(true);
-    expect(matchProject.params.repository_ref.maxLength).toBe(2048);
-    expect(typeof matchProject.params.repository_ref.pattern).toBe('string');
-    expect(matchProject.params.project_name.maxLength).toBe(200);
-    expect(typeof matchProject.params.project_name.pattern).toBe('string');
+    expect(matchProject.params.project_id).toMatchObject({
+      type: 'string',
+      required: true,
+      pattern: '^prj-[0-9a-f]{16}$',
+    });
+    expect(matchProject.params.repository_ref).toBeUndefined();
+    expect(matchProject.params.project_name).toBeUndefined();
   });
 
-  test('prefers exact repository matches over name and alias matches', async () => {
-    const calls: PageFilters[] = [];
-    const result = await matchProject.handler(context([
-      registry('prj-0000000000000001', 'Widget', {
-        repositoryRefs: ['github.com/acme/widget'],
-      }),
-      registry('prj-0000000000000002', 'Other', {
-        aliases: ['widget'],
-      }),
-    ], calls), {
-      repository_ref: 'git@github.com:Acme/Widget.git',
-      project_name: 'widget',
+  test('reads only the exact registry slug in the current source', async () => {
+    const calls: Array<{ slug: string; sourceId: string | undefined }> = [];
+    const page = registry('prj-0123456789abcdef');
+    const engine = {
+      getPage: async (slug: string, opts?: { sourceId?: string }) => {
+        calls.push({ slug, sourceId: opts?.sourceId });
+        return page;
+      },
+      listPages: async () => {
+        throw new Error('strict matching must not scan project registries');
+      },
+    } as unknown as BrainEngine;
+
+    const result = await matchProject.handler(context(engine), {
+      project_id: 'prj-0123456789abcdef',
     });
 
-    expect(result).toMatchObject({
+    expect(result).toEqual({
       ok: true,
-      status: 'confirmation_required',
-      code: 'project_match_confirmation_required',
-      candidates: [{
-        project_id: 'prj-0000000000000001',
-        match_reason: 'repository_ref',
-      }],
+      status: 'matched',
+      code: 'ok',
+      project_id: 'prj-0123456789abcdef',
+      registry_slug: 'projects/prj-0123456789abcdef/index',
     });
-    expect(calls[0]).toMatchObject({
-      type: 'project',
-      limit: 100,
-      offset: 0,
-      sourceIds: ['source-a', 'shared'],
-    });
+    expect(calls).toEqual([{
+      slug: 'projects/prj-0123456789abcdef/index',
+      sourceId: 'source-a',
+    }]);
   });
 
-  test('falls back to project name and aliases, ignores invalid registries, and sorts candidates', async () => {
-    const result = await matchProject.handler(context([
-      registry('prj-0000000000000002', 'Second', { aliases: ['widget'] }),
-      registry('prj-0000000000000001', 'Widget'),
-      registry('prj-0000000000000003', 'Widget', { recordKind: 'project-experience' }),
-      registry('prj-0000000000000004', 'Widget', {
-        slug: 'projects/prj-ffffffffffffffff/index',
-      }),
-    ], []), { project_name: ' WIDGET ' });
+  test('returns unmatched when the exact registry does not exist', async () => {
+    const engine = {
+      getPage: async () => null,
+    } as unknown as BrainEngine;
 
-    expect(result).toMatchObject({
-      status: 'confirmation_required',
-      candidates: [
-        { project_id: 'prj-0000000000000001', match_reason: 'name_or_alias' },
-        { project_id: 'prj-0000000000000002', match_reason: 'name_or_alias' },
-      ],
+    const result = await matchProject.handler(context(engine), {
+      project_id: 'prj-0123456789abcdef',
     });
-  });
 
-  test('returns unmatched without creating a project', async () => {
-    const result = await matchProject.handler(context([], []), {
-      repository_ref: 'https://github.com/acme/missing.git',
-    });
     expect(result).toEqual({
       ok: true,
       status: 'unmatched',
       code: 'project_match_not_found',
-      candidates: [],
+      project_id: 'prj-0123456789abcdef',
     });
   });
 
-  test('continues pagination until it finds a candidate', async () => {
-    const pages = Array.from({ length: 100 }, (_, index) => {
-      const projectId = `prj-${index.toString(16).padStart(16, '0')}`;
-      return registry(projectId, `Other ${index}`);
-    });
-    pages.push(registry('prj-ffffffffffffffff', 'Widget'));
-    const calls: PageFilters[] = [];
+  test('rejects an occupied exact slug with inconsistent registry identity', async () => {
+    const engine = {
+      getPage: async () => registry('prj-0123456789abcdef', {
+        recordKind: 'project-experience',
+      }),
+    } as unknown as BrainEngine;
 
-    const result = await matchProject.handler(context(pages, calls), {
-      project_name: 'widget',
-    });
-
-    expect(result).toMatchObject({
-      candidates: [{ project_id: 'prj-ffffffffffffffff' }],
-    });
-    expect(calls.map((call) => call.offset)).toEqual([0, 100]);
-  });
-
-  test('rejects empty input and unsafe repository references', async () => {
-    await expect(matchProject.handler(context([], []), {})).rejects.toMatchObject({
-      code: 'invalid_params',
-      message: expect.stringContaining('project_match_input_required'),
-    });
-    await expect(matchProject.handler(context([], []), {
-      repository_ref: 'https://user:secret@example.com/acme/widget.git',
-    })).rejects.toBeInstanceOf(OperationError);
-    await expect(matchProject.handler(context([], []), {
-      project_name: 'widget\u0000hidden',
+    await expect(matchProject.handler(context(engine), {
+      project_id: 'prj-0123456789abcdef',
     })).rejects.toMatchObject({
       code: 'invalid_params',
-      message: expect.stringContaining('project_match_input_invalid'),
+      message: expect.stringContaining('project_registry_conflict'),
     });
+  });
+
+  test('rejects malformed IDs before accessing storage', async () => {
+    let reads = 0;
+    const engine = {
+      getPage: async () => {
+        reads += 1;
+        return null;
+      },
+    } as unknown as BrainEngine;
+
+    await expect(matchProject.handler(context(engine), {
+      project_id: 'project-widget',
+    })).rejects.toBeInstanceOf(OperationError);
+    expect(reads).toBe(0);
   });
 });

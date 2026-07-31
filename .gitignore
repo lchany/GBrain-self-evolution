@@ -41,3 +41,7 @@ test/fixtures/pglite-snapshot.version
 
 # Private brain reports — never check these in (per CLAUDE.md privacy rule)
 reports/network-intelligence/
+
+# Local business-project binding. The opaque project ID belongs to this
+# checkout and must not be committed or used as repository identity.
+.gbrain-project.yaml

@@ -62,6 +62,8 @@ describe('MCP discovery catalog', () => {
     expect(text).toContain('project_binding');
     expect(text).toContain('projects/<project_id>/index');
     expect(text).toContain('Project experience drafts must be bound before `put_page`');
+    expect(text).toContain('Project identity is matched only by exact `project_id`');
+    expect(text).toContain('ensure_project');
     expect(text).toContain('source_project_ids');
   });
 });

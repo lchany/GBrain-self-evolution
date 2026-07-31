@@ -121,6 +121,8 @@ describe('buildToolDefs', () => {
     const defs = buildToolDefs(operations);
     const search = defs.find(def => def.name === 'search');
     const putPage = defs.find(def => def.name === 'put_page');
+    const matchProject = defs.find(def => def.name === 'match_project');
+    const ensureProject = defs.find(def => def.name === 'ensure_project');
 
     expect(search?.annotations).toEqual({
       readOnlyHint: true,
@@ -134,6 +136,15 @@ describe('buildToolDefs', () => {
       idempotentHint: false,
       openWorldHint: false,
     });
+    expect(matchProject?.inputSchema.required).toEqual(['project_id']);
+    expect(matchProject?.inputSchema.properties).not.toHaveProperty('repository_ref');
+    expect(ensureProject?.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
+    });
+    expect(ensureProject?.inputSchema.properties).not.toHaveProperty('repository_ref');
   });
 });
 

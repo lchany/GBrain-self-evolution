@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import matter from 'gray-matter';
@@ -59,6 +59,22 @@ describe('gbrain project command', () => {
     expect(readFileSync(join(root, '.gbrain-project.yaml'), 'utf8')).toContain('prj-0123456789abcdef');
   });
 
+  test('resolved bind writes the server-resolved ID with private permissions', async () => {
+    const code = await runGbrainProject([
+      'bind', 'prj-0123456789abcdef', '--resolved', '--json',
+    ], {
+      cwd: root,
+      projectRoot: root,
+      stdout: () => {},
+    });
+    const markerPath = join(root, '.gbrain-project.yaml');
+    expect(code).toBe(0);
+    expect(readFileSync(markerPath, 'utf8')).toBe(
+      'schema_version: 1\nproject_id: prj-0123456789abcdef\n',
+    );
+    expect(statSync(markerPath).mode & 0o777).toBe(0o600);
+  });
+
   test('init writes the registry before creating the local binding', async () => {
     const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
     const callTool: ProjectToolCaller = async (name, args) => {
@@ -77,16 +93,16 @@ describe('gbrain project command', () => {
       stdout: () => {},
     });
     expect(code).toBe(0);
-    expect(calls.map((call) => call.name)).toEqual(['list_pages', 'put_page']);
-    const markdown = String(calls[1]?.args.content);
+    expect(calls.map((call) => call.name)).toEqual(['put_page']);
+    const markdown = String(calls[0]?.args.content);
     const parsed = matter(markdown);
-    expect(calls[1]?.args.slug).toBe('projects/prj-0123456789abcdef/index');
+    expect(calls[0]?.args.slug).toBe('projects/prj-0123456789abcdef/index');
     expect(parsed.data.record_kind).toBe('project-registry');
     expect(parsed.data.repository_refs).toEqual(['github.com/example/widget']);
     expect(readFileSync(join(root, '.gbrain-project.yaml'), 'utf8')).toContain('prj-0123456789abcdef');
   });
 
-  test('match returns a sanitized MCP handoff without calling MCP or local writer', async () => {
+  test('unbound match ignores Git metadata and hands off to ensure_project', async () => {
     execFileSync('git', ['init'], { cwd: root, stdio: 'ignore' });
     execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:Example/Widget.git'], {
       cwd: root,
@@ -107,13 +123,40 @@ describe('gbrain project command', () => {
     expect(calls).toEqual([]);
     expect(JSON.parse(output.join(''))).toMatchObject({
       status: 'mcp_required',
+      code: 'project_ensure_via_mcp',
+      tool: 'ensure_project',
+      project_id: null,
+      arguments: {},
+    });
+    expect(output.join('')).not.toContain('github.com');
+    expect(output.join('')).not.toContain('project_name');
+  });
+
+  test('bound match hands off only the exact local project ID', async () => {
+    await runGbrainProject(['bind', 'prj-0123456789abcdef', '--resolved', '--json'], {
+      cwd: root,
+      projectRoot: root,
+      stdout: () => {},
+    });
+    const output: string[] = [];
+    const code = await runGbrainProject(['match', '--json'], {
+      cwd: root,
+      stdout: (text) => output.push(text),
+    });
+    expect(code).toBe(0);
+    expect(JSON.parse(output.join(''))).toEqual({
+      ok: true,
+      status: 'mcp_required',
       code: 'project_match_via_mcp',
       tool: 'match_project',
-      arguments: {
-        repository_ref: 'github.com/example/widget',
-        project_name: expect.any(String),
-      },
+      project_id: 'prj-0123456789abcdef',
+      arguments: { project_id: 'prj-0123456789abcdef' },
     });
+  });
+
+  test('project marker is ignored by Git', () => {
+    const ignore = readFileSync(join(import.meta.dir, '..', '.gitignore'), 'utf8');
+    expect(ignore.split(/\r?\n/)).toContain('.gbrain-project.yaml');
   });
 
   test('rejects unexpected positional arguments', async () => {
