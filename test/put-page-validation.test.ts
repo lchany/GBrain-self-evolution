@@ -222,6 +222,77 @@ describe('put_page validation gate', () => {
     expect(String(payload.message)).toContain('project_binding_required');
   });
 
+  test('rejects a pending project experience before it enters inbox', async () => {
+    const content = projectContent([
+      'record_kind: project-experience',
+      'project_binding: pending',
+      'project_id: null',
+    ], 'draft', 'unverified');
+    const payload = await putPageError('inbox/pending-project-experience', content);
+    expect(String(payload.message)).toContain('project_binding_required');
+  });
+
+  test('rejects project-experience record kind on a non-project inbox draft', async () => {
+    const content = validInboxContent(['record_kind: project-experience']);
+    const payload = await putPageError('inbox/misclassified-project-experience', content);
+    expect(String(payload.message)).toContain('record_kind_invalid');
+  });
+
+  test('rejects a bound inbox project experience when its canonical registry is missing', async () => {
+    const content = projectContent([
+      'record_kind: project-experience',
+      'project_binding: bound',
+      'project_id: prj-0123456789abcdef',
+    ], 'draft', 'unverified');
+    const engine = { getPage: async () => null } as unknown as BrainEngine;
+    const payload = await putPageWithEngine(engine, 'inbox/bound-project-without-registry', content);
+    expect(payload.error).toBe('invalid_params');
+    expect(String(payload.message)).toContain('project_registry_not_found');
+  });
+
+  test('rejects a bound inbox project experience when its registry identity is inconsistent', async () => {
+    const content = projectContent([
+      'record_kind: project-experience',
+      'project_binding: bound',
+      'project_id: prj-0123456789abcdef',
+    ], 'draft', 'unverified');
+    const engine = {
+      getPage: async () => ({
+        slug: 'projects/prj-0123456789abcdef/index',
+        frontmatter: {
+          record_kind: 'project-registry',
+          project_id: 'prj-fedcba9876543210',
+        },
+      }),
+    } as unknown as BrainEngine;
+    const payload = await putPageWithEngine(engine, 'inbox/bound-project-with-wrong-registry', content);
+    expect(payload.error).toBe('invalid_params');
+    expect(String(payload.message)).toContain('project_registry_not_found');
+  });
+
+  test('accepts a bound inbox project experience when its canonical registry exists', async () => {
+    const content = projectContent([
+      'record_kind: project-experience',
+      'project_binding: bound',
+      'project_id: prj-0123456789abcdef',
+    ], 'draft', 'unverified');
+    const engine = {
+      getPage: async () => ({
+        slug: 'projects/prj-0123456789abcdef/index',
+        frontmatter: {
+          record_kind: 'project-registry',
+          project_id: 'prj-0123456789abcdef',
+        },
+      }),
+    } as unknown as BrainEngine;
+    const payload = await putPageWithEngine(engine, 'inbox/bound-project-with-registry', content);
+    expect(payload).toMatchObject({
+      dry_run: true,
+      action: 'put_page',
+      slug: 'inbox/bound-project-with-registry',
+    });
+  });
+
   test('rejects a bound project experience when its canonical registry is missing', async () => {
     const content = projectContent([
       'record_kind: project-experience',

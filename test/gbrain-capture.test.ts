@@ -72,6 +72,41 @@ describe('gbrain capture structured candidate', () => {
     expect(parsed.data.project_id).toBe('prj-0123456789abcdef');
   });
 
+  test('rejects an unbound project candidate before any MCP call', async () => {
+    const calls: string[] = [];
+    const callTool: ToolCaller = async (name) => {
+      calls.push(name);
+      return [];
+    };
+
+    await expect(runGbrainCapture([
+      '--title', 'Unbound Project Summary',
+      '--type', 'project',
+      '--summary', 'Must not enter the MCP write workflow without a project ID.',
+      '--evidence', 'session:project-safe',
+      '--json',
+    ], {
+      cwd: tmpRoot,
+      now: () => new Date('2026-07-26T00:00:00Z'),
+      callTool,
+    })).rejects.toThrow(/project_binding_required/);
+
+    expect(calls).toEqual([]);
+  });
+
+  test('rejects project binding metadata on a non-project candidate', () => {
+    expect(() => structuredCaptureTesting.buildCandidate({
+      title: 'Misclassified Project Experience',
+      suggestedType: 'knowledge',
+      summary: 'A project ID must use the project experience type.',
+      evidenceRefs: ['session:project-safe'],
+      requestedVerification: 'unverified',
+      sensitivity: 'internal',
+      projectId: 'prj-0123456789abcdef',
+      now: new Date('2026-07-26T00:00:00Z'),
+    })).toThrow(/project_type_required/);
+  });
+
   test('rejects malformed project ids before capture', () => {
     expect(() => structuredCaptureTesting.buildCandidate({
       title: 'Invalid Project Binding',
