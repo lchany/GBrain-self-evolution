@@ -150,4 +150,23 @@ describe('match_project MCP operation', () => {
     })).rejects.toBeInstanceOf(OperationError);
     expect(reads).toBe(0);
   });
+
+  test('rejects repository and name inputs even when an exact ID is present', async () => {
+    const engine = {
+      getPage: async () => null,
+    } as unknown as BrainEngine;
+
+    await expect(matchProject.handler(context(engine), {
+      project_id: 'prj-0123456789abcdef',
+      repository_ref: 'example.invalid/owner/repo',
+    })).rejects.toMatchObject({
+      code: 'invalid_params',
+    });
+    await expect(matchProject.handler(context(engine), {
+      project_id: 'prj-0123456789abcdef',
+      project_name: 'display-name',
+    })).rejects.toMatchObject({
+      code: 'invalid_params',
+    });
+  });
 });

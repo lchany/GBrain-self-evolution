@@ -16,8 +16,9 @@ export const GBRAIN_CLIENT_RULES = `${GBRAIN_RULES_BLOCK_START}
 - 使用 GBrain MCP 的 \`list_pages\` 和 \`get_page\` 检查草稿。晋升只能在认证的管理员审核界面完成，匿名 MCP 客户端不得晋升。
 - 不为 GBrain 采集或审核添加生命周期钩子，不安装本地 GBrain CLI，不创建本地离线队列，也不索取客户端凭据作为降级方案。
 - 客户端网络访问由云防火墙白名单控制；安装器不创建或分发凭据。
-- 进入项目目录或开始项目任务时，只读检查祖先目录中的 \`.gbrain-project.yaml\`，并运行 \`gbrain project current --json\`。已绑定时通过 GBrain MCP \`get_page\` 验证 \`projects/<project_id>/index\`；未绑定时运行 \`gbrain project match --json\` 取得脱敏参数，再调用已连接 MCP 的 \`match_project\`。即使只有一个候选也必须由用户确认；确认后运行 \`gbrain project bind <project_id> --confirmed --json\`。
-- 写入项目经验前必须完成硬绑定：\`project_id\` 使用 \`prj-\` 加 16 位小写十六进制，草稿同时写入 \`project_binding: bound\`。无唯一匹配时只能在客户端内存中保留 \`project_binding: pending\` 的候选，不得猜测或静默创建项目 ID，也不得调用 MCP \`put_page\`。
+- 进入项目目录或开始项目任务时，只读检查祖先目录中的 \`.gbrain-project.yaml\`，并运行 \`gbrain project current --json\`；普通召回和一次性任务不得因此创建项目 ID。项目身份只认规范 \`project_id\`，不使用 Git、仓库路径、目录名、项目名称、别名或语义相似度匹配。
+- 准备写入项目经验时：本地已有 ID 就调用 MCP \`match_project({project_id})\` 精确验证；登记页不存在时调用 \`ensure_project({project_id})\` 使用同一 ID 创建。本地无 ID 时为本次创建生成随机 \`creation_key\`，调用 \`ensure_project({creation_key})\`，再运行 \`gbrain project bind <project_id> --resolved --json\`。不得通过远程 \`put_page\` 创建或修改项目登记页。
+- 写入项目经验前必须取得规范 ID，并确认当前 source 存在 \`projects/<project_id>/index\`；草稿写入 \`project_binding: bound\` 和相同 \`project_id\`。本地标记写入失败时，报告 \`project_marker_write_failed\`，保留内存中的 \`project_id\` 并继续当前任务，不创建离线队列；下一次会话不得根据 Git 或名称猜测恢复。
 
 建议技能：\`gbrain-capture\`、\`gbrain-review\`。
 ${GBRAIN_RULES_BLOCK_END}
@@ -87,15 +88,23 @@ description: 将经过验证、脱敏和人工审核的持久经验写入 GBrain
 都只能使用 \`inbox/<slug>\`；不得直接写入最终 \`knowledge/\`、
 \`runbooks/\`、\`incidents/\` 或其他晋升目录。
 
-项目经验写入前先运行 \`gbrain project current --json\`。已有绑定时，调用
-MCP \`get_page\` 验证 \`projects/<project_id>/index\`。未绑定时运行
-\`gbrain project match --json\` 取得脱敏后的 \`repository_ref\` 和
-\`project_name\`，再使用这些参数调用已连接 MCP 的 \`match_project\`。
-完整展示候选 ID、名称和匹配依据；即使只有一个候选也要人工确认。确认后运行
-\`gbrain project bind <project_id> --confirmed --json\`，再重新读取当前绑定。
-无法确认时，只在客户端内存中保留
-\`project_binding: pending\` 和 \`project_id: null\` 的候选，不得调用 \`put_page\`，
-不得创建本地离线队列，也不得猜测项目 ID。
+项目经验写入前先运行 \`gbrain project current --json\`。项目身份只认规范
+\`project_id\`，不使用 Git、仓库路径、目录名、项目名称、别名或语义相似度
+匹配。
+
+- 已有本地 ID：调用 MCP \`match_project({project_id})\`，只检查当前 source 的
+  \`projects/<project_id>/index\`。不存在时调用
+  \`ensure_project({project_id})\`，必须使用同一个 ID 创建。
+- 没有本地 ID：为本次创建动作生成不含业务信息的随机 \`creation_key\`，调用
+  MCP \`ensure_project({creation_key})\`。服务端返回 ID 后运行
+  \`gbrain project bind <project_id> --resolved --json\`。
+- 最后重新运行 \`gbrain project current --json\`，并通过 MCP \`get_page\`
+  验证精确登记页。不得通过远程 \`put_page\` 创建或修改项目登记页。
+
+本地标记写入失败时，报告 \`project_marker_write_failed\`，保留内存中的
+\`project_id\` 并继续当前任务的经验审核和写入；提示修复权限后执行
+\`bind --resolved\`。不得创建本地离线队列，也不得在下次会话中根据 Git 或
+名称猜测恢复。取得规范 ID 和登记页之前，不得调用 \`put_page\` 写入项目经验。
 
 ## 四、固定经验模板
 

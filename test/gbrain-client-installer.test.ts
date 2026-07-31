@@ -40,7 +40,7 @@ describe('gbrain install-client', () => {
       expect(opencodeRules).toContain('ensure_project');
       expect(opencodeRules).toContain('gbrain project bind <project_id> --resolved');
       expect(opencodeRules).toContain('不使用 Git');
-      expect(opencodeRules).toContain('不得调用 MCP `put_page`');
+      expect(opencodeRules).toContain('不得通过远程 `put_page` 创建或修改项目登记页');
       expect(codexRules).toContain('默认使用中文');
       expect(codexRules).toContain('只读召回');
       expect(codexRules).toContain('第 2 次');
@@ -72,11 +72,10 @@ describe('gbrain install-client', () => {
       expect(opencodeCapture).toContain('5 分钟没有任何回复');
       expect(opencodeCapture).toContain('重新计算 5 分钟');
       expect(opencodeCapture).toContain('project_binding');
-      expect(opencodeCapture).toContain('gbrain project match');
       expect(opencodeCapture).toContain('match_project');
       expect(opencodeCapture).toContain('ensure_project');
       expect(opencodeCapture).toContain('gbrain project bind <project_id> --resolved');
-      expect(opencodeCapture).toContain('内存中的 `project_id`');
+      expect(opencodeCapture).toMatch(/内存中的\s+`project_id`/);
       expect(opencodeCapture).toContain('不使用 Git');
       expect(opencodeCapture).not.toContain('即使只有一个候选');
       expect(opencodeCapture).not.toContain('repository_ref');

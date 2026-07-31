@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import matter from 'gray-matter';
 import {
   assertProjectId,
@@ -29,7 +29,7 @@ const HELP = `gbrain project — 解析并绑定稳定的业务项目身份
   gbrain project current [--json]
   gbrain project match [--json]
   gbrain project init --name <name> [--repo <url>] [--json]
-  gbrain project bind <project_id> --confirmed [--json]
+  gbrain project bind <project_id> (--resolved|--confirmed) [--json]
 `;
 
 export async function runGbrainProject(args: readonly string[], deps: Partial<ProjectCommandDeps> = {}): Promise<number> {
@@ -77,7 +77,7 @@ function validateCommandArgs(args: readonly string[]): void {
   for (let index = 1; index < args.length; index++) {
     const arg = args[index];
     if (arg === '--json') continue;
-    if (command === 'bind' && arg === '--confirmed') continue;
+    if (command === 'bind' && (arg === '--confirmed' || arg === '--resolved')) continue;
     if (command === 'bind' && index === 1 && !arg.startsWith('--')) continue;
     if (command === 'init' && (arg === '--name' || arg === '--repo')) {
       requiredPositional(args, ++index, arg);
@@ -95,24 +95,30 @@ function currentProject(cwd: string): Record<string, unknown> {
 
 async function matchProject(deps: ProjectCommandDeps): Promise<Record<string, unknown>> {
   const current = currentProject(deps.cwd);
-  if (current.status === 'bound') return current;
-  const repositoryRef = detectRepositoryRef(deps.cwd);
-  const projectName = basename(findProjectRoot(deps.cwd)).toLowerCase();
+  if (current.status === 'bound') {
+    const projectId = current.project_id as string;
+    return {
+      ok: true,
+      status: 'mcp_required',
+      code: 'project_match_via_mcp',
+      tool: 'match_project',
+      project_id: projectId,
+      arguments: { project_id: projectId },
+    };
+  }
   return {
     ok: true,
     status: 'mcp_required',
-    code: 'project_match_via_mcp',
-    tool: 'match_project',
-    arguments: {
-      ...(repositoryRef === null ? {} : { repository_ref: repositoryRef }),
-      project_name: projectName,
-    },
+    code: 'project_ensure_via_mcp',
+    tool: 'ensure_project',
+    project_id: null,
+    arguments: {},
   };
 }
 
 async function bindProject(args: readonly string[], deps: ProjectCommandDeps): Promise<Record<string, unknown>> {
-  if (!args.includes('--confirmed')) {
-    throw new Error('project_confirmation_required: 用户确认 MCP 候选后才能使用 --confirmed 完成本地绑定');
+  if (!args.includes('--confirmed') && !args.includes('--resolved')) {
+    throw new Error('project_confirmation_required: 必须使用 --resolved 或 --confirmed 完成本地绑定');
   }
   const projectId = assertProjectId(requiredPositional(args, 1, 'project_id'));
   const markerPath = writeProjectMarker(deps.projectRoot ?? findProjectRoot(deps.cwd), projectId);
@@ -126,22 +132,6 @@ async function initProject(args: readonly string[], deps: ProjectCommandDeps): P
   const repoArg = flagValue(args, '--repo');
   const repositoryRef = repoArg ? normalizeRepositoryRef(repoArg) : detectRepositoryRef(deps.cwd);
   if (repoArg && repositoryRef === null) throw new Error('repository_ref_invalid: --repo 必须是受支持的 Git remote URL');
-  const registries = await loadProjectRegistries(deps.callTool);
-  const duplicate = registries.find((page) => {
-    const names = [page.frontmatter.project_name, ...stringList(page.frontmatter.project_aliases)]
-      .filter((value): value is string => typeof value === 'string')
-      .map((value) => value.toLowerCase());
-    return names.includes(name.trim().toLowerCase())
-      || (repositoryRef !== null && stringList(page.frontmatter.repository_refs).includes(repositoryRef));
-  });
-  if (duplicate) {
-    return {
-      ok: false,
-      status: 'confirmation_required',
-      code: 'project_match_confirmation_required',
-      candidate: { project_id: duplicate.frontmatter.project_id, project_name: duplicate.frontmatter.project_name, slug: duplicate.slug },
-    };
-  }
   const projectId = assertProjectId(deps.generateId());
   const slug = `projects/${projectId}/index`;
   const content = matter.stringify(`# ${name.trim()}\n\nCanonical project registry.\n`, {
@@ -191,54 +181,6 @@ function detectRepositoryRef(cwd: string): string | null {
   } catch {
     return null;
   }
-}
-
-async function loadProjectRegistries(callTool: ProjectToolCaller): Promise<Array<{ slug: string; frontmatter: Record<string, unknown> }>> {
-  const hydrated: Array<{ slug: string; frontmatter: Record<string, unknown> }> = [];
-  let offset = 0;
-  for (let page = 0; page < 100; page++) {
-    const result = await callTool('list_pages', { type: 'project', include_prefixes: ['projects/'], limit: 100, offset });
-    const indexSlugs = pageSummaries(result).map((entry) => entry.slug).filter((slug) => slug.endsWith('/index'));
-    const loaded = await Promise.all(indexSlugs.map((slug) => callTool('get_page', { slug })));
-    hydrated.push(...loaded.map(pageFrom).filter((entry): entry is { slug: string; frontmatter: Record<string, unknown> } =>
-      entry !== null && entry.frontmatter.record_kind === 'project-registry'));
-    const nextOffset = envelopeNextOffset(result);
-    if (nextOffset === null) break;
-    offset = nextOffset;
-  }
-  return hydrated;
-}
-
-function pageSummaries(result: unknown): Array<{ slug: string }> {
-  const values = Array.isArray(result)
-    ? result
-    : typeof result === 'object' && result !== null && 'items' in result && Array.isArray(result.items)
-      ? result.items
-      : [];
-  return values.flatMap((value) =>
-    typeof value === 'object' && value !== null && 'slug' in value && typeof value.slug === 'string'
-      ? [{ slug: value.slug }]
-      : []);
-}
-
-function envelopeNextOffset(result: unknown): number | null {
-  if (typeof result !== 'object' || result === null || !('has_more' in result) || result.has_more !== true) return null;
-  return 'next_offset' in result && typeof result.next_offset === 'number' ? result.next_offset : null;
-}
-
-function pageFrom(value: unknown): { slug: string; frontmatter: Record<string, unknown> } | null {
-  if (typeof value !== 'object' || value === null || !('slug' in value) || typeof value.slug !== 'string') return null;
-  if ('frontmatter' in value && typeof value.frontmatter === 'object' && value.frontmatter !== null) {
-    return { slug: value.slug, frontmatter: value.frontmatter as Record<string, unknown> };
-  }
-  if ('markdown' in value && typeof value.markdown === 'string') {
-    return { slug: value.slug, frontmatter: matter(value.markdown).data };
-  }
-  return null;
-}
-
-function stringList(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : [];
 }
 
 function flagValue(args: readonly string[], flag: string): string | undefined {

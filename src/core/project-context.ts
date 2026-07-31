@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, linkSync, lstatSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { isTrustedDotfile } from './path-confine.ts';
@@ -21,6 +21,15 @@ export function assertProjectId(value: string): string {
 
 export function generateProjectId(): string {
   return `prj-${randomBytes(8).toString('hex')}`;
+}
+
+export function deriveProjectIdFromCreationKey(sourceId: string, creationKey: string): string {
+  const digest = createHash('sha256')
+    .update(sourceId)
+    .update('\0')
+    .update(creationKey)
+    .digest('hex');
+  return `prj-${digest.slice(0, 16)}`;
 }
 
 export function buildProjectMarker(projectId: string): string {

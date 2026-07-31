@@ -96,6 +96,10 @@ Every inbox draft also declares:
 Project registries live at \`projects/<project_id>/index\` with
 \`record_kind: project-registry\`. Project experiences use
 \`type: project\` and \`record_kind: project-experience\`.
+Project identity is matched only by exact \`project_id\`; Git, paths, names,
+aliases, and semantic similarity are never identity inputs. Use
+\`match_project\` for exact read-only verification and \`ensure_project\` to
+reuse or create the registry in the current source.
 Project experience drafts must be bound before \`put_page\`; pending project
 experience drafts are rejected. The canonical registry must exist in the
 current write source and carry the same project ID.

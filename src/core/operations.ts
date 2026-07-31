@@ -25,8 +25,8 @@ import { bumpLastRetrievedAt } from './last-retrieved.ts';
 import { isSearchMode } from './search/mode.ts';
 import { stampEvidence } from './search/evidence.ts';
 import { requiredProjectRegistrySlug, validatePutPageWrite } from './put-page-validation.ts';
-import { normalizeRepositoryRef, PROJECT_ID_RE } from './project-context.ts';
-import type { Page, SearchResult } from './types.ts';
+import { deriveProjectIdFromCreationKey, PROJECT_ID_RE } from './project-context.ts';
+import type { Page, PageInput, SearchResult } from './types.ts';
 import { CJK_SLUG_CHARS } from './cjk.ts';
 import * as db from './db.ts';
 import { VERSION } from '../version.ts';
@@ -799,6 +799,14 @@ const put_page: Operation = {
   handler: async (ctx, p) => {
     const slug = p.slug as string;
     const content = p.content as string;
+    if (ctx.remote !== false && /^projects\/prj-[0-9a-f]{16}\/index$/.test(slug)) {
+      throw new OperationError(
+        'invalid_params',
+        'project_registry_managed: 远程客户端不能通过 put_page 创建或修改项目登记页。',
+        '请调用 ensure_project 精确复用或创建项目登记页。',
+        'gbrain://schema/page',
+      );
+    }
     const validation = validatePutPageWrite(slug, content, { strictSchema: ctx.remote !== false });
     if (!validation.ok) {
       throw new OperationError('invalid_params', validation.message, validation.suggestion, 'gbrain://schema/page');
@@ -1669,21 +1677,17 @@ const list_pages: Operation = {
   cliHints: { name: 'list' },
 };
 
-interface ProjectMatchCandidate {
-  project_id: string;
-  project_name: string;
-  registry_slug: string;
-  match_reason: 'repository_ref' | 'name_or_alias';
-}
-
 function projectRegistryIdentity(page: Page): {
   project_id: string;
   project_name: string;
-  repository_refs: string[];
-  names: string[];
 } | null {
   const slugMatch = /^projects\/(prj-[0-9a-f]{16})\/index$/.exec(page.slug);
-  if (!slugMatch || page.frontmatter.record_kind !== 'project-registry') return null;
+  if (
+    !slugMatch
+    || page.deleted_at != null
+    || page.type !== 'project'
+    || page.frontmatter.record_kind !== 'project-registry'
+  ) return null;
   const projectId = page.frontmatter.project_id;
   const projectName = page.frontmatter.project_name;
   if (
@@ -1695,131 +1699,227 @@ function projectRegistryIdentity(page: Page): {
   ) {
     return null;
   }
-  const repositoryRefs = Array.isArray(page.frontmatter.repository_refs)
-    ? page.frontmatter.repository_refs.flatMap((value) => {
-      if (typeof value !== 'string') return [];
-      const normalized = normalizeRepositoryRef(value);
-      return normalized === null ? [] : [normalized];
-    })
-    : [];
-  const aliases = Array.isArray(page.frontmatter.project_aliases)
-    ? page.frontmatter.project_aliases.filter((value): value is string => typeof value === 'string')
-    : [];
   return {
     project_id: projectId,
     project_name: projectName.trim(),
-    repository_refs: [...new Set(repositoryRefs)],
-    names: [projectName, ...aliases].map((value) => value.trim().toLowerCase()).filter(Boolean),
   };
 }
 
-async function listProjectRegistries(ctx: OperationContext): Promise<Page[]> {
-  const pages: Page[] = [];
-  const scope = sourceScopeOpts(ctx);
-  let offset = 0;
-  for (let batchIndex = 0; batchIndex < 100; batchIndex++) {
-    const batch = await ctx.engine.listPages({
-      type: 'project',
-      limit: 100,
-      offset,
-      sort: 'slug',
-      ...scope,
-    });
-    pages.push(...batch);
-    if (batch.length < 100) break;
-    offset += batch.length;
+function assertCanonicalProjectId(value: unknown): string {
+  if (typeof value !== 'string' || !PROJECT_ID_RE.test(value)) {
+    throw new OperationError(
+      'invalid_params',
+      'project_id_invalid: project_id 必须是 prj- 加 16 位小写十六进制。',
+    );
   }
-  return pages;
+  return value;
+}
+
+function assertValidProjectRegistry(page: Page, projectId: string): void {
+  const identity = projectRegistryIdentity(page);
+  if (identity === null || identity.project_id !== projectId) {
+    throw new OperationError(
+      'invalid_params',
+      `project_registry_conflict: projects/${projectId}/index 已存在，但不是该 ID 的合法项目登记页。`,
+      '请人工检查冲突页面；服务端不会覆盖或改用其他项目 ID。',
+      'gbrain://schema/page',
+    );
+  }
+}
+
+function projectRegistryInput(projectId: string, projectName: string): PageInput {
+  return {
+    type: 'project',
+    title: projectName,
+    compiled_truth: '# Project registry\n\nCanonical project registry.\n',
+    timeline: '',
+    frontmatter: {
+      type: 'project',
+      date: new Date().toISOString().slice(0, 10),
+      status: 'reviewed',
+      sensitivity: 'internal',
+      verification: 'verified',
+      applicability: [`project:${projectId}`],
+      non_applicable: [],
+      source_refs: ['mcp:ensure_project'],
+      migrated_from: null,
+      record_kind: 'project-registry',
+      project_id: projectId,
+      project_name: projectName,
+      project_aliases: [],
+      repository_refs: [],
+      environment_refs: [],
+    },
+  };
 }
 
 const match_project: Operation = {
   name: 'match_project',
-  description:
-    '使用客户端提供的脱敏仓库引用和项目名称匹配规范项目登记页。'
-    + '只返回候选；本地绑定前必须由用户明确确认。',
+  description: '只按规范 project_id 在当前 source 精确检查项目登记页；不使用 Git、目录、名称、别名或语义匹配。',
   params: {
-    repository_ref: {
+    project_id: {
       type: 'string',
-      maxLength: 2048,
-      pattern: '^[^\\u0000-\\u001F\\u007F]*$',
-      description: 'Git remote 或规范化的 host/owner/repository 引用；拒绝凭据和 URL 查询数据。',
+      required: true,
+      pattern: '^prj-[0-9a-f]{16}$',
+      description: '要精确检查的规范项目 ID。',
+    },
+  },
+  handler: async (ctx, p) => {
+    if (p.repository_ref !== undefined || p.project_name !== undefined) {
+      throw new OperationError(
+        'invalid_params',
+        'project_match_input_invalid: match_project 只接受 project_id。',
+      );
+    }
+    const projectId = assertCanonicalProjectId(p.project_id);
+    const registrySlug = `projects/${projectId}/index`;
+    const sourceId = ctx.sourceId ?? 'default';
+    const page = await ctx.engine.getPage(registrySlug, { sourceId, includeDeleted: true });
+    if (page === null) {
+      return {
+        ok: true,
+        status: 'unmatched',
+        code: 'project_match_not_found',
+        project_id: projectId,
+      };
+    }
+    assertValidProjectRegistry(page, projectId);
+    return {
+      ok: true,
+      status: 'matched',
+      code: 'ok',
+      project_id: projectId,
+      registry_slug: registrySlug,
+    };
+  },
+  scope: 'read',
+};
+
+const ensure_project: Operation = {
+  name: 'ensure_project',
+  description: '在当前 source 按精确 project_id 复用或原子创建项目登记页；无 ID 时使用随机 creation_key 幂等生成新 ID。',
+  params: {
+    project_id: {
+      type: 'string',
+      pattern: '^prj-[0-9a-f]{16}$',
+      description: '已有本地绑定时传入的规范项目 ID；与 creation_key 二选一。',
+    },
+    creation_key: {
+      type: 'string',
+      minLength: 8,
+      maxLength: 200,
+      pattern: '^[A-Za-z0-9._:-]{8,200}$',
+      description: '无本地 ID 时为本次创建生成的随机幂等键；不保存为项目身份。',
     },
     project_name: {
       type: 'string',
       maxLength: 200,
       pattern: '^[^\\u0000-\\u001F\\u007F]*$',
-      description: '本地项目名称；仅在没有仓库精确候选时用于名称或别名匹配。',
+      description: '可选显示名称；不参与项目身份匹配。',
     },
   },
+  mutating: true,
+  scope: 'write',
   handler: async (ctx, p) => {
-    const rawRepositoryRef = typeof p.repository_ref === 'string' ? p.repository_ref.trim() : '';
-    const rawProjectName = typeof p.project_name === 'string' ? p.project_name.trim() : '';
-    if (
-      rawRepositoryRef.length > 2048
-      || rawProjectName.length > 200
-      || /[\u0000-\u001f\u007f]/.test(rawRepositoryRef)
-      || /[\u0000-\u001f\u007f]/.test(rawProjectName)
-    ) {
-      throw new OperationError('invalid_params', 'project_match_input_invalid: 匹配输入包含控制字符或超过长度限制');
-    }
-    const repositoryRef = rawRepositoryRef ? normalizeRepositoryRef(rawRepositoryRef) : null;
-    if (rawRepositoryRef && repositoryRef === null) {
+    if (p.repository_ref !== undefined) {
       throw new OperationError(
         'invalid_params',
-        'repository_ref_invalid: 请使用不含密码、查询参数或片段的 Git remote',
+        'project_identity_input_invalid: ensure_project 不接受仓库引用。',
       );
     }
-    const projectName = rawProjectName.toLowerCase();
-    if (repositoryRef === null && !projectName) {
+    const hasProjectId = p.project_id !== undefined;
+    const hasCreationKey = p.creation_key !== undefined;
+    if (hasProjectId === hasCreationKey) {
       throw new OperationError(
         'invalid_params',
-        'project_match_input_required: 请提供 repository_ref 或 project_name',
+        'project_identity_input_invalid: project_id 与 creation_key 必须且只能提供一个。',
       );
     }
 
-    const registries = (await listProjectRegistries(ctx))
-      .flatMap((page) => {
-        const identity = projectRegistryIdentity(page);
-        return identity === null ? [] : [{ page, identity }];
-      });
-    const repositoryMatches = repositoryRef === null
-      ? []
-      : registries.filter(({ identity }) => identity.repository_refs.includes(repositoryRef));
-    const matched = repositoryMatches.length > 0
-      ? repositoryMatches.map(({ page, identity }): ProjectMatchCandidate => ({
-        project_id: identity.project_id,
-        project_name: identity.project_name,
-        registry_slug: page.slug,
-        match_reason: 'repository_ref',
-      }))
-      : registries
-        .filter(({ identity }) => projectName && identity.names.includes(projectName))
-        .map(({ page, identity }): ProjectMatchCandidate => ({
-          project_id: identity.project_id,
-          project_name: identity.project_name,
-          registry_slug: page.slug,
-          match_reason: 'name_or_alias',
-        }));
-    const candidates = [...new Map(
-      matched
-        .sort((left, right) => left.project_id.localeCompare(right.project_id))
-        .map((candidate) => [candidate.project_id, candidate]),
-    ).values()];
-    return candidates.length === 0
-      ? {
-        ok: true,
-        status: 'unmatched',
-        code: 'project_match_not_found',
-        candidates: [],
+    const sourceId = ctx.sourceId ?? 'default';
+    let projectId: string;
+    if (hasProjectId) {
+      projectId = assertCanonicalProjectId(p.project_id);
+    } else {
+      const creationKey = p.creation_key;
+      if (
+        typeof creationKey !== 'string'
+        || creationKey.length < 8
+        || creationKey.length > 200
+        || !/^[A-Za-z0-9._:-]+$/.test(creationKey)
+      ) {
+        throw new OperationError(
+          'invalid_params',
+          'project_creation_key_invalid: creation_key 必须是 8 到 200 位安全随机标识符。',
+        );
       }
-      : {
+      projectId = deriveProjectIdFromCreationKey(sourceId, creationKey);
+    }
+
+    const rawName = p.project_name;
+    if (
+      rawName !== undefined
+      && (
+        typeof rawName !== 'string'
+        || rawName.trim().length === 0
+        || rawName.trim().length > 200
+        || /[\u0000-\u001f\u007f]/.test(rawName)
+      )
+    ) {
+      throw new OperationError(
+        'invalid_params',
+        'project_name_invalid: project_name 必须是 1 到 200 个不含控制字符的显示文本。',
+      );
+    }
+    const projectName = typeof rawName === 'string' ? rawName.trim() : projectId;
+    const registrySlug = `projects/${projectId}/index`;
+    let created = false;
+
+    const result = await ctx.engine.transaction(async (tx) => {
+      if (tx.kind !== 'pglite') {
+        await tx.executeRaw(
+          'SELECT pg_advisory_xact_lock(hashtext($1)::bigint)',
+          [`ensure_project:${sourceId}:${projectId}`],
+        );
+      }
+      const existing = await tx.getPage(registrySlug, { sourceId, includeDeleted: true });
+      if (existing !== null) {
+        assertValidProjectRegistry(existing, projectId);
+        return {
+          ok: true,
+          status: 'matched',
+          code: 'ok',
+          project_id: projectId,
+          registry_slug: registrySlug,
+        };
+      }
+      if (ctx.dryRun) {
+        return {
+          dry_run: true,
+          action: 'ensure_project',
+          status: 'would_create',
+          project_id: projectId,
+          registry_slug: registrySlug,
+        };
+      }
+      await tx.putPage(registrySlug, projectRegistryInput(projectId, projectName), { sourceId });
+      created = true;
+      return {
         ok: true,
-        status: 'confirmation_required',
-        code: 'project_match_confirmation_required',
-        candidates,
+        status: 'created',
+        code: 'ok',
+        project_id: projectId,
+        registry_slug: registrySlug,
       };
+    });
+
+    if (!created) return result;
+    const writeThrough = await writePageThrough(ctx.engine, registrySlug, {
+      sourceId,
+      logger: ctx.logger,
+    });
+    return { ...result, write_through: writeThrough };
   },
-  scope: 'read',
 };
 
 // --- Search ---
@@ -5789,7 +5889,7 @@ const chronicle_backfill: Operation = {
 
 export const operations: Operation[] = [
   // Page CRUD
-  get_page, put_page, delete_page, list_pages, match_project,
+  get_page, put_page, delete_page, list_pages, match_project, ensure_project,
   // v0.26.5 destructive-guard ops (page-level soft-delete + recovery + admin purge)
   restore_page, purge_deleted_pages,
   // Search

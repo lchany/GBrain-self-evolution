@@ -56,6 +56,25 @@ class ProjectEngine {
   }
 }
 
+class SerialProjectEngine extends ProjectEngine {
+  private tail = Promise.resolve();
+
+  override async transaction<T>(fn: (engine: BrainEngine) => Promise<T>): Promise<T> {
+    const previous = this.tail;
+    let release = (): void => {};
+    this.tail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      this.events.push('transaction');
+      return await fn(this as unknown as BrainEngine);
+    } finally {
+      release();
+    }
+  }
+}
+
 function context(
   engine: ProjectEngine,
   options: { sourceId?: string; dryRun?: boolean } = {},
@@ -185,6 +204,19 @@ describe('ensure_project MCP operation', () => {
     expect(engine.writes.map((write) => write.sourceId)).toEqual(['source-a', 'source-b']);
   });
 
+  test('serializes concurrent retries so only one registry is created', async () => {
+    const engine = new SerialProjectEngine();
+    const args = { creation_key: 'ce8f93d8-385c-47ce-a6a6-57fe24ce9e83' };
+    const [first, second] = await Promise.all([
+      ensureProject.handler(context(engine), args) as Promise<Record<string, unknown>>,
+      ensureProject.handler(context(engine), args) as Promise<Record<string, unknown>>,
+    ]);
+
+    expect(first.project_id).toBe(second.project_id);
+    expect([first.status, second.status].sort()).toEqual(['created', 'matched']);
+    expect(engine.writes).toHaveLength(1);
+  });
+
   test('rejects an occupied exact slug instead of overwriting it', async () => {
     const engine = new ProjectEngine();
     await engine.putPage(
@@ -211,6 +243,36 @@ describe('ensure_project MCP operation', () => {
     expect(engine.writes).toHaveLength(0);
   });
 
+  test('treats a soft-deleted registry as an occupied conflict', async () => {
+    const engine = new ProjectEngine();
+    const slug = 'projects/prj-0123456789abcdef/index';
+    await engine.putPage(
+      slug,
+      {
+        type: 'project',
+        title: 'Deleted registry',
+        compiled_truth: 'Canonical project registry.',
+        frontmatter: {
+          record_kind: 'project-registry',
+          project_id: 'prj-0123456789abcdef',
+          project_name: 'Deleted registry',
+        },
+      },
+      { sourceId: 'source-a' },
+    );
+    const deleted = engine.pages.get(engine.key('source-a', slug));
+    if (deleted !== undefined) deleted.deleted_at = new Date('2026-07-31T01:00:00Z');
+    engine.writes.length = 0;
+
+    await expect(ensureProject.handler(context(engine), {
+      project_id: 'prj-0123456789abcdef',
+    })).rejects.toMatchObject({
+      code: 'invalid_params',
+      message: expect.stringContaining('project_registry_conflict'),
+    });
+    expect(engine.writes).toHaveLength(0);
+  });
+
   test('requires exactly one of project_id or creation_key and validates both', async () => {
     const engine = new ProjectEngine();
     await expect(ensureProject.handler(context(engine), {})).rejects.toMatchObject({
@@ -224,6 +286,12 @@ describe('ensure_project MCP operation', () => {
     });
     await expect(ensureProject.handler(context(engine), {
       creation_key: 'unsafe key with spaces',
+    })).rejects.toMatchObject({
+      code: 'invalid_params',
+    });
+    await expect(ensureProject.handler(context(engine), {
+      project_id: 'prj-0123456789abcdef',
+      repository_ref: 'example.invalid/owner/repo',
     })).rejects.toMatchObject({
       code: 'invalid_params',
     });
