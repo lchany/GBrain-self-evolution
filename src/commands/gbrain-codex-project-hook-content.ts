@@ -84,12 +84,27 @@ def main():
         emit("GBrain 项目 ID 启动检查：当前目录标记格式无效；会话继续。", True)
         return
 
+    descriptor = None
     try:
-        with open(marker_path, "r", encoding="utf-8") as marker_file:
+        open_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(marker_path, open_flags)
+        opened_metadata = os.fstat(descriptor)
+        if (
+            not marker_is_trusted(opened_metadata)
+            or opened_metadata.st_dev != metadata.st_dev
+            or opened_metadata.st_ino != metadata.st_ino
+        ):
+            emit("GBrain 项目 ID 启动检查：当前目录标记在读取时发生变化或变得不可信；会话继续。", True)
+            return
+        with os.fdopen(descriptor, "r", encoding="utf-8") as marker_file:
+            descriptor = None
             project_id = parse_project_id(marker_file.read(MAX_MARKER_BYTES + 1))
     except (OSError, UnicodeError):
         emit("GBrain 项目 ID 启动检查失败：当前目录标记不可读；会话继续。", True)
         return
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
     if project_id is None:
         emit("GBrain 项目 ID 启动检查：当前目录标记格式无效；会话继续。", True)
@@ -106,4 +121,3 @@ def main():
 if __name__ == "__main__":
     main()
 `;
-

@@ -3663,9 +3663,11 @@ these values in the repository or client installer inputs.
 
 The checked-in systemd/env templates and read-only verification script are in
 [`deploy/`](../../deploy/). `deploy/scripts/install-client-assets.sh` and
-`gbrain install-client` install rules and skills only; client credentials are
-not created or distributed. Client reachability is controlled by the cloud
-firewall allowlist.
+`gbrain install-client` install rules, skills, and a read-only Codex
+`SessionStart` Hook. The Hook checks only the session `cwd` for
+`.gbrain-project.yaml`; it does not walk parents, call MCP, or create an ID.
+Client credentials are not created or distributed. Client reachability is
+controlled by the cloud firewall allowlist.
 
 > **v0.26.0+:** `gbrain serve --http` ships full OAuth 2.1 (client credentials,
 > auth code + PKCE, refresh rotation, optional DCR), an embedded React admin

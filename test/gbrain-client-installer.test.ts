@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -146,6 +147,8 @@ describe('gbrain install-client', () => {
       const hookScript = join(codexRoot, 'hooks', 'gbrain-project-check.py');
       const hooksJsonPath = join(codexRoot, 'hooks.json');
       expect(existsSync(hookScript)).toBe(true);
+      expect(statSync(hookScript).mode & 0o777).toBe(0o700);
+      expect(statSync(hooksJsonPath).mode & 0o777).toBe(0o600);
       const hooksConfig = JSON.parse(readFileSync(hooksJsonPath, 'utf8')) as {
         description?: string;
         hooks: Record<string, Array<{ matcher?: string; hooks?: Array<{ command?: string; statusMessage?: string }> }>>;
@@ -237,6 +240,42 @@ describe('gbrain install-client', () => {
       const writableResult = runProjectHook(script, hostile);
       expect(JSON.stringify(writableResult)).toContain('不可信');
       expect(JSON.stringify(writableResult)).not.toContain('prj-0123456789abcdef');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('Given CODEX_HOME contains a shell metacharacter When the installed command runs Then the hook path stays one literal argument', async () => {
+    const root = tempRoot();
+    try {
+      const quotedCodexHome = join(root, "codex'quoted");
+      expect(await runInstallClient(['--json'], {
+        env: {
+          HOME: join(root, 'home'),
+          XDG_CONFIG_HOME: join(root, 'xdg'),
+          CODEX_HOME: quotedCodexHome,
+        },
+      })).toBe(0);
+      const config = JSON.parse(readFileSync(join(quotedCodexHome, 'hooks.json'), 'utf8')) as {
+        hooks: { SessionStart: Array<{ hooks: Array<{ command: string; statusMessage: string }> }> };
+      };
+      const handler = config.hooks.SessionStart.flatMap((group) => group.hooks)
+        .find((candidate) => candidate.statusMessage === '检查当前目录的 GBrain 项目 ID');
+      expect(handler).toBeDefined();
+
+      const result = spawnSync('sh', ['-c', handler!.command], {
+        encoding: 'utf8',
+        input: JSON.stringify({
+          session_id: 'session-test',
+          cwd: root,
+          hook_event_name: 'SessionStart',
+          source: 'startup',
+          model: 'test-model',
+        }),
+      });
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe('');
+      expect(result.stdout).toContain('当前目录未找到');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

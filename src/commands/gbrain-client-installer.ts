@@ -166,6 +166,7 @@ function mergeCodexHooksConfig(configPath: string, scriptPath: string): void {
   hooks.SessionStart = withoutManagedHandler;
   config.hooks = hooks;
   writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  chmodSync(configPath, 0o600);
 }
 
 function readHooksConfig(configPath: string): Record<string, unknown> {
