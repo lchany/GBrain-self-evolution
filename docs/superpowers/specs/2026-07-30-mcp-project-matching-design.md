@@ -3,8 +3,13 @@
 ## 状态
 
 - 日期：2026-07-30
-- 状态：已实施并完成本机验证；远端服务待部署
+- 状态：已被 2026-07-31 严格 ID 方案替代
 - 适用范围：客户端项目检测、MCP 项目候选匹配、本地绑定
+
+> 当前规范以
+> `docs/superpowers/specs/2026-07-31-project-identity-ensure-design.md`
+> 为准。`match_project` 现在只接受规范 `project_id` 并读取精确登记页；
+> 无本地 ID 时通过 `ensure_project` 创建，不再读取 Git、名称或别名候选。
 
 ## 结论
 

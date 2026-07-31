@@ -3644,6 +3644,29 @@ Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/mcp/DEPLOY
 
 # Deploy GBrain Remote MCP Server
 
+## Cloud-firewall allowlist deployment
+
+For the allowlisted server deployment, put the listener behind the cloud
+firewall and a TLS termination layer, then start it with:
+
+```bash
+gbrain serve --http --port 3131 --bind 127.0.0.1 \
+  --public-url https://<PUBLIC_GBRAIN_HOST> --allow-anonymous-mcp
+```
+
+`--allow-anonymous-mcp` gives firewall-allowlisted clients anonymous `read`
+and `write` MCP access. It does not expose `admin` operations and does not
+replace Basic Auth for `/admin` or `/admin/review`. Configure
+`GBRAIN_ADMIN_BASIC_USER`, `GBRAIN_ADMIN_BASIC_PASSWORD`, and
+`GBRAIN_ADMIN_ORIGIN` in a root-owned mode-600 environment file. Do not put
+these values in the repository or client installer inputs.
+
+The checked-in systemd/env templates and read-only verification script are in
+[`deploy/`](../../deploy/). `deploy/scripts/install-client-assets.sh` and
+`gbrain install-client` install rules and skills only; client credentials are
+not created or distributed. Client reachability is controlled by the cloud
+firewall allowlist.
+
 > **v0.26.0+:** `gbrain serve --http` ships full OAuth 2.1 (client credentials,
 > auth code + PKCE, refresh rotation, optional DCR), an embedded React admin
 > dashboard at `/admin`, scoped operations, and a live SSE activity feed.

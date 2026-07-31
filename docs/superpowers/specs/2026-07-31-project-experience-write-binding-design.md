@@ -3,6 +3,11 @@
 日期：2026-07-31  
 状态：已批准并实现
 
+补充：项目身份补齐和登记页创建以
+`docs/superpowers/specs/2026-07-31-project-identity-ensure-design.md` 为准。
+客户端不再进行 Git、名称或别名候选匹配；它通过严格 `match_project` 和
+`ensure_project` 取得规范 ID，项目经验的本服务端硬绑定门禁保持不变。
+
 ## 结论
 
 远程 MCP 客户端写入 `record_kind: project-experience` 时，服务端必须在
@@ -46,8 +51,8 @@ project_id: null
 
 ### 方案三：在服务端写入阶段强制硬绑定
 
-远程 `put_page` 在持久化前验证绑定字段、项目 ID 和登记页。客户端仍负责
-匹配与人工确认，服务端负责最终拒绝不合规写入。
+远程 `put_page` 在持久化前验证绑定字段、项目 ID 和登记页。客户端通过
+严格 ID 流程补齐身份，服务端负责创建登记页并最终拒绝不合规写入。
 
 采用此方案。
 
