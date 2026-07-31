@@ -178,19 +178,19 @@ source_project_ids:
 `source_project_ids` 表示证据来源，不等同于 `applicability`。全局经验仍须
 独立声明适用条件和不适用条件。
 
-### 未绑定草稿
+### 未绑定候选
 
-项目上下文尚未确认时，候选经验只能进入 `inbox/`：
+项目上下文尚未确认时，项目经验只能作为客户端内存中的候选保留：
 
 ```yaml
 project_binding: pending
 project_id: null
 ```
 
-审核界面必须显示“项目待绑定”。`project_binding: pending` 的草稿可以被
-退回、拒绝或补充证据，但不能晋升到 `projects/`。
+客户端不得为该候选调用 MCP `put_page`，不得创建本地离线队列。完成匹配、
+人工确认和登记页验证前，它不会进入服务端 `inbox/`。
 
-绑定后，草稿使用：
+绑定后，项目经验草稿使用：
 
 ```yaml
 project_binding: bound
@@ -406,7 +406,7 @@ gbrain project bind <project_id> --confirmed
 - 项目登记页和经验页 frontmatter 校验；
 - 路径 ID 与字段 ID 一致性；
 - 捕获构建器持久化 `project_id`；
-- 未绑定草稿保持 `pending`。
+- 未绑定项目候选保持在客户端内存中，且不会调用 `put_page`。
 
 ### 集成测试
 

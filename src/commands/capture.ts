@@ -124,7 +124,7 @@ Options:
   --evidence REF       Evidence pointer; repeat for multiple refs
   --verification STATE Suggested verification input; draft stays unverified
   --sensitivity LEVEL  public | internal | private (default: internal)
-  --project-id ID      Optional project identifier suggestion
+  --project-id ID      Required with --type project; canonical bound project ID
   --source ID          Multi-source brains: write under a non-default source.
                        Resolution: --source flag > GBRAIN_SOURCE env >
                        .gbrain-source dotfile (walk-up) > local_path >

@@ -32,6 +32,7 @@ const VERIFICATIONS = ['unverified', 'verified'] as const;
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*(?:\/[a-z0-9]+(?:-[a-z0-9]+)*)*$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const NON_LOOPBACK_IPV4_RE = /\b(?!127\.\d{1,3}\.\d{1,3}\.\d{1,3}\b)(?:\d{1,3}\.){3}\d{1,3}\b/;
+const PROJECT_REGISTRY_SLUG_RE = /^projects\/prj-[0-9a-f]{16}\/index$/;
 
 type AllowedPageType = typeof PAGE_TYPES[number];
 export type PutPageValidationResult =
@@ -328,7 +329,7 @@ export function validatePutPageWrite(slug: string, content: string, opts: PutPag
 }
 
 export function requiredProjectRegistrySlug(slug: string, content: string): string | null {
-  if (slug.endsWith('/index')) return null;
+  if (PROJECT_REGISTRY_SLUG_RE.test(slug)) return null;
   const parsed = parseMarkdown(content, `${slug}.md`, { validate: true, expectedSlug: slug });
   const projectId = parsed.frontmatter.project_id;
   return parsed.frontmatter.record_kind === 'project-experience'

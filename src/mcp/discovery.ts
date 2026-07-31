@@ -95,7 +95,10 @@ Every inbox draft also declares:
 
 Project registries live at \`projects/<project_id>/index\` with
 \`record_kind: project-registry\`. Project experiences use
-\`record_kind: project-experience\` and live below the same project ID.
+\`type: project\` and \`record_kind: project-experience\`.
+Project experience drafts must be bound before \`put_page\`; pending project
+experience drafts are rejected. The canonical registry must exist in the
+current write source and carry the same project ID.
 Cross-project promotion keeps \`source_project_ids\`.
 
 Use \`source_refs\` for evidence pointers. New analysis remains unverified until tested.

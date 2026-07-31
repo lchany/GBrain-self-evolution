@@ -17,7 +17,7 @@ export const GBRAIN_CLIENT_RULES = `${GBRAIN_RULES_BLOCK_START}
 - 不为 GBrain 采集或审核添加生命周期钩子，不安装本地 GBrain CLI，不创建本地离线队列，也不索取客户端凭据作为降级方案。
 - 客户端网络访问由云防火墙白名单控制；安装器不创建或分发凭据。
 - 进入项目目录或开始项目任务时，只读检查祖先目录中的 \`.gbrain-project.yaml\`，并运行 \`gbrain project current --json\`。已绑定时通过 GBrain MCP \`get_page\` 验证 \`projects/<project_id>/index\`；未绑定时运行 \`gbrain project match --json\` 取得脱敏参数，再调用已连接 MCP 的 \`match_project\`。即使只有一个候选也必须由用户确认；确认后运行 \`gbrain project bind <project_id> --confirmed --json\`。
-- 写入项目经验前必须完成硬绑定：\`project_id\` 使用 \`prj-\` 加 16 位小写十六进制，草稿同时写入 \`project_binding: bound\`。无唯一匹配时保持 \`project_binding: pending\`，不得猜测或静默创建项目 ID。
+- 写入项目经验前必须完成硬绑定：\`project_id\` 使用 \`prj-\` 加 16 位小写十六进制，草稿同时写入 \`project_binding: bound\`。无唯一匹配时只能在客户端内存中保留 \`project_binding: pending\` 的候选，不得猜测或静默创建项目 ID，也不得调用 MCP \`put_page\`。
 
 建议技能：\`gbrain-capture\`、\`gbrain-review\`。
 ${GBRAIN_RULES_BLOCK_END}
@@ -93,8 +93,9 @@ MCP \`get_page\` 验证 \`projects/<project_id>/index\`。未绑定时运行
 \`project_name\`，再使用这些参数调用已连接 MCP 的 \`match_project\`。
 完整展示候选 ID、名称和匹配依据；即使只有一个候选也要人工确认。确认后运行
 \`gbrain project bind <project_id> --confirmed --json\`，再重新读取当前绑定。
-无法确认时写
-\`project_binding: pending\` 和 \`project_id: null\`，不得猜测。
+无法确认时，只在客户端内存中保留
+\`project_binding: pending\` 和 \`project_id: null\` 的候选，不得调用 \`put_page\`，
+不得创建本地离线队列，也不得猜测项目 ID。
 
 ## 四、固定经验模板
 
@@ -114,8 +115,8 @@ non_applicable:
 source_refs:
   - <脱敏后的证据指针>
 migrated_from: null
-project_binding: <pending|bound>
-project_id: <null|prj-0123456789abcdef>
+project_binding: <非项目草稿填 pending；项目经验填 bound>
+project_id: <非项目草稿填 null；项目经验填 prj-0123456789abcdef>
 ---
 
 # <中文经验标题>
@@ -183,6 +184,16 @@ project_id: <null|prj-0123456789abcdef>
 
 - 已移除或替换的信息类别：
 \`\`\`
+
+项目经验必须把模板中的项目字段具体填写为：
+
+\`\`\`yaml
+project_binding: bound
+project_id: prj-0123456789abcdef
+\`\`\`
+
+服务端还会校验当前 source 中的
+\`projects/<project_id>/index\`。任一条件不满足时停止写入。
 
 \`applicability\`、\`non_applicable\`、“适用条件”“不适用条件”和“召回提示”
 都是必填项。缺少任何一项时不得写入。

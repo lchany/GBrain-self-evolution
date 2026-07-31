@@ -84,8 +84,13 @@ async function putPageError(slug: string, content: string): Promise<Record<strin
   return payload;
 }
 
-async function putPageWithEngine(engine: BrainEngine, slug: string, content: string): Promise<Record<string, unknown>> {
-  const result = await dispatchToolCall(engine, 'put_page', { slug, content, dry_run: true }, { remote: true, sourceId: 'default' });
+async function putPageWithEngine(
+  engine: BrainEngine,
+  slug: string,
+  content: string,
+  sourceId = 'default',
+): Promise<Record<string, unknown>> {
+  const result = await dispatchToolCall(engine, 'put_page', { slug, content, dry_run: true }, { remote: true, sourceId });
   return JSON.parse(result.content[0]?.text ?? '{}') as Record<string, unknown>;
 }
 
@@ -291,6 +296,54 @@ describe('put_page validation gate', () => {
       action: 'put_page',
       slug: 'inbox/bound-project-with-registry',
     });
+  });
+
+  test('looks up the project registry only in the current write source', async () => {
+    const content = projectContent([
+      'record_kind: project-experience',
+      'project_binding: bound',
+      'project_id: prj-0123456789abcdef',
+    ], 'draft', 'unverified');
+    const lookups: Array<{ slug: string; sourceId: string | undefined }> = [];
+    const engine = {
+      getPage: async (slug: string, opts?: { sourceId?: string }) => {
+        lookups.push({ slug, sourceId: opts?.sourceId });
+        return {
+          slug,
+          frontmatter: {
+            record_kind: 'project-registry',
+            project_id: 'prj-0123456789abcdef',
+          },
+        };
+      },
+    } as unknown as BrainEngine;
+    const payload = await putPageWithEngine(
+      engine,
+      'inbox/bound-project-in-current-source',
+      content,
+      'customer-source',
+    );
+    expect(payload).toMatchObject({ dry_run: true, slug: 'inbox/bound-project-in-current-source' });
+    expect(lookups).toEqual([{
+      slug: 'projects/prj-0123456789abcdef/index',
+      sourceId: 'customer-source',
+    }]);
+  });
+
+  test('does not mistake a nested project experience index for the canonical registry', async () => {
+    const content = projectContent([
+      'record_kind: project-experience',
+      'project_binding: bound',
+      'project_id: prj-0123456789abcdef',
+    ]);
+    const engine = { getPage: async () => null } as unknown as BrainEngine;
+    const payload = await putPageWithEngine(
+      engine,
+      'projects/prj-0123456789abcdef/nested/index',
+      content,
+    );
+    expect(payload.error).toBe('invalid_params');
+    expect(String(payload.message)).toContain('project_registry_not_found');
   });
 
   test('rejects a bound project experience when its canonical registry is missing', async () => {

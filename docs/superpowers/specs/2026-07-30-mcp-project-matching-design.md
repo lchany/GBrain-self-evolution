@@ -155,8 +155,9 @@ gbrain project bind <project_id> --confirmed [--json]
 ### `gbrain project init`
 
 保持为可信本地管理员流程，不进入客户端自动匹配路径。普通客户端无候选时
-维持 `project_binding: pending`，由管理员流程创建项目登记页；客户端不得
-索取 writer 凭据或静默创建 ID。
+只能在客户端内存中维持 `project_binding: pending` 的项目候选，由管理员
+流程创建项目登记页；客户端不得调用 `put_page`，不得创建本地离线队列，
+也不得索取 writer 凭据或静默创建 ID。
 
 ## MCP `match_project` 契约
 
@@ -228,7 +229,8 @@ Source 中的候选，不能通过项目名称或仓库引用枚举其他 Source
 6. 即使只有一个候选也等待用户确认；
 7. 用户确认后运行 `gbrain project bind <id> --confirmed --json`；
 8. 无候选、多候选未选择或登记页失效时保持
-   `project_binding: pending`，不得猜测。
+   客户端内存候选为 `project_binding: pending`，不得调用 `put_page`，
+   不得猜测。
 
 面向用户的提示和错误说明使用中文。命令、错误码和 MCP 字段保留英文。
 

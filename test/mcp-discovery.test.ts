@@ -61,6 +61,7 @@ describe('MCP discovery catalog', () => {
     const text = content !== undefined && 'text' in content ? content.text : '';
     expect(text).toContain('project_binding');
     expect(text).toContain('projects/<project_id>/index');
+    expect(text).toContain('Project experience drafts must be bound before `put_page`');
     expect(text).toContain('source_project_ids');
   });
 });
