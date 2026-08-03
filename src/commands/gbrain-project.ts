@@ -6,6 +6,7 @@ import {
   assertProjectId,
   generateProjectId,
   normalizeRepositoryRef,
+  readProjectReference,
   readProjectMarker,
   writeProjectMarker,
 } from '../core/project-context.ts';
@@ -104,6 +105,19 @@ async function matchProject(deps: ProjectCommandDeps): Promise<Record<string, un
       tool: 'match_project',
       project_id: projectId,
       arguments: { project_id: projectId },
+    };
+  }
+  const reference = readProjectReference(deps.cwd);
+  if (reference !== null) {
+    return {
+      ok: true,
+      status: 'mcp_required',
+      code: 'project_match_via_mcp',
+      tool: 'match_project',
+      project_id: reference.project_id,
+      arguments: { project_id: reference.project_id },
+      identity_source: 'repository_record',
+      reference_path: reference.reference_path,
     };
   }
   return {

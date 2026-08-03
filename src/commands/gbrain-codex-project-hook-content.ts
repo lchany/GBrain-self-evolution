@@ -9,6 +9,7 @@ import stat
 import sys
 
 MARKER_NAME = ".gbrain-project.yaml"
+REFERENCE_NAME = os.path.join(".gbrain", "project.yaml")
 PROJECT_ID_RE = re.compile(r"^prj-[0-9a-f]{16}$")
 MAX_MARKER_BYTES = 4096
 
@@ -37,6 +38,16 @@ def marker_is_trusted(metadata):
     return (metadata.st_mode & stat.S_IWOTH) == 0
 
 
+def directory_is_trusted(metadata):
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        return False
+    if hasattr(os, "getuid"):
+        current_uid = os.getuid()
+        if metadata.st_uid not in (current_uid, 0):
+            return False
+    return (metadata.st_mode & stat.S_IWOTH) == 0
+
+
 def parse_project_id(content):
     lines = [line.strip() for line in content.splitlines() if line.strip()]
     if len(lines) != 2 or lines[0] != "schema_version: 1":
@@ -45,6 +56,41 @@ def parse_project_id(content):
     if match is None or PROJECT_ID_RE.fullmatch(match.group(1)) is None:
         return None
     return match.group(1)
+
+
+def read_reference_project_id(cwd):
+    reference_path = os.path.join(cwd, REFERENCE_NAME)
+    try:
+        parent_metadata = os.lstat(os.path.dirname(reference_path))
+        metadata = os.lstat(reference_path)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    if not directory_is_trusted(parent_metadata):
+        return None
+    if not marker_is_trusted(metadata) or metadata.st_size > MAX_MARKER_BYTES:
+        return None
+
+    descriptor = None
+    try:
+        open_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(reference_path, open_flags)
+        opened_metadata = os.fstat(descriptor)
+        if (
+            not marker_is_trusted(opened_metadata)
+            or opened_metadata.st_dev != metadata.st_dev
+            or opened_metadata.st_ino != metadata.st_ino
+        ):
+            return None
+        with os.fdopen(descriptor, "r", encoding="utf-8") as reference_file:
+            descriptor = None
+            return parse_project_id(reference_file.read(MAX_MARKER_BYTES + 1))
+    except (OSError, UnicodeError):
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def main():
@@ -63,6 +109,15 @@ def main():
     try:
         metadata = os.lstat(marker_path)
     except FileNotFoundError:
+        reference_project_id = read_reference_project_id(cwd)
+        if reference_project_id is not None:
+            emit(
+                "GBrain 项目 ID 启动检查：当前目录存在仓库项目身份记录 "
+                + reference_project_id
+                + "；项目写入前需通过 MCP 精确校验并绑定本地标记。",
+                False,
+            )
+            return
         emit(
             "GBrain 项目 ID 启动检查：当前目录未找到 .gbrain-project.yaml；"
             "未向父目录或其他目录查找。",

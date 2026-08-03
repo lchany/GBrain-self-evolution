@@ -30,8 +30,8 @@ deploy/scripts/install-client-assets.sh --home "$HOME" --apply
 ```
 
 这两个入口安装规则、`gbrain-capture`、`gbrain-review` skills，以及只读的
-Codex 当前目录项目 ID 启动 Hook。Hook 只检查会话 `cwd` 直接目录中的
-`.gbrain-project.yaml`，不向父目录查找、不调用 MCP、不创建项目 ID。安装器
+Codex 当前目录项目 ID 启动 Hook。Hook 检查会话 `cwd` 直接目录中的
+`.gbrain-project.yaml` 或 `.gbrain/project.yaml`，不调用 MCP、不创建项目 ID。安装器
 不读写 credential env，也不执行写入探针。客户端能否连接由云服务器防火墙
 白名单和网络路由决定。
 

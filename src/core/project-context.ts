@@ -5,11 +5,18 @@ import { isTrustedDotfile } from './path-confine.ts';
 
 export const PROJECT_ID_RE = /^prj-[0-9a-f]{16}$/;
 export const PROJECT_MARKER = '.gbrain-project.yaml';
+export const PROJECT_REFERENCE = '.gbrain/project.yaml';
 
 export interface ProjectMarker {
   readonly schema_version: 1;
   readonly project_id: string;
   readonly marker_path: string;
+}
+
+export interface ProjectReference {
+  readonly schema_version: 1;
+  readonly project_id: string;
+  readonly reference_path: string;
 }
 
 export function assertProjectId(value: string): string {
@@ -36,6 +43,10 @@ export function buildProjectMarker(projectId: string): string {
   return `schema_version: 1\nproject_id: ${assertProjectId(projectId)}\n`;
 }
 
+export function buildProjectReference(projectId: string): string {
+  return buildProjectMarker(projectId);
+}
+
 export function readProjectMarker(startDir: string = process.cwd()): ProjectMarker | null {
   let dir = resolve(startDir);
   for (let depth = 0; depth < 50; depth++) {
@@ -48,6 +59,27 @@ export function readProjectMarker(startDir: string = process.cwd()): ProjectMark
     } catch (error) {
       if (!isMissingFileError(error)) return null;
       // Missing marker: continue walking toward the project root.
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+export function readProjectReference(startDir: string = process.cwd()): ProjectReference | null {
+  let dir = resolve(startDir);
+  for (let depth = 0; depth < 50; depth++) {
+    const referencePath = join(dir, PROJECT_REFERENCE);
+    try {
+      const parentStat = lstatSync(dirname(referencePath));
+      const stat = lstatSync(referencePath);
+      if (!parentStat.isDirectory() || !isTrustedDotfile(parentStat) || !isTrustedDotfile(stat)) return null;
+      const reference = parseProjectMarker(readFileSync(referencePath, 'utf8'));
+      return reference === null ? null : { ...reference, reference_path: referencePath };
+    } catch (error) {
+      if (!isMissingFileError(error)) return null;
+      // Missing reference: continue walking toward the project root.
     }
     const parent = dirname(dir);
     if (parent === dir) break;

@@ -52,6 +52,13 @@ prj-0123456789abcdef
 - 同名项目不会因为名称相同而自动合并；
 - 服务端不会执行仓库、名称、别名或语义模糊匹配。
 
+为支持新客户端或新 checkout 复用同一身份，仓库可以提交显式指针
+`.gbrain/project.yaml`，内容只包含 `schema_version: 1` 和规范
+`project_id`。它是客户端恢复身份的来源，不是基于 Git remote、路径或名称的
+推断。客户端仍把 `.gbrain-project.yaml` 作为本地 0600 绑定缓存；读取仓库指针
+后必须先通过 MCP `match_project` 精确校验，再写入本地缓存。仓库指针不保存
+密码、Token 或私钥。
+
 Git 的唯一作用是帮助客户端确定把 `.gbrain-project.yaml` 写在哪个本地项目
 根目录。Git 信息不会发送给严格项目身份 MCP 操作。
 

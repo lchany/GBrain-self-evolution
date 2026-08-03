@@ -44,11 +44,11 @@ bun src/cli.ts install-client --json
 它不会读取或生成 `local-read.env`、`local-writer.env`、Bearer token 或
 client secret。
 
-Codex Hook 在 `startup|resume` 时运行，只检查 Hook 输入 `cwd` 直接目录中的
-`.gbrain-project.yaml`。它不会检查父目录、其他目录或 Git，不调用 MCP，也
-不会自动创建项目 ID。标记缺失、不可信或格式错误时只显示中文警告并继续
-会话。在子目录启动 Codex 时，即使父目录存在标记，也会按“当前目录未绑定”
-处理。
+Codex Hook 在 `startup|resume` 时运行，检查 Hook 输入 `cwd` 直接目录中的
+`.gbrain-project.yaml`，以及当前目录显式提交的 `.gbrain/project.yaml`。它不
+调用 MCP，也不会自动创建项目 ID。存在仓库身份指针但没有本地标记时，提示
+项目写入前先通过 MCP 精确校验并绑定；两者都缺失、不可信或格式错误时只显示
+中文警告并继续会话。
 
 Codex 会对新增或变化的非托管 Hook 执行一次性信任检查。首次安装或更新后，
 在 Codex 中运行 `/hooks`，确认来源和命令后信任该 Hook。此后每次启动或恢复
@@ -68,6 +68,13 @@ Codex 会对新增或变化的非托管 Hook 执行一次性信任检查。首�
    写入；拒绝、要求修改或含义不明的回复不会触发写入。
 6. 所有草稿只写入 `inbox/`。写入后的正文锁定，后续人工审核只修改分类；
    正文有问题时退回并重新生成，不能在分类审核时静默修改。
+
+新客户端或新 checkout 的项目身份恢复流程为：先运行
+`gbrain project current --json`；未绑定时运行 `gbrain project match --json`。
+如果返回仓库 `.gbrain/project.yaml` 中的 `project_id`，客户端调用 MCP
+`match_project` 精确验证，成功后执行
+`gbrain project bind <project_id> --resolved --json`。只有本地和仓库都没有
+明确 ID 时，才调用 `ensure_project` 生成新项目身份。
 
 固定模板位于安装后的 `gbrain-capture/SKILL.md`。其中适用条件、不适用
 条件和召回提示都是必填项，用来避免后续仅凭相似错误文本误用经验。
