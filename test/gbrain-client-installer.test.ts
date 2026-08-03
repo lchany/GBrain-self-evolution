@@ -203,6 +203,27 @@ describe('gbrain install-client', () => {
     }
   });
 
+  test('Given a repository project reference at cwd When the Codex hook runs Then it reports the recorded ID without warning', async () => {
+    const root = tempRoot();
+    try {
+      expect(await runInstallClient(['--json'], deps(root))).toBe(0);
+      const script = join(root, 'codex', 'hooks', 'gbrain-project-check.py');
+      mkdirSync(join(root, '.gbrain'), { recursive: true });
+      writeFileSync(
+        join(root, '.gbrain', 'project.yaml'),
+        'schema_version: 1\nproject_id: prj-0123456789abcdef\n',
+      );
+
+      const result = runProjectHook(script, root);
+      expect(JSON.stringify(result)).toContain('prj-0123456789abcdef');
+      expect(JSON.stringify(result)).toContain('仓库项目身份记录');
+      expect(result.systemMessage).toBeUndefined();
+      expect(result.continue).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('Given invalid or untrusted markers When the Codex hook runs Then it warns without blocking or executing cwd text', async () => {
     const root = tempRoot();
     try {

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import matter from 'gray-matter';
@@ -130,6 +130,28 @@ describe('gbrain project command', () => {
     });
     expect(output.join('')).not.toContain('github.com');
     expect(output.join('')).not.toContain('project_name');
+  });
+
+  test('unbound match hands off the tracked project ID for exact MCP verification', async () => {
+    mkdirSync(join(root, '.gbrain'), { recursive: true });
+    writeFileSync(
+      join(root, '.gbrain', 'project.yaml'),
+      'schema_version: 1\nproject_id: prj-0123456789abcdef\n',
+    );
+    const output: string[] = [];
+    const code = await runGbrainProject(['match', '--json'], {
+      cwd: root,
+      stdout: (text) => output.push(text),
+    });
+    expect(code).toBe(0);
+    expect(JSON.parse(output.join(''))).toMatchObject({
+      status: 'mcp_required',
+      code: 'project_match_via_mcp',
+      tool: 'match_project',
+      project_id: 'prj-0123456789abcdef',
+      arguments: { project_id: 'prj-0123456789abcdef' },
+      identity_source: 'repository_record',
+    });
   });
 
   test('bound match hands off only the exact local project ID', async () => {
