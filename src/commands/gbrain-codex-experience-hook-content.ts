@@ -21,13 +21,13 @@ import stat
 import sys
 import tempfile
 import time
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 1
 MAX_BLOCKS = 2
 RETENTION_SECONDS = 7 * 24 * 60 * 60
+REVIEW_TIMEOUT_SECONDS = 5 * 60
 VALID_OUTCOMES = {"defer", "no_candidate", "previewed", "captured", "rejected"}
 NONTRIVIAL_RE = re.compile(
     r"(修改|实现|开发|修复|部署|迁移|诊断|排查|安全|隐私|项目规则|总结|复盘|"
@@ -186,66 +186,19 @@ def _pending_path(root: Path, session_key: str) -> Path:
     return root / "pending" / f"{session_key}.json"
 
 
-def _mode_path(root: Path) -> Path:
-    return root / "mode.json"
-
-
-def _parse_rfc3339(value: str) -> datetime:
-    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
-    parsed = datetime.fromisoformat(normalized)
-    if parsed.tzinfo is None:
-        raise ValueError("--until must include a timezone")
-    return parsed.astimezone(timezone.utc)
-
-
-def _parse_duration(value: str) -> timedelta:
-    match = re.fullmatch(r"([1-9][0-9]*)(m|h|d)", value)
-    if not match:
-        raise ValueError("--for must use a positive duration such as 30m, 12h, or 2d")
-    count = int(match.group(1))
-    unit = match.group(2)
-    return {"m": timedelta(minutes=count), "h": timedelta(hours=count), "d": timedelta(days=count)}[unit]
-
-
-def _persistent_mode(root: Path) -> tuple[str, str | None]:
-    record = _read_json(_mode_path(root))
-    if not record or record.get("mode") != "unattended" or not isinstance(record.get("expires_at"), str):
-        return "enforce", None
-    try:
-        expiry = _parse_rfc3339(record["expires_at"])
-    except (TypeError, ValueError):
-        return "enforce", None
-    if expiry <= datetime.now(timezone.utc):
-        return "enforce", None
-    return "unattended", expiry.isoformat().replace("+00:00", "Z")
-
-
-def _effective_mode(root: Path) -> tuple[str, str, str | None, str | None]:
-    override = os.environ.get("GBRAIN_EXPERIENCE_HOOK_MODE")
-    if override is not None:
-        if override in {"enforce", "unattended"}:
-            return override, "environment", None, None
-        return "enforce", "invalid_environment_fallback", None, "invalid GBRAIN_EXPERIENCE_HOOK_MODE; using enforce"
-    mode, expiry = _persistent_mode(root)
-    return mode, "timed" if mode == "unattended" else "default", expiry, None
-
-
 def _new_turn_state(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
-    mode, source, expiry, warning = _effective_mode(root)
     pending = bool(_read_json(_pending_path(root, _session_key(payload))))
     return {
         "schema_version": SCHEMA_VERSION,
         "created_at": int(time.time()),
         "updated_at": int(time.time()),
-        "mode": mode,
-        "mode_source": source,
-        "mode_expires_at": expiry,
-        "mode_warning": bool(warning),
+        "session_key": _session_key(payload),
         "intent_nontrivial": False,
         "prior_pending": pending,
         "block_count": 0,
         "nonce_hash": None,
         "receipt": None,
+        "review": None,
     }
 
 
@@ -365,16 +318,116 @@ def _remove_turn(root: Path, key: str) -> None:
             pass
 
 
-def _set_pending(root: Path, payload: dict[str, Any], pending: bool) -> None:
-    path = _pending_path(root, _session_key(payload))
-    if pending:
-        _atomic_write(path, {"schema_version": SCHEMA_VERSION, "created_at": int(time.time()), "pending": True})
-    else:
-        try:
-            _secure_dir(path.parent)
-            path.unlink()
-        except FileNotFoundError:
-            pass
+def _interrupt_path(root: Path, session_key: str) -> Path:
+    return root / "interrupts" / f"{session_key}.json"
+
+
+def _unlink_state_file(path: Path) -> None:
+    try:
+        _secure_dir(path.parent)
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _clear_pending(root: Path, session_key: str) -> None:
+    _unlink_state_file(_pending_path(root, session_key))
+    _unlink_state_file(_interrupt_path(root, session_key))
+
+
+def _review_timeout_seconds() -> int:
+    if os.environ.get("GBRAIN_EXPERIENCE_HOOK_TESTING") != "1":
+        return REVIEW_TIMEOUT_SECONDS
+    raw = os.environ.get("GBRAIN_EXPERIENCE_HOOK_TEST_REVIEW_SECONDS", "")
+    if not re.fullmatch(r"[1-9]|[12][0-9]|30", raw):
+        return REVIEW_TIMEOUT_SECONDS
+    return int(raw)
+
+
+def _set_deferred(root: Path, state: dict[str, Any]) -> None:
+    session_key = str(state.get("session_key") or "")
+    if not re.fullmatch(r"[a-f0-9]{64}", session_key):
+        raise RuntimeError("turn state lacks a valid session key")
+    _clear_pending(root, session_key)
+    _atomic_write(_pending_path(root, session_key), {
+        "schema_version": SCHEMA_VERSION,
+        "created_at": time.time(),
+        "kind": "defer",
+    })
+
+
+def _start_review(root: Path, key: str, state: dict[str, Any], slug: str) -> str:
+    session_key = str(state.get("session_key") or "")
+    if not re.fullmatch(r"[a-f0-9]{64}", session_key):
+        raise RuntimeError("turn state lacks a valid session key")
+    token = secrets.token_urlsafe(24)
+    now = time.time()
+    review = {
+        "token_hash": _hash(token),
+        "slug": slug,
+        "created_at": now,
+        "deadline_at": now + _review_timeout_seconds(),
+        "status": "waiting",
+    }
+    state["review"] = review
+    _save_turn(root, key, state)
+    _clear_pending(root, session_key)
+    _atomic_write(_pending_path(root, session_key), {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "review",
+        "turn_key": key,
+        "token_hash": review["token_hash"],
+        "slug": slug,
+        "created_at": now,
+        "deadline_at": review["deadline_at"],
+        "status": "waiting",
+    })
+    return token
+
+
+def _review_interrupted(root: Path, state: dict[str, Any], review: dict[str, Any]) -> bool:
+    session_key = str(state.get("session_key") or "")
+    interrupted = _read_json(_interrupt_path(root, session_key))
+    interrupted_at = interrupted.get("created_at") if interrupted else None
+    deadline = review.get("deadline_at")
+    return isinstance(interrupted_at, (int, float)) and isinstance(deadline, (int, float)) and interrupted_at < deadline
+
+
+def _save_review_status(root: Path, key: str, state: dict[str, Any], status_value: str) -> None:
+    review = state.get("review")
+    if not isinstance(review, dict):
+        raise RuntimeError("turn state lacks review metadata")
+    review["status"] = status_value
+    state["review"] = review
+    _save_turn(root, key, state)
+    session_key = str(state.get("session_key") or "")
+    pending = _read_json(_pending_path(root, session_key))
+    if pending and pending.get("kind") == "review":
+        pending["status"] = status_value
+        _atomic_write(_pending_path(root, session_key), pending)
+
+
+def _review_block(token: str, slug: str) -> None:
+    wait_command = f"python3 {shlex.quote(str(Path(__file__).resolve()))} wait --token {token}"
+    reason = (
+        "完整经验正文已展示，现进入 5 分钟静默审核期。请立即执行并等待："
+        f"{wait_command}。返回 approved 时，使用 MCP 将刚才锁定的完整正文写入 "
+        f"{slug}，随后 get_page 验证，再用同一 token 记录 captured 回执；"
+        "返回 interrupted 时不得自动写入，按用户消息处理。Hook 本身不会调用 MCP。"
+    )
+    _json_out({"decision": "block", "reason": reason})
+
+
+def _capture_block(token: str, slug: str) -> None:
+    receipt_command = f"python3 {shlex.quote(str(Path(__file__).resolve()))} receipt"
+    _json_out({
+        "decision": "block",
+        "reason": (
+            "5 分钟静默期已结束且没有用户消息，现已默认同意。请将刚才锁定的完整正文写入 "
+            f"{slug}，调用 get_page 验证后执行：{receipt_command} --token {token} "
+            f"--outcome captured --slug {slug}。仅授权写入 inbox 草稿，不授权晋升。"
+        ),
+    })
 
 
 def _block(root: Path, key: str, state: dict[str, Any], invalid_reason: str | None = None) -> None:
@@ -406,10 +459,23 @@ def _handle_hook(root: Path, payload: dict[str, Any]) -> None:
         prompt = payload.get("prompt") if isinstance(payload.get("prompt"), str) else ""
         state["intent_nontrivial"] = bool(NONTRIVIAL_RE.search(prompt))
         _save_turn(root, key, state)
-        if state.get("mode_warning"):
-            _json_out({"systemMessage": "GBRAIN_EXPERIENCE_HOOK_MODE 无效，当前回合已回退到 enforce。"})
-        else:
-            _json_out({})
+        pending = _read_json(_pending_path(root, _session_key(payload)))
+        if pending and pending.get("kind") == "review":
+            deadline = pending.get("deadline_at")
+            now = time.time()
+            if isinstance(deadline, (int, float)) and now < deadline:
+                _atomic_write(_interrupt_path(root, _session_key(payload)), {
+                    "schema_version": SCHEMA_VERSION,
+                    "created_at": now,
+                })
+                _json_out({"systemMessage": "检测到用户消息，经验草稿的 5 分钟自动同意已取消；请按该消息处理。"})
+                return
+            if isinstance(deadline, (int, float)):
+                pending["status"] = "approved"
+                _atomic_write(_pending_path(root, _session_key(payload)), pending)
+                _json_out({"systemMessage": "经验草稿的 5 分钟静默期已经结束，应先按默认同意完成 inbox 写入与验证。"})
+                return
+        _json_out({})
         return
     if event_name == "PostToolUse":
         tool_id = _safe_identifier(payload.get("tool_use_id"), secrets.token_hex(12))
@@ -423,12 +489,6 @@ def _handle_hook(root: Path, payload: dict[str, Any]) -> None:
     if event_name != "Stop":
         _json_out({})
         return
-    if state.get("mode") == "unattended":
-        state["receipt"] = {"outcome": "skipped_unattended", "created_at": int(time.time())}
-        _save_turn(root, key, state)
-        _remove_turn(root, key)
-        _json_out({})
-        return
     events = _events(root, key)
     if not _requires_closeout(state, events):
         _remove_turn(root, key)
@@ -439,7 +499,37 @@ def _handle_hook(root: Path, payload: dict[str, Any]) -> None:
         valid, reason = _receipt_valid(receipt, events, payload.get("last_assistant_message"))
         if valid:
             outcome = receipt.get("outcome")
-            _set_pending(root, payload, outcome in {"defer", "previewed"})
+            session_key = str(state.get("session_key") or _session_key(payload))
+            if outcome == "previewed":
+                slug = receipt.get("slug")
+                if not isinstance(slug, str):
+                    _block(root, key, state, "previewed receipt lacks an inbox slug")
+                    return
+                review = state.get("review")
+                if not isinstance(review, dict):
+                    token = _start_review(root, key, state, slug)
+                    _review_block(token, slug)
+                    return
+                token_hash = str(review.get("token_hash") or "")
+                if _review_interrupted(root, state, review) or review.get("status") == "interrupted":
+                    _clear_pending(root, session_key)
+                    _remove_turn(root, key)
+                    _json_out({})
+                    return
+                deadline = review.get("deadline_at")
+                if review.get("status") == "approved" or (isinstance(deadline, (int, float)) and time.time() >= deadline):
+                    _save_review_status(root, key, state, "approved")
+                    _capture_block("<review-token>", slug)
+                    return
+                _json_out({
+                    "decision": "block",
+                    "reason": "经验草稿仍在 5 分钟静默审核期；请继续等待此前 wait 命令完成。",
+                })
+                return
+            if outcome == "defer":
+                _set_deferred(root, state)
+            else:
+                _clear_pending(root, session_key)
             _remove_turn(root, key)
             _json_out({})
             return
@@ -459,8 +549,11 @@ def _find_turn_for_token(root: Path, token: str) -> tuple[Path, dict[str, Any]] 
             state = _read_json(path)
         except (OSError, ValueError, RuntimeError):
             continue
-        if state and secrets.compare_digest(str(state.get("nonce_hash") or ""), digest):
-            return path, state
+        if state:
+            review = state.get("review") if isinstance(state.get("review"), dict) else {}
+            hashes = [str(state.get("nonce_hash") or ""), str(review.get("token_hash") or "")]
+            if any(secrets.compare_digest(candidate, digest) for candidate in hashes):
+                return path, state
     return None
 
 
@@ -481,38 +574,68 @@ def _receipt_command(root: Path, args: argparse.Namespace) -> int:
         return 1
     state["receipt"] = {"outcome": args.outcome, "slug": args.slug, "created_at": int(time.time())}
     state["nonce_hash"] = None
+    if args.outcome == "previewed" and isinstance(state.get("review"), dict):
+        session_key = str(state.get("session_key") or "")
+        _clear_pending(root, session_key)
+        state["review"] = None
     _atomic_write(path, state)
     _json_out({"ok": True, "outcome": args.outcome, "slug": args.slug})
     return 0
 
 
-def _mode_command(root: Path, args: argparse.Namespace) -> int:
-    if args.mode == "enforce":
-        if args.duration or args.until:
-            raise ValueError("enforce does not accept --for or --until")
+def _find_pending_for_token(root: Path, token: str) -> tuple[Path, dict[str, Any]] | None:
+    directory = root / "pending"
+    _secure_dir(directory)
+    digest = _hash(token)
+    for path in directory.glob("*.json"):
         try:
-            _mode_path(root).unlink()
-        except FileNotFoundError:
-            pass
-        _json_out({"ok": True, "mode": "enforce", "expires_at": None})
-        return 0
-    if bool(args.duration) == bool(args.until):
-        raise ValueError("unattended requires exactly one of --for or --until")
-    expiry = datetime.now(timezone.utc) + _parse_duration(args.duration) if args.duration else _parse_rfc3339(args.until)
-    if expiry <= datetime.now(timezone.utc):
-        raise ValueError("unattended expiry must be in the future")
-    expires_at = expiry.isoformat().replace("+00:00", "Z")
-    _atomic_write(_mode_path(root), {
-        "schema_version": SCHEMA_VERSION, "mode": "unattended", "expires_at": expires_at, "created_at": int(time.time()),
-    })
-    _json_out({"ok": True, "mode": "unattended", "expires_at": expires_at})
-    return 0
+            pending = _read_json(path)
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if pending and secrets.compare_digest(str(pending.get("token_hash") or ""), digest):
+            return path, pending
+    return None
 
 
-def _status_command(root: Path) -> int:
-    mode, source, expiry, warning = _effective_mode(root)
-    _json_out({"ok": True, "effective_mode": mode, "source": source, "expires_at": expiry, "warning": warning})
-    return 0
+def _wait_command(root: Path, args: argparse.Namespace) -> int:
+    found = _find_pending_for_token(root, args.token)
+    if not found:
+        _json_out({"ok": False, "error": "invalid_or_expired_token"})
+        return 1
+    pending_path, pending = found
+    while True:
+        current = _read_json(pending_path)
+        if not current:
+            _json_out({"ok": False, "error": "review_no_longer_pending"})
+            return 1
+        deadline = current.get("deadline_at")
+        turn_key = current.get("turn_key")
+        if not isinstance(deadline, (int, float)) or not isinstance(turn_key, str):
+            raise RuntimeError("pending review metadata is invalid")
+        turn_path = _turn_path(root, turn_key)
+        turn_state = _read_json(turn_path)
+        if not turn_state:
+            _json_out({"ok": False, "error": "review_turn_missing"})
+            return 1
+        review = turn_state.get("review")
+        if not isinstance(review, dict):
+            _json_out({"ok": False, "error": "review_state_missing"})
+            return 1
+        if _review_interrupted(root, turn_state, review):
+            _save_review_status(root, turn_key, turn_state, "interrupted")
+            _json_out({"ok": True, "status": "interrupted", "slug": current.get("slug")})
+            return 0
+        now = time.time()
+        if now >= deadline:
+            _save_review_status(root, turn_key, turn_state, "approved")
+            _json_out({
+                "ok": True,
+                "status": "approved",
+                "slug": current.get("slug"),
+                "next": "write_locked_preview_to_inbox_then_get_page_and_record_captured",
+            })
+            return 0
+        time.sleep(min(0.25, max(0.01, deadline - now)))
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -522,12 +645,8 @@ def _parser() -> argparse.ArgumentParser:
     receipt.add_argument("--token", required=True)
     receipt.add_argument("--outcome", required=True, choices=sorted(VALID_OUTCOMES))
     receipt.add_argument("--slug")
-    mode = subparsers.add_parser("mode")
-    mode.add_argument("mode", choices=["enforce", "unattended"])
-    mode.add_argument("--for", dest="duration")
-    mode.add_argument("--until")
-    status_parser = subparsers.add_parser("status")
-    status_parser.add_argument("--json", action="store_true")
+    wait = subparsers.add_parser("wait")
+    wait.add_argument("--token", required=True)
     return parser
 
 
@@ -539,10 +658,8 @@ def main() -> int:
             args = _parser().parse_args()
             if args.command == "receipt":
                 return _receipt_command(root, args)
-            if args.command == "mode":
-                return _mode_command(root, args)
-            if args.command == "status":
-                return _status_command(root)
+            if args.command == "wait":
+                return _wait_command(root, args)
             raise ValueError("missing command")
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw.strip() else {}

@@ -77,7 +77,7 @@ export async function runInstallClient(args: readonly string[], deps: InstallCli
           },
           experience_hook: {
             script: paths.codexExperienceHook,
-            mode: flags.experienceHook ? 'enforce' : 'disabled',
+            review_timeout_seconds: flags.experienceHook ? 300 : 0,
           },
         },
       ],
