@@ -7,8 +7,9 @@ usage() {
   cat <<'USAGE'
 Usage: install-client-assets.sh [--home PATH] [--apply] [--help]
 
-Default is dry-run. --apply installs GBrain rules, skills, and the read-only
-Codex current-directory project-ID Hook through gbrain install-client. It does
+Default is dry-run. --apply installs GBrain rules, skills, the read-only Codex
+current-directory project-ID Hook, and the experience closeout guard through
+gbrain install-client. It does
 not create, copy, read, or probe credentials.
 Network access is controlled by the cloud firewall allowlist.
 USAGE
@@ -28,7 +29,7 @@ done
 [[ -d "${TARGET_HOME}" ]] || { printf 'HOME does not exist: %s\n' "${TARGET_HOME}" >&2; exit 1; }
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 if [[ "${APPLY}" == 0 ]]; then
-  printf 'DRY-RUN: install GBrain rules, skills, and the Codex project-ID Hook under %s\n' "${TARGET_HOME}"
+  printf 'DRY-RUN: install GBrain rules, skills, and Codex project/experience Hooks under %s\n' "${TARGET_HOME}"
   exit 0
 fi
 HOME="${TARGET_HOME}" XDG_CONFIG_HOME="${TARGET_HOME}/.config" CODEX_HOME="${TARGET_HOME}/.codex" \

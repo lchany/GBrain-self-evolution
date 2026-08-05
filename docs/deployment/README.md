@@ -23,14 +23,19 @@
 gbrain install-client --json
 ```
 
+该命令默认同时安装 Codex 项目身份 Hook 和经验收尾守卫。夜间或长时间无人值守执行可用
+`GBRAIN_EXPERIENCE_HOOK_MODE=unattended` 启动当前 Codex 进程，或用
+`gbrain experience-hook mode unattended --for 12h` 设置有限时间窗口。经验守卫只在
+Agent 准备结束回合时运行，不会中断进行中的任务。
+
 或在隔离的目标 home 中执行：
 
 ```bash
 deploy/scripts/install-client-assets.sh --home "$HOME" --apply
 ```
 
-这两个入口安装规则、`gbrain-capture`、`gbrain-review` skills，以及只读的
-Codex 当前目录项目 ID 启动 Hook。Hook 检查会话 `cwd` 直接目录中的
+这两个入口安装规则、`gbrain-capture`、`gbrain-review` skills、只读的
+Codex 当前目录项目 ID 启动 Hook，以及默认启用的经验收尾守卫。项目 Hook 检查会话 `cwd` 直接目录中的
 `.gbrain-project.yaml` 或 `.gbrain/project.yaml`，不调用 MCP、不创建项目 ID。安装器
 不读写 credential env，也不执行写入探针。客户端能否连接由云服务器防火墙
 白名单和网络路由决定。
@@ -38,7 +43,7 @@ Codex 当前目录项目 ID 启动 Hook。Hook 检查会话 `cwd` 直接目录�
 ## 明确不做的事
 
 - 不把真实 IP、密码、token、client secret 或 auth/env 文件提交到仓库。
-- 不安装 GBrain 经验采集或审核 lifecycle hook；Codex 只安装只读项目身份
-  检查 Hook。
+- 不让 Hook 调用 MCP、写 GBrain 或代替用户进行写入前审核；经验守卫只检查
+  Agent 的结构化收尾回执。
 - 不通过客户端安装器创建或分发凭据。
 - 不把 admin 权限授予匿名 MCP 客户端。

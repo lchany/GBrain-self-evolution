@@ -13,6 +13,11 @@ import {
   GBRAIN_CODEX_PROJECT_HOOK_FILENAME,
   GBRAIN_CODEX_PROJECT_HOOK_STATUS,
 } from './gbrain-codex-project-hook-content.ts';
+import {
+  GBRAIN_CODEX_EXPERIENCE_HOOK,
+  GBRAIN_CODEX_EXPERIENCE_HOOK_FILENAME,
+  GBRAIN_CODEX_EXPERIENCE_HOOK_STATUS,
+} from './gbrain-codex-experience-hook-content.ts';
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -30,15 +35,17 @@ interface Paths {
   readonly codexSkills: string;
   readonly codexHooksConfig: string;
   readonly codexProjectHook: string;
+  readonly codexExperienceHook: string;
 }
 
-const HELP = `gbrain install-client — install GBrain rules, skills, and Codex project hook
+const HELP = `gbrain install-client — install GBrain rules, skills, and Codex hooks
 
 Usage:
-  gbrain install-client [--json]
+  gbrain install-client [--json] [--no-experience-hook]
 
 Installs user-level OpenCode and Codex GBrain rules and skills, plus a read-only
-Codex SessionStart hook that checks only the session's current directory.
+Codex SessionStart project hook and, by default, a turn-close experience guard.
+Use --no-experience-hook to remove only the GBrain experience guard handlers.
 Client credentials and network access are managed outside this installer.
 `;
 
@@ -46,7 +53,7 @@ export async function runInstallClient(args: readonly string[], deps: InstallCli
   const stdout = deps.stdout ?? ((text) => process.stdout.write(text));
   const stderr = deps.stderr ?? ((text) => process.stderr.write(text));
   try {
-    const json = parseFlags(args);
+    const flags = parseFlags(args);
     if (args.includes('--help') || args.includes('-h')) {
       stdout(HELP);
       return 0;
@@ -54,7 +61,7 @@ export async function runInstallClient(args: readonly string[], deps: InstallCli
     const env = deps.env ?? process.env;
     const home = resolve(deps.homeDir ?? env.HOME ?? homedir());
     const paths = resolvePaths(env, home);
-    installClientAssets(paths);
+    installClientAssets(paths, flags.experienceHook);
     const summary = {
       ok: true,
       surfaces: [
@@ -68,10 +75,14 @@ export async function runInstallClient(args: readonly string[], deps: InstallCli
             config: paths.codexHooksConfig,
             trust_required: true,
           },
+          experience_hook: {
+            script: paths.codexExperienceHook,
+            mode: flags.experienceHook ? 'enforce' : 'disabled',
+          },
         },
       ],
     };
-    const text = json
+    const text = flags.json
       ? `${JSON.stringify(summary, null, 2)}\n`
       : 'GBrain client rules, skills, and Codex current-directory project hook installed. Trust it once with /hooks.\n';
     stdout(text);
@@ -84,17 +95,22 @@ export async function runInstallClient(args: readonly string[], deps: InstallCli
   }
 }
 
-function parseFlags(args: readonly string[]): boolean {
+function parseFlags(args: readonly string[]): { json: boolean; experienceHook: boolean } {
   let json = false;
+  let experienceHook = true;
   for (const arg of args) {
     if (arg === '--json') {
       json = true;
       continue;
     }
+    if (arg === '--no-experience-hook') {
+      experienceHook = false;
+      continue;
+    }
     if (arg === '--help' || arg === '-h') continue;
     throw new Error(`unknown install-client argument: ${arg}`);
   }
-  return json;
+  return { json, experienceHook };
 }
 
 function resolvePaths(env: Env, home: string): Paths {
@@ -108,10 +124,11 @@ function resolvePaths(env: Env, home: string): Paths {
     codexSkills: join(codexHome, 'skills'),
     codexHooksConfig: join(codexHome, 'hooks.json'),
     codexProjectHook: join(codexHome, 'hooks', GBRAIN_CODEX_PROJECT_HOOK_FILENAME),
+    codexExperienceHook: join(codexHome, 'hooks', GBRAIN_CODEX_EXPERIENCE_HOOK_FILENAME),
   };
 }
 
-function installClientAssets(paths: Paths): void {
+function installClientAssets(paths: Paths, experienceHook: boolean): void {
   writeManagedBlock(paths.opencodeAgents);
   writeManagedBlock(paths.codexAgents);
   writeSkill(paths.opencodeSkills, 'gbrain-capture', GBRAIN_CAPTURE_SKILL);
@@ -119,7 +136,8 @@ function installClientAssets(paths: Paths): void {
   writeSkill(paths.codexSkills, 'gbrain-capture', GBRAIN_CAPTURE_SKILL);
   writeSkill(paths.codexSkills, 'gbrain-review', GBRAIN_REVIEW_SKILL);
   writeCodexProjectHook(paths.codexProjectHook);
-  mergeCodexHooksConfig(paths.codexHooksConfig, paths.codexProjectHook);
+  if (experienceHook) writeCodexExperienceHook(paths.codexExperienceHook);
+  mergeCodexHooksConfig(paths.codexHooksConfig, paths.codexProjectHook, paths.codexExperienceHook, experienceHook);
 }
 
 function writeManagedBlock(path: string): void {
@@ -147,7 +165,21 @@ function writeCodexProjectHook(path: string): void {
   chmodSync(path, 0o700);
 }
 
-function mergeCodexHooksConfig(configPath: string, scriptPath: string): void {
+function writeCodexExperienceHook(path: string): void {
+  mkdirSync(join(path, '..'), { recursive: true });
+  writeFileSync(path, GBRAIN_CODEX_EXPERIENCE_HOOK.endsWith('\n') ? GBRAIN_CODEX_EXPERIENCE_HOOK : `${GBRAIN_CODEX_EXPERIENCE_HOOK}\n`, {
+    encoding: 'utf8',
+    mode: 0o700,
+  });
+  chmodSync(path, 0o700);
+}
+
+function mergeCodexHooksConfig(
+  configPath: string,
+  projectScriptPath: string,
+  experienceScriptPath: string,
+  experienceHook: boolean,
+): void {
   mkdirSync(join(configPath, '..'), { recursive: true });
   const config = readHooksConfig(configPath);
   const hooks = getHooksTable(config);
@@ -157,13 +189,31 @@ function mergeCodexHooksConfig(configPath: string, scriptPath: string): void {
     matcher: '^(startup|resume)$',
     hooks: [{
       type: 'command',
-      command: `python3 ${shellQuote(scriptPath)}`,
+      command: `python3 ${shellQuote(projectScriptPath)}`,
       statusMessage: GBRAIN_CODEX_PROJECT_HOOK_STATUS,
       timeout: 5,
       additionalContextLimit: 300,
     }],
   });
   hooks.SessionStart = withoutManagedHandler;
+  for (const eventName of ['UserPromptSubmit', 'PostToolUse', 'Stop']) {
+    const groups = getHookGroups(hooks, eventName);
+    const withoutExperience = groups.flatMap((group) => removeManagedExperienceHandlers(group));
+    if (experienceHook) {
+      withoutExperience.push({
+        ...(eventName === 'PostToolUse' ? { matcher: '*' } : {}),
+        hooks: [{
+          type: 'command',
+          command: `python3 ${shellQuote(experienceScriptPath)}`,
+          statusMessage: GBRAIN_CODEX_EXPERIENCE_HOOK_STATUS,
+          timeout: 5,
+          additionalContextLimit: 1200,
+        }],
+      });
+    }
+    if (withoutExperience.length > 0) hooks[eventName] = withoutExperience;
+    else delete hooks[eventName];
+  }
   config.hooks = hooks;
   writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
   chmodSync(configPath, 0o600);
@@ -190,9 +240,25 @@ function getSessionStartGroups(hooks: Record<string, unknown>): unknown[] {
   return hooks.SessionStart;
 }
 
+function getHookGroups(hooks: Record<string, unknown>, eventName: string): unknown[] {
+  if (hooks[eventName] === undefined) return [];
+  if (!Array.isArray(hooks[eventName])) {
+    throw new Error(`invalid Codex hooks config: hooks.${eventName} must be an array`);
+  }
+  return hooks[eventName];
+}
+
 function removeManagedHandlers(group: unknown): unknown[] {
   if (!isRecord(group) || !Array.isArray(group.hooks)) return [group];
   const handlers = group.hooks.filter((handler) => !isManagedProjectHook(handler));
+  if (handlers.length === group.hooks.length) return [group];
+  if (handlers.length === 0) return [];
+  return [{ ...group, hooks: handlers }];
+}
+
+function removeManagedExperienceHandlers(group: unknown): unknown[] {
+  if (!isRecord(group) || !Array.isArray(group.hooks)) return [group];
+  const handlers = group.hooks.filter((handler) => !isManagedExperienceHook(handler));
   if (handlers.length === group.hooks.length) return [group];
   if (handlers.length === 0) return [];
   return [{ ...group, hooks: handlers }];
@@ -202,6 +268,12 @@ function isManagedProjectHook(handler: unknown): boolean {
   if (!isRecord(handler)) return false;
   if (handler.statusMessage === GBRAIN_CODEX_PROJECT_HOOK_STATUS) return true;
   return typeof handler.command === 'string' && handler.command.includes(GBRAIN_CODEX_PROJECT_HOOK_FILENAME);
+}
+
+function isManagedExperienceHook(handler: unknown): boolean {
+  if (!isRecord(handler)) return false;
+  if (handler.statusMessage === GBRAIN_CODEX_EXPERIENCE_HOOK_STATUS) return true;
+  return typeof handler.command === 'string' && handler.command.includes(GBRAIN_CODEX_EXPERIENCE_HOOK_FILENAME);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

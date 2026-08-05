@@ -39,7 +39,46 @@ bun src/cli.ts install-client --json
 - `~/.codex/skills/gbrain-capture/SKILL.md`
 - `~/.codex/skills/gbrain-review/SKILL.md`
 - `~/.codex/hooks/gbrain-project-check.py`
-- `~/.codex/hooks.json` 中由 GBrain 管理的 `SessionStart` handler
+- `~/.codex/hooks/gbrain-experience-guard.py`
+- `~/.codex/hooks.json` 中由 GBrain 管理的 `SessionStart`、`UserPromptSubmit`、`PostToolUse` 和 `Stop` handler
+
+## Codex 经验收尾守卫
+
+安装器默认启用经验收尾守卫。它在用户提交 prompt 和本地工具完成后只记录最小化元数据，
+并在 Agent 准备结束当前回合时检查是否已有结构化经验回执。它不会调用 MCP、不会写入
+GBrain、不会保存原始 prompt、命令、工具输出或 transcript，也不会中断正在运行的命令。
+
+默认 `enforce` 模式下，非平凡回合缺少回执时，`Stop` 返回 `decision: "block"`，Codex
+自动创建一次续跑 prompt，让 Agent 完成只读召回、去重和候选判断。最多续跑两次；回执仍
+无效或 Hook 自身异常时 fail-open。发现候选后，完整正文和预分类仍必须由 Agent 展示给
+用户，并沿用 5 分钟写入前审核规则。Hook 不代替用户审核。
+
+长时间训练、监控或夜间无人值守任务应在启动进程时设置：
+
+```bash
+GBRAIN_EXPERIENCE_HOOK_MODE=unattended codex exec ...
+```
+
+也可以设置一个有限的持久时间窗口：
+
+```bash
+gbrain experience-hook mode unattended --for 12h
+gbrain experience-hook mode unattended --until 2026-08-06T08:00:00+08:00
+gbrain experience-hook status --json
+gbrain experience-hook mode enforce
+```
+
+优先级为环境变量、有效的定时模式、默认 `enforce`。模式在 `UserPromptSubmit` 时锁存到
+当前回合，因此定时窗口在长回合中途到期也不会在该回合结束时重新启用阻止。`unattended`
+只保证不阻止回合结束，不负责守护任务进程；长期任务本身仍应使用合适的作业管理器、日志
+和检查点机制。永久禁用经验守卫时运行：
+
+```bash
+gbrain install-client --no-experience-hook --json
+```
+
+此参数只移除 GBrain 管理的三个经验 handler，不影响项目身份 `SessionStart` Hook 或用户
+已有的其他 Hook。
 
 它不会读取或生成 `local-read.env`、`local-writer.env`、Bearer token 或
 client secret。

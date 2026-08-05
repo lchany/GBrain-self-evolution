@@ -19,9 +19,14 @@ these values in the repository or client installer inputs.
 
 The checked-in systemd/env templates and read-only verification script are in
 [`deploy/`](../../deploy/). `deploy/scripts/install-client-assets.sh` and
-`gbrain install-client` install rules, skills, and a read-only Codex
-`SessionStart` Hook. The Hook checks only the session `cwd` for
+`gbrain install-client` installs rules, skills, a read-only Codex
+`SessionStart` project Hook, and the Codex experience closeout guard. The
+project Hook checks only the session `cwd` for
 `.gbrain-project.yaml`; it does not walk parents, call MCP, or create an ID.
+The experience guard observes only bounded metadata around `UserPromptSubmit`,
+`PostToolUse`, and `Stop`; it never calls MCP or writes GBrain. Use
+`GBRAIN_EXPERIENCE_HOOK_MODE=unattended` for a single unattended process, or
+`gbrain experience-hook mode unattended --for 12h` for a finite window.
 Client credentials are not created or distributed. Client reachability is
 controlled by the cloud firewall allowlist.
 

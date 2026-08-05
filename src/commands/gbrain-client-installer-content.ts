@@ -14,7 +14,8 @@ export const GBRAIN_CLIENT_RULES = `${GBRAIN_RULES_BLOCK_START}
 - 经验正文经写入前审核后视为锁定。后续人工审核只调整分类、标签、目标目录、slug 和审核状态；正文、证据、适用条件、不适用条件或验证结果有问题时，拒绝或退回草稿，重新生成并再次审核。
 - 只通过连接的 GBrain MCP 写入 \`inbox/\` 草稿。写入前搜索已有页面，优先更新相同经验，避免重复创建。不得把原始会话、密集日志、令牌、密码、私钥、个人标识符或未脱敏的非回环 IP 地址写入 GBrain。
 - 使用 GBrain MCP 的 \`list_pages\` 和 \`get_page\` 检查草稿。晋升只能在认证的管理员审核界面完成，匿名 MCP 客户端不得晋升。
-- 不为 GBrain 采集或审核添加生命周期钩子，不安装本地 GBrain CLI，不创建本地离线队列，也不索取客户端凭据作为降级方案。
+- Codex 默认安装独立的经验收尾守卫，使用 \`UserPromptSubmit\`、\`PostToolUse\` 和 \`Stop\` 记录最小化元数据并检查结构化回执。守卫不调用 MCP、不写 GBrain、不读取 transcript、不创建本地经验队列；实际召回、去重、预览、用户写入前审核和 \`put_page\` 仍由 Agent 按本规则执行。\`Stop\` 只在 Agent 准备结束当前回合时运行，不会打断正在执行的命令或后台进程。
+- 长时间无人值守任务使用 \`GBRAIN_EXPERIENCE_HOOK_MODE=unattended\`（当前进程）或 \`gbrain experience-hook mode unattended --for <时长>\` / \`--until <RFC3339>\`（有限时间窗口）。模式在 \`UserPromptSubmit\` 时对当前回合锁存；\`unattended\` 不阻止 \`Stop\`、不自动续跑、不要求经验审核。恢复使用 \`gbrain experience-hook mode enforce\`；永久移除守卫 handler 使用 \`gbrain install-client --no-experience-hook\`。
 - 客户端网络访问由云防火墙白名单控制；安装器不创建或分发凭据。
 - Codex \`SessionStart\` Hook 只检查会话 \`cwd\` 直接目录中的 \`.gbrain-project.yaml\` 或显式提交的 \`.gbrain/project.yaml\`，不调用 MCP，也不创建项目 ID。本地标记缺失但发现仓库身份记录时，提示先通过 MCP 精确校验并绑定；否则只警告并继续会话。该 Hook 只检查项目身份，不参与经验采集或审核。
 - 进入项目目录或开始项目任务时，只读检查祖先目录中的 \`.gbrain-project.yaml\` 和仓库根目录的 \`.gbrain/project.yaml\`，并运行 \`gbrain project current --json\` 与 \`gbrain project match --json\`；普通召回和一次性任务不得因此创建项目 ID。项目身份只认规范 \`project_id\`，不使用 Git、仓库路径、目录名、项目名称、别名或语义相似度匹配；只读取仓库中明确提交的规范 ID 记录。
