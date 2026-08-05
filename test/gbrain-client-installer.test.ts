@@ -146,11 +146,14 @@ describe('gbrain install-client', () => {
 
       const hookScript = join(codexRoot, 'hooks', 'gbrain-project-check.py');
       const experienceHookScript = join(codexRoot, 'hooks', 'gbrain-experience-guard.py');
+      const opencodeExperiencePlugin = join(root, 'xdg', 'opencode', 'plugins', 'gbrain-experience-guard.ts');
       const hooksJsonPath = join(codexRoot, 'hooks.json');
       expect(existsSync(hookScript)).toBe(true);
       expect(existsSync(experienceHookScript)).toBe(true);
+      expect(existsSync(opencodeExperiencePlugin)).toBe(true);
       expect(statSync(hookScript).mode & 0o777).toBe(0o700);
       expect(statSync(experienceHookScript).mode & 0o777).toBe(0o700);
+      expect(statSync(opencodeExperiencePlugin).mode & 0o777).toBe(0o600);
       expect(statSync(hooksJsonPath).mode & 0o777).toBe(0o600);
       const hooksConfig = JSON.parse(readFileSync(hooksJsonPath, 'utf8')) as {
         description?: string;
@@ -175,7 +178,7 @@ describe('gbrain install-client', () => {
         surfaces: Array<{
           name: string;
           hook?: { script: string; config: string; trust_required: boolean };
-          experience_hook?: { script: string; review_timeout_seconds: number };
+          experience_hook?: { script?: string; plugin?: string; review_timeout_seconds: number };
         }>;
       };
       expect(summary.ok).toBe(true);
@@ -188,6 +191,10 @@ describe('gbrain install-client', () => {
         script: experienceHookScript,
         review_timeout_seconds: 300,
       });
+      expect(summary.surfaces.find((surface) => surface.name === 'opencode')?.experience_hook).toEqual({
+        plugin: opencodeExperiencePlugin,
+        review_timeout_seconds: 300,
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -198,6 +205,7 @@ describe('gbrain install-client', () => {
     try {
       expect(await runInstallClient(['--json'], deps(root))).toBe(0);
       expect(await runInstallClient(['--json', '--no-experience-hook'], deps(root))).toBe(0);
+      expect(existsSync(join(root, 'xdg', 'opencode', 'plugins', 'gbrain-experience-guard.ts'))).toBe(false);
       const config = JSON.parse(readFileSync(join(root, 'codex', 'hooks.json'), 'utf8')) as {
         hooks: Record<string, Array<{ hooks?: Array<{ command?: string }> }>>;
       };

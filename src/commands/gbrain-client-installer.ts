@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -18,6 +18,10 @@ import {
   GBRAIN_CODEX_EXPERIENCE_HOOK_FILENAME,
   GBRAIN_CODEX_EXPERIENCE_HOOK_STATUS,
 } from './gbrain-codex-experience-hook-content.ts';
+import {
+  GBRAIN_OPENCODE_EXPERIENCE_PLUGIN,
+  GBRAIN_OPENCODE_EXPERIENCE_PLUGIN_FILENAME,
+} from './gbrain-opencode-experience-plugin-content.ts';
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -31,6 +35,7 @@ export interface InstallClientDeps {
 interface Paths {
   readonly opencodeAgents: string;
   readonly opencodeSkills: string;
+  readonly opencodeExperiencePlugin: string;
   readonly codexAgents: string;
   readonly codexSkills: string;
   readonly codexHooksConfig: string;
@@ -65,7 +70,15 @@ export async function runInstallClient(args: readonly string[], deps: InstallCli
     const summary = {
       ok: true,
       surfaces: [
-        { name: 'opencode', rules: paths.opencodeAgents, skills: ['gbrain-capture', 'gbrain-review'] },
+        {
+          name: 'opencode',
+          rules: paths.opencodeAgents,
+          skills: ['gbrain-capture', 'gbrain-review'],
+          experience_hook: {
+            plugin: paths.opencodeExperiencePlugin,
+            review_timeout_seconds: flags.experienceHook ? 300 : 0,
+          },
+        },
         {
           name: 'codex',
           rules: paths.codexAgents,
@@ -120,6 +133,7 @@ function resolvePaths(env: Env, home: string): Paths {
   return {
     opencodeAgents: join(opencodeDir, 'AGENTS.md'),
     opencodeSkills: join(opencodeDir, 'skills'),
+    opencodeExperiencePlugin: join(opencodeDir, 'plugins', GBRAIN_OPENCODE_EXPERIENCE_PLUGIN_FILENAME),
     codexAgents: join(codexHome, 'AGENTS.md'),
     codexSkills: join(codexHome, 'skills'),
     codexHooksConfig: join(codexHome, 'hooks.json'),
@@ -136,7 +150,12 @@ function installClientAssets(paths: Paths, experienceHook: boolean): void {
   writeSkill(paths.codexSkills, 'gbrain-capture', GBRAIN_CAPTURE_SKILL);
   writeSkill(paths.codexSkills, 'gbrain-review', GBRAIN_REVIEW_SKILL);
   writeCodexProjectHook(paths.codexProjectHook);
-  if (experienceHook) writeCodexExperienceHook(paths.codexExperienceHook);
+  if (experienceHook) {
+    writeCodexExperienceHook(paths.codexExperienceHook);
+    writeOpenCodeExperiencePlugin(paths.opencodeExperiencePlugin);
+  } else {
+    unlinkIfPresent(paths.opencodeExperiencePlugin);
+  }
   mergeCodexHooksConfig(paths.codexHooksConfig, paths.codexProjectHook, paths.codexExperienceHook, experienceHook);
 }
 
@@ -172,6 +191,19 @@ function writeCodexExperienceHook(path: string): void {
     mode: 0o700,
   });
   chmodSync(path, 0o700);
+}
+
+function writeOpenCodeExperiencePlugin(path: string): void {
+  mkdirSync(join(path, '..'), { recursive: true });
+  writeFileSync(path, GBRAIN_OPENCODE_EXPERIENCE_PLUGIN.endsWith('\n') ? GBRAIN_OPENCODE_EXPERIENCE_PLUGIN : `${GBRAIN_OPENCODE_EXPERIENCE_PLUGIN}\n`, {
+    encoding: 'utf8',
+    mode: 0o600,
+  });
+  chmodSync(path, 0o600);
+}
+
+function unlinkIfPresent(path: string): void {
+  if (existsSync(path)) unlinkSync(path);
 }
 
 function mergeCodexHooksConfig(
