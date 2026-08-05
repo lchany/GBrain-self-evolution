@@ -175,7 +175,7 @@ describe('gbrain install-client', () => {
         surfaces: Array<{
           name: string;
           hook?: { script: string; config: string; trust_required: boolean };
-          experience_hook?: { script: string; mode: string };
+          experience_hook?: { script: string; review_timeout_seconds: number };
         }>;
       };
       expect(summary.ok).toBe(true);
@@ -186,7 +186,7 @@ describe('gbrain install-client', () => {
       });
       expect(summary.surfaces.find((surface) => surface.name === 'codex')?.experience_hook).toEqual({
         script: experienceHookScript,
-        mode: 'enforce',
+        review_timeout_seconds: 300,
       });
     } finally {
       rmSync(root, { recursive: true, force: true });

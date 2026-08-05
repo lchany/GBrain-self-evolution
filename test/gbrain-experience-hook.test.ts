@@ -92,7 +92,7 @@ describe('Codex GBrain experience guard', () => {
     }
   });
 
-  test('previewed and captured receipts require matching evidence', async () => {
+  test('a complete preview starts a review countdown instead of releasing Stop', async () => {
     const root = tempRoot();
     try {
       expect(await runInstallClient(['--json'], deps(root))).toBe(0);
@@ -124,8 +124,10 @@ describe('Codex GBrain experience guard', () => {
         '# 标题\n## 场景与目标\n## 适用条件\n## 不适用条件\n## 验证证据\n## 脱敏说明',
         '如需拒绝或修改，请在 5 分钟内回复；5 分钟没有回复将继续写入 `inbox/`。',
       ].join('\n');
-      const released = runHook(script, stateDir, event('Stop', { stop_hook_active: true, last_assistant_message: preview }));
-      expect(released.json.decision).toBeUndefined();
+      const review = runHook(script, stateDir, event('Stop', { stop_hook_active: true, last_assistant_message: preview }));
+      expect(review.json.decision).toBe('block');
+      expect(review.json.reason).toContain('5 分钟');
+      expect(review.json.reason).toContain(' wait --token ');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -206,25 +208,50 @@ describe('Codex GBrain experience guard', () => {
     }
   });
 
-  test('unattended mode is latched for a turn and never creates a continuation prompt', async () => {
+  test('wait defaults to approval after the review deadline and capture is still required', async () => {
     const root = tempRoot();
     try {
       expect(await runInstallClient(['--json'], deps(root))).toBe(0);
       const script = join(root, 'codex', 'hooks', 'gbrain-experience-guard.py');
       const stateDir = join(root, 'state');
-      const prompt = runHook(script, stateDir, event('UserPromptSubmit', { prompt: '实现一个长期训练任务' }), {
-        GBRAIN_EXPERIENCE_HOOK_MODE: 'unattended',
+      runHook(script, stateDir, event('UserPromptSubmit', { prompt: '实现功能并总结经验' }));
+      const first = runHook(script, stateDir, event('Stop', { stop_hook_active: false, last_assistant_message: '完成。' }));
+      const receiptToken = String(first.json.reason).match(/--token ([A-Za-z0-9_-]+)/)?.[1];
+      expect(receiptToken).toBeTruthy();
+      const receipt = spawnSync('python3', [
+        script, 'receipt', '--token', receiptToken!, '--outcome', 'previewed', '--slug', 'inbox/timeout-review',
+      ], { encoding: 'utf8', env: { ...process.env, GBRAIN_EXPERIENCE_HOOK_STATE_DIR: stateDir } });
+      expect(receipt.status).toBe(0);
+      const preview = [
+        '预分类建议：project，目标 inbox/timeout-review',
+        '---\ntype: project\nstatus: draft\n---',
+        '# 标题\n## 场景与目标\n## 适用条件\n## 不适用条件\n## 验证证据\n## 脱敏说明',
+        '如需拒绝或修改，请在 5 分钟内回复；5 分钟没有回复将继续写入 `inbox/`。',
+      ].join('\n');
+      const review = runHook(script, stateDir, event('Stop', { stop_hook_active: true, last_assistant_message: preview }), {
+        GBRAIN_EXPERIENCE_HOOK_TESTING: '1',
+        GBRAIN_EXPERIENCE_HOOK_TEST_REVIEW_SECONDS: '1',
       });
-      expect(prompt.status).toBe(0);
-      expect(prompt.json.decision).toBeUndefined();
+      const reviewToken = String(review.json.reason).match(/wait --token ([A-Za-z0-9_-]+)/)?.[1];
+      expect(reviewToken).toBeTruthy();
+      const waited = spawnSync('python3', [script, 'wait', '--token', reviewToken!], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GBRAIN_EXPERIENCE_HOOK_STATE_DIR: stateDir,
+          GBRAIN_EXPERIENCE_HOOK_TESTING: '1',
+          GBRAIN_EXPERIENCE_HOOK_TEST_REVIEW_SECONDS: '1',
+        },
+      });
+      expect(waited.status).toBe(0);
+      expect(JSON.parse(waited.stdout).status).toBe('approved');
 
-      const stopped = runHook(script, stateDir, event('Stop', {
-        stop_hook_active: false,
-        last_assistant_message: '训练流程结束。',
+      const uncaptured = runHook(script, stateDir, event('Stop', {
+        stop_hook_active: true,
+        last_assistant_message: '等待期结束。',
       }));
-      expect(stopped.status).toBe(0);
-      expect(stopped.json.decision).toBeUndefined();
-      expect(stopped.stdout.trim()).toBe('{}');
+      expect(uncaptured.json.decision).toBe('block');
+      expect(uncaptured.json.reason).toContain('写入');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -260,39 +287,53 @@ describe('Codex GBrain experience guard', () => {
     }
   });
 
-  test('mode CLI supports finite unattended windows, status JSON, and enforce reset', async () => {
+  test('any user message before the deadline interrupts automatic approval', async () => {
     const root = tempRoot();
     try {
       expect(await runInstallClient(['--json'], deps(root))).toBe(0);
       const script = join(root, 'codex', 'hooks', 'gbrain-experience-guard.py');
       const stateDir = join(root, 'state');
-      const env = { ...process.env, GBRAIN_EXPERIENCE_HOOK_STATE_DIR: stateDir };
-      const set = spawnSync('python3', [script, 'mode', 'unattended', '--for', '12h'], { encoding: 'utf8', env });
-      expect(set.status).toBe(0);
-      expect(JSON.parse(set.stdout).mode).toBe('unattended');
-      const status = spawnSync('python3', [script, 'status', '--json'], { encoding: 'utf8', env });
-      expect(status.status).toBe(0);
-      expect(JSON.parse(status.stdout).effective_mode).toBe('unattended');
-      expect(JSON.parse(status.stdout).expires_at).toBeTruthy();
-      const reset = spawnSync('python3', [script, 'mode', 'enforce'], { encoding: 'utf8', env });
-      expect(reset.status).toBe(0);
-      expect(JSON.parse(reset.stdout).mode).toBe('enforce');
+      runHook(script, stateDir, event('UserPromptSubmit', { prompt: '实现功能并总结经验' }));
+      const first = runHook(script, stateDir, event('Stop', { stop_hook_active: false, last_assistant_message: '完成。' }));
+      const receiptToken = String(first.json.reason).match(/--token ([A-Za-z0-9_-]+)/)?.[1];
+      spawnSync('python3', [
+        script, 'receipt', '--token', receiptToken!, '--outcome', 'previewed', '--slug', 'inbox/interrupted-review',
+      ], { encoding: 'utf8', env: { ...process.env, GBRAIN_EXPERIENCE_HOOK_STATE_DIR: stateDir } });
+      const preview = [
+        '预分类建议：project，目标 inbox/interrupted-review',
+        '---\ntype: project\nstatus: draft\n---',
+        '# 标题\n## 场景与目标\n## 适用条件\n## 不适用条件\n## 验证证据\n## 脱敏说明',
+        '如需拒绝或修改，请在 5 分钟内回复；5 分钟没有回复将继续写入 `inbox/`。',
+      ].join('\n');
+      const review = runHook(script, stateDir, event('Stop', { stop_hook_active: true, last_assistant_message: preview }));
+      const reviewToken = String(review.json.reason).match(/wait --token ([A-Za-z0-9_-]+)/)?.[1];
+      expect(reviewToken).toBeTruthy();
+
+      const interrupted = runHook(script, stateDir, event('UserPromptSubmit', {
+        turn_id: 'turn-user-response',
+        prompt: '这条经验需要修改。',
+      }));
+      expect(interrupted.json.systemMessage).toContain('自动同意已取消');
+      const waited = spawnSync('python3', [script, 'wait', '--token', reviewToken!], {
+        encoding: 'utf8', env: { ...process.env, GBRAIN_EXPERIENCE_HOOK_STATE_DIR: stateDir },
+      });
+      expect(waited.status).toBe(0);
+      expect(JSON.parse(waited.stdout).status).toBe('interrupted');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  test('invalid mode warns and symlink state roots fail open without following the link', async () => {
+  test('mode commands are removed and symlink state roots fail open without following the link', async () => {
     const root = tempRoot();
     try {
       expect(await runInstallClient(['--json'], deps(root))).toBe(0);
       const script = join(root, 'codex', 'hooks', 'gbrain-experience-guard.py');
       const stateDir = join(root, 'state');
-      const invalid = runHook(script, stateDir, event('UserPromptSubmit', { prompt: '实现功能' }), {
-        GBRAIN_EXPERIENCE_HOOK_MODE: 'invalid',
+      const removed = spawnSync('python3', [script, 'mode', 'unattended', '--for', '12h'], {
+        encoding: 'utf8', env: { ...process.env, GBRAIN_EXPERIENCE_HOOK_STATE_DIR: stateDir },
       });
-      expect(invalid.status).toBe(0);
-      expect(invalid.json.systemMessage).toContain('回退到 enforce');
+      expect(removed.status).not.toBe(0);
 
       const target = join(root, 'outside');
       mkdirSync(target, { mode: 0o700 });
