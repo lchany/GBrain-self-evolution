@@ -11,6 +11,7 @@ transcripts. It records only bounded turn metadata and structured receipts.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -21,6 +22,7 @@ import stat
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -322,6 +324,32 @@ def _interrupt_path(root: Path, session_key: str) -> Path:
     return root / "interrupts" / f"{session_key}.json"
 
 
+@contextmanager
+def _session_lock(root: Path, session_key: str):
+    if not re.fullmatch(r"[a-f0-9]{64}", session_key):
+        raise RuntimeError("invalid session key")
+    path = root / "locks" / f"{session_key}.lock"
+    _secure_dir(path.parent)
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise RuntimeError("session lock is not a regular file")
+        if hasattr(os, "getuid") and info.st_uid != os.getuid():
+            raise RuntimeError("session lock has an untrusted owner")
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
 def _unlink_state_file(path: Path) -> None:
     try:
         _secure_dir(path.parent)
@@ -360,7 +388,7 @@ def _start_review(root: Path, key: str, state: dict[str, Any], slug: str) -> str
     session_key = str(state.get("session_key") or "")
     if not re.fullmatch(r"[a-f0-9]{64}", session_key):
         raise RuntimeError("turn state lacks a valid session key")
-    token = secrets.token_urlsafe(24)
+    token = "gb_" + secrets.token_urlsafe(24)
     now = time.time()
     review = {
         "token_hash": _hash(token),
@@ -371,17 +399,18 @@ def _start_review(root: Path, key: str, state: dict[str, Any], slug: str) -> str
     }
     state["review"] = review
     _save_turn(root, key, state)
-    _clear_pending(root, session_key)
-    _atomic_write(_pending_path(root, session_key), {
-        "schema_version": SCHEMA_VERSION,
-        "kind": "review",
-        "turn_key": key,
-        "token_hash": review["token_hash"],
-        "slug": slug,
-        "created_at": now,
-        "deadline_at": review["deadline_at"],
-        "status": "waiting",
-    })
+    with _session_lock(root, session_key):
+        _clear_pending(root, session_key)
+        _atomic_write(_pending_path(root, session_key), {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "review",
+            "turn_key": key,
+            "token_hash": review["token_hash"],
+            "slug": slug,
+            "created_at": now,
+            "deadline_at": review["deadline_at"],
+            "status": "waiting",
+        })
     return token
 
 
@@ -418,14 +447,13 @@ def _review_block(token: str, slug: str) -> None:
     _json_out({"decision": "block", "reason": reason})
 
 
-def _capture_block(token: str, slug: str) -> None:
-    receipt_command = f"python3 {shlex.quote(str(Path(__file__).resolve()))} receipt"
+def _capture_block(slug: str) -> None:
     _json_out({
         "decision": "block",
         "reason": (
             "5 分钟静默期已结束且没有用户消息，现已默认同意。请将刚才锁定的完整正文写入 "
-            f"{slug}，调用 get_page 验证后执行：{receipt_command} --token {token} "
-            f"--outcome captured --slug {slug}。仅授权写入 inbox 草稿，不授权晋升。"
+            f"{slug}，调用 get_page 验证后，使用此前 wait 命令中的同一 token 记录 "
+            f"captured 回执（slug 为 {slug}）。仅授权写入 inbox 草稿，不授权晋升。"
         ),
     })
 
@@ -435,7 +463,7 @@ def _block(root: Path, key: str, state: dict[str, Any], invalid_reason: str | No
         _remove_turn(root, key)
         _json_out({"systemMessage": "GBrain 经验守卫连续两次未取得有效回执，已 fail-open，不再阻止当前回合结束。"})
         return
-    token = secrets.token_urlsafe(24)
+    token = "gb_" + secrets.token_urlsafe(24)
     state["nonce_hash"] = _hash(token)
     state["receipt"] = None
     state["block_count"] = int(state.get("block_count", 0)) + 1
@@ -459,22 +487,24 @@ def _handle_hook(root: Path, payload: dict[str, Any]) -> None:
         prompt = payload.get("prompt") if isinstance(payload.get("prompt"), str) else ""
         state["intent_nontrivial"] = bool(NONTRIVIAL_RE.search(prompt))
         _save_turn(root, key, state)
-        pending = _read_json(_pending_path(root, _session_key(payload)))
-        if pending and pending.get("kind") == "review":
-            deadline = pending.get("deadline_at")
-            now = time.time()
-            if isinstance(deadline, (int, float)) and now < deadline:
-                _atomic_write(_interrupt_path(root, _session_key(payload)), {
-                    "schema_version": SCHEMA_VERSION,
-                    "created_at": now,
-                })
-                _json_out({"systemMessage": "检测到用户消息，经验草稿的 5 分钟自动同意已取消；请按该消息处理。"})
-                return
-            if isinstance(deadline, (int, float)):
-                pending["status"] = "approved"
-                _atomic_write(_pending_path(root, _session_key(payload)), pending)
-                _json_out({"systemMessage": "经验草稿的 5 分钟静默期已经结束，应先按默认同意完成 inbox 写入与验证。"})
-                return
+        session_key = _session_key(payload)
+        with _session_lock(root, session_key):
+            pending = _read_json(_pending_path(root, session_key))
+            if pending and pending.get("kind") == "review":
+                deadline = pending.get("deadline_at")
+                now = time.time()
+                if isinstance(deadline, (int, float)) and now < deadline:
+                    _atomic_write(_interrupt_path(root, session_key), {
+                        "schema_version": SCHEMA_VERSION,
+                        "created_at": now,
+                    })
+                    _json_out({"systemMessage": "检测到用户消息，经验草稿的 5 分钟自动同意已取消；请按该消息处理。"})
+                    return
+                if isinstance(deadline, (int, float)):
+                    pending["status"] = "approved"
+                    _atomic_write(_pending_path(root, session_key), pending)
+                    _json_out({"systemMessage": "经验草稿的 5 分钟静默期已经结束，应先按默认同意完成 inbox 写入与验证。"})
+                    return
         _json_out({})
         return
     if event_name == "PostToolUse":
@@ -519,7 +549,7 @@ def _handle_hook(root: Path, payload: dict[str, Any]) -> None:
                 deadline = review.get("deadline_at")
                 if review.get("status") == "approved" or (isinstance(deadline, (int, float)) and time.time() >= deadline):
                     _save_review_status(root, key, state, "approved")
-                    _capture_block("<review-token>", slug)
+                    _capture_block(slug)
                     return
                 _json_out({
                     "decision": "block",
@@ -603,38 +633,40 @@ def _wait_command(root: Path, args: argparse.Namespace) -> int:
         _json_out({"ok": False, "error": "invalid_or_expired_token"})
         return 1
     pending_path, pending = found
+    session_key = pending_path.stem
     while True:
-        current = _read_json(pending_path)
-        if not current:
-            _json_out({"ok": False, "error": "review_no_longer_pending"})
-            return 1
-        deadline = current.get("deadline_at")
-        turn_key = current.get("turn_key")
-        if not isinstance(deadline, (int, float)) or not isinstance(turn_key, str):
-            raise RuntimeError("pending review metadata is invalid")
-        turn_path = _turn_path(root, turn_key)
-        turn_state = _read_json(turn_path)
-        if not turn_state:
-            _json_out({"ok": False, "error": "review_turn_missing"})
-            return 1
-        review = turn_state.get("review")
-        if not isinstance(review, dict):
-            _json_out({"ok": False, "error": "review_state_missing"})
-            return 1
-        if _review_interrupted(root, turn_state, review):
-            _save_review_status(root, turn_key, turn_state, "interrupted")
-            _json_out({"ok": True, "status": "interrupted", "slug": current.get("slug")})
-            return 0
-        now = time.time()
-        if now >= deadline:
-            _save_review_status(root, turn_key, turn_state, "approved")
-            _json_out({
-                "ok": True,
-                "status": "approved",
-                "slug": current.get("slug"),
-                "next": "write_locked_preview_to_inbox_then_get_page_and_record_captured",
-            })
-            return 0
+        with _session_lock(root, session_key):
+            current = _read_json(pending_path)
+            if not current:
+                _json_out({"ok": False, "error": "review_no_longer_pending"})
+                return 1
+            deadline = current.get("deadline_at")
+            turn_key = current.get("turn_key")
+            if not isinstance(deadline, (int, float)) or not isinstance(turn_key, str):
+                raise RuntimeError("pending review metadata is invalid")
+            turn_path = _turn_path(root, turn_key)
+            turn_state = _read_json(turn_path)
+            if not turn_state:
+                _json_out({"ok": False, "error": "review_turn_missing"})
+                return 1
+            review = turn_state.get("review")
+            if not isinstance(review, dict):
+                _json_out({"ok": False, "error": "review_state_missing"})
+                return 1
+            if _review_interrupted(root, turn_state, review):
+                _save_review_status(root, turn_key, turn_state, "interrupted")
+                _json_out({"ok": True, "status": "interrupted", "slug": current.get("slug")})
+                return 0
+            now = time.time()
+            if now >= deadline:
+                _save_review_status(root, turn_key, turn_state, "approved")
+                _json_out({
+                    "ok": True,
+                    "status": "approved",
+                    "slug": current.get("slug"),
+                    "next": "write_locked_preview_to_inbox_then_get_page_and_record_captured",
+                })
+                return 0
         time.sleep(min(0.25, max(0.01, deadline - now)))
 
 
@@ -654,6 +686,7 @@ def main() -> int:
     try:
         root = _state_root()
         _cleanup(root)
+        _unlink_state_file(root / "mode.json")
         if len(sys.argv) > 1:
             args = _parser().parse_args()
             if args.command == "receipt":

@@ -3668,9 +3668,10 @@ The checked-in systemd/env templates and read-only verification script are in
 project Hook checks only the session `cwd` for
 `.gbrain-project.yaml`; it does not walk parents, call MCP, or create an ID.
 The experience guard observes only bounded metadata around `UserPromptSubmit`,
-`PostToolUse`, and `Stop`; it never calls MCP or writes GBrain. Use
-`GBRAIN_EXPERIENCE_HOOK_MODE=unattended` for a single unattended process, or
-`gbrain experience-hook mode unattended --for 12h` for a finite window.
+`PostToolUse`, and `Stop`; it never calls MCP or writes GBrain. After a full
+experience draft is shown, any user message within five minutes cancels
+automatic approval. With no response, the Agent proceeds with the locked
+`inbox/` draft and verifies it with `get_page`.
 Client credentials are not created or distributed. Client reachability is
 controlled by the cloud firewall allowlist.
 

@@ -8,6 +8,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -234,6 +235,7 @@ describe('Codex GBrain experience guard', () => {
       });
       const reviewToken = String(review.json.reason).match(/wait --token ([A-Za-z0-9_-]+)/)?.[1];
       expect(reviewToken).toBeTruthy();
+      expect(reviewToken).toStartWith('gb_');
       const waited = spawnSync('python3', [script, 'wait', '--token', reviewToken!], {
         encoding: 'utf8',
         env: {
@@ -246,12 +248,37 @@ describe('Codex GBrain experience guard', () => {
       expect(waited.status).toBe(0);
       expect(JSON.parse(waited.stdout).status).toBe('approved');
 
+      const storedReviewState = readdirSync(stateDir, { recursive: true })
+        .map(String)
+        .filter((entry) => statSync(join(stateDir, entry)).isFile())
+        .map((entry) => readFileSync(join(stateDir, entry), 'utf8'))
+        .join('\n');
+      expect(storedReviewState).not.toContain(reviewToken!);
+
       const uncaptured = runHook(script, stateDir, event('Stop', {
         stop_hook_active: true,
         last_assistant_message: '等待期结束。',
       }));
       expect(uncaptured.json.decision).toBe('block');
       expect(uncaptured.json.reason).toContain('写入');
+
+      for (const [tool_name, tool_use_id] of [
+        ['mcp__gbrain__put_page', 'put-after-timeout'],
+        ['mcp__gbrain__get_page', 'get-after-timeout'],
+      ]) {
+        runHook(script, stateDir, event('PostToolUse', {
+          tool_name, tool_use_id, tool_input: { slug: 'inbox/timeout-review' }, tool_response: { isError: false },
+        }));
+      }
+      const captured = spawnSync('python3', [
+        script, 'receipt', '--token', reviewToken!, '--outcome', 'captured', '--slug', 'inbox/timeout-review',
+      ], { encoding: 'utf8', env: { ...process.env, GBRAIN_EXPERIENCE_HOOK_STATE_DIR: stateDir } });
+      expect(captured.status).toBe(0);
+      const released = runHook(script, stateDir, event('Stop', {
+        stop_hook_active: true,
+        last_assistant_message: '草稿已写入并验证。',
+      }));
+      expect(released.json.decision).toBeUndefined();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -330,10 +357,14 @@ describe('Codex GBrain experience guard', () => {
       expect(await runInstallClient(['--json'], deps(root))).toBe(0);
       const script = join(root, 'codex', 'hooks', 'gbrain-experience-guard.py');
       const stateDir = join(root, 'state');
+      mkdirSync(stateDir, { mode: 0o700 });
+      const legacyMode = join(stateDir, 'mode.json');
+      writeFileSync(legacyMode, JSON.stringify({ mode: 'unattended', expires_at: '2099-01-01T00:00:00Z' }), { mode: 0o600 });
       const removed = spawnSync('python3', [script, 'mode', 'unattended', '--for', '12h'], {
         encoding: 'utf8', env: { ...process.env, GBRAIN_EXPERIENCE_HOOK_STATE_DIR: stateDir },
       });
       expect(removed.status).not.toBe(0);
+      expect(existsSync(legacyMode)).toBe(false);
 
       const target = join(root, 'outside');
       mkdirSync(target, { mode: 0o700 });

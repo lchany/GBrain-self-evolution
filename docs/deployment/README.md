@@ -23,10 +23,9 @@
 gbrain install-client --json
 ```
 
-该命令默认同时安装 Codex 项目身份 Hook 和经验收尾守卫。夜间或长时间无人值守执行可用
-`GBRAIN_EXPERIENCE_HOOK_MODE=unattended` 启动当前 Codex 进程，或用
-`gbrain experience-hook mode unattended --for 12h` 设置有限时间窗口。经验守卫只在
-Agent 准备结束回合时运行，不会中断进行中的任务。
+该命令默认同时安装 Codex 项目身份 Hook 和经验收尾守卫。守卫只在 Agent 准备结束回合时
+运行，不会中断进行中的任务。存在经验候选时，Agent 展示完整草稿并等待 5 分钟；期间收到
+任何用户消息都会取消自动同意，完全无响应时默认同意写入 `inbox/` 草稿并执行读取验证。
 
 或在隔离的目标 home 中执行：
 
