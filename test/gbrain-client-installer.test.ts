@@ -145,9 +145,12 @@ describe('gbrain install-client', () => {
       expect(opencodeReview).not.toContain('PROMOTE <target-slug>');
 
       const hookScript = join(codexRoot, 'hooks', 'gbrain-project-check.py');
+      const experienceHookScript = join(codexRoot, 'hooks', 'gbrain-experience-guard.py');
       const hooksJsonPath = join(codexRoot, 'hooks.json');
       expect(existsSync(hookScript)).toBe(true);
+      expect(existsSync(experienceHookScript)).toBe(true);
       expect(statSync(hookScript).mode & 0o777).toBe(0o700);
+      expect(statSync(experienceHookScript).mode & 0o777).toBe(0o700);
       expect(statSync(hooksJsonPath).mode & 0o777).toBe(0o600);
       const hooksConfig = JSON.parse(readFileSync(hooksJsonPath, 'utf8')) as {
         description?: string;
@@ -160,10 +163,20 @@ describe('gbrain install-client', () => {
         .filter((handler) => handler.statusMessage === '检查当前目录的 GBrain 项目 ID');
       expect(gbrainHandlers).toHaveLength(1);
       expect(gbrainHandlers[0].command).toContain('gbrain-project-check.py');
+      for (const eventName of ['UserPromptSubmit', 'PostToolUse', 'Stop']) {
+        const handlers = hooksConfig.hooks[eventName].flatMap((entry) => entry.hooks ?? [])
+          .filter((handler) => handler.statusMessage === 'GBrain 经验收尾守卫');
+        expect(handlers).toHaveLength(1);
+        expect(handlers[0].command).toContain('gbrain-experience-guard.py');
+      }
 
       const summary = JSON.parse(output.join('')) as {
         ok: boolean;
-        surfaces: Array<{ name: string; hook?: { script: string; config: string; trust_required: boolean } }>;
+        surfaces: Array<{
+          name: string;
+          hook?: { script: string; config: string; trust_required: boolean };
+          experience_hook?: { script: string; mode: string };
+        }>;
       };
       expect(summary.ok).toBe(true);
       expect(summary.surfaces.find((surface) => surface.name === 'codex')?.hook).toEqual({
@@ -171,6 +184,25 @@ describe('gbrain install-client', () => {
         config: hooksJsonPath,
         trust_required: true,
       });
+      expect(summary.surfaces.find((surface) => surface.name === 'codex')?.experience_hook).toEqual({
+        script: experienceHookScript,
+        mode: 'enforce',
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('Given no-experience-hook When installer runs Then only managed experience handlers are removed', async () => {
+    const root = tempRoot();
+    try {
+      expect(await runInstallClient(['--json'], deps(root))).toBe(0);
+      expect(await runInstallClient(['--json', '--no-experience-hook'], deps(root))).toBe(0);
+      const config = JSON.parse(readFileSync(join(root, 'codex', 'hooks.json'), 'utf8')) as {
+        hooks: Record<string, Array<{ hooks?: Array<{ command?: string }> }>>;
+      };
+      expect(JSON.stringify(config.hooks.SessionStart)).toContain('gbrain-project-check.py');
+      expect(JSON.stringify(config.hooks)).not.toContain('gbrain-experience-guard.py');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
