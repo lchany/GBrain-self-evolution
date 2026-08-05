@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -34,7 +35,12 @@ function runHook(
   const result = spawnSync('python3', [script], {
     encoding: 'utf8',
     input: JSON.stringify(input),
-    env: { ...process.env, GBRAIN_EXPERIENCE_HOOK_STATE_DIR: stateDir, ...extraEnv },
+    env: {
+      ...process.env,
+      GBRAIN_EXPERIENCE_HOOK_STATE_DIR: stateDir,
+      GBRAIN_EXPERIENCE_HOOK_TESTING: '1',
+      ...extraEnv,
+    },
   });
   return {
     status: result.status,
@@ -56,15 +62,21 @@ function event(eventName: string, extra: Record<string, unknown> = {}): Record<s
   };
 }
 
-function completeVerifiedPreview(slug: string): string {
+function completeServerCompliantPreview(slug: string): string {
   return [
     `预分类建议：project，目标 ${slug}`,
-    '---\ntype: project\nstatus: draft\nverification: verified\nsource_refs:\n  - test:verified-run\n---',
+    '---\ntype: project\nstatus: draft\nverification: unverified\nauthority: verified_execution\nsource_refs:\n  - test:verified-run\n---',
     '# 标题\n## 场景与目标\n已完成实现。\n## 适用条件\n满足测试环境。\n## 不适用条件\n未完成验证时。',
     '## 验证证据\n- 验证环境：test fixture\n- 验证方法：执行通过的自动化测试\n- 预期结果：经验结论可复现\n- 实际结果：测试通过，结论已确认\n- 验证时间：2026-08-05T12:00:00Z',
     '## 脱敏说明\n未包含原始输入。',
     '如需拒绝或修改，请在 5 分钟内回复；5 分钟没有回复将继续写入 `inbox/`。',
   ].join('\n');
+}
+
+async function waitForPath(path: string, timeoutMs = 4_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path) && Date.now() < deadline) await Bun.sleep(25);
+  expect(existsSync(path)).toBe(true);
 }
 
 function explicitInstructionPreview(slug: string, scope: 'global' | 'project'): string {
@@ -134,8 +146,8 @@ describe('Codex GBrain experience guard', () => {
         stop_hook_active: true,
         last_assistant_message: explicitInstructionPreview('inbox/project-instruction', 'project'),
       }));
-      expect(review.json.decision).toBe('block');
-      expect(review.json.reason).toContain('5 分钟');
+      expect(review.json.decision).toBeUndefined();
+      expect(review.json.systemMessage).toContain('后台');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -200,11 +212,10 @@ describe('Codex GBrain experience guard', () => {
         encoding: 'utf8', env: { ...process.env, GBRAIN_EXPERIENCE_HOOK_STATE_DIR: stateDir },
       });
       expect(previewReceipt.status).toBe(0);
-      const preview = completeVerifiedPreview('inbox/test');
+      const preview = completeServerCompliantPreview('inbox/test');
       const review = runHook(script, stateDir, event('Stop', { stop_hook_active: true, last_assistant_message: preview }));
-      expect(review.json.decision).toBe('block');
-      expect(review.json.reason).toContain('5 分钟');
-      expect(review.json.reason).toContain(' wait --token ');
+      expect(review.json.decision).toBeUndefined();
+      expect(review.json.systemMessage).toContain('后台');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -285,76 +296,6 @@ describe('Codex GBrain experience guard', () => {
     }
   });
 
-  test('wait defaults to approval after the review deadline and capture is still required', async () => {
-    const root = tempRoot();
-    try {
-      expect(await runInstallClient(['--json'], deps(root))).toBe(0);
-      const script = join(root, 'codex', 'hooks', 'gbrain-experience-guard.py');
-      const stateDir = join(root, 'state');
-      runHook(script, stateDir, event('UserPromptSubmit', { prompt: '实现功能并总结经验' }));
-      const first = runHook(script, stateDir, event('Stop', { stop_hook_active: false, last_assistant_message: '完成。' }));
-      const receiptToken = String(first.json.reason).match(/--token ([A-Za-z0-9_-]+)/)?.[1];
-      expect(receiptToken).toBeTruthy();
-      const receipt = spawnSync('python3', [
-        script, 'receipt', '--token', receiptToken!, '--outcome', 'previewed', '--slug', 'inbox/timeout-review',
-      ], { encoding: 'utf8', env: { ...process.env, GBRAIN_EXPERIENCE_HOOK_STATE_DIR: stateDir } });
-      expect(receipt.status).toBe(0);
-      const preview = completeVerifiedPreview('inbox/timeout-review');
-      const review = runHook(script, stateDir, event('Stop', { stop_hook_active: true, last_assistant_message: preview }), {
-        GBRAIN_EXPERIENCE_HOOK_TESTING: '1',
-        GBRAIN_EXPERIENCE_HOOK_TEST_REVIEW_SECONDS: '1',
-      });
-      const reviewToken = String(review.json.reason).match(/wait --token ([A-Za-z0-9_-]+)/)?.[1];
-      expect(reviewToken).toBeTruthy();
-      expect(reviewToken).toStartWith('gb_');
-      const waited = spawnSync('python3', [script, 'wait', '--token', reviewToken!], {
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          GBRAIN_EXPERIENCE_HOOK_STATE_DIR: stateDir,
-          GBRAIN_EXPERIENCE_HOOK_TESTING: '1',
-          GBRAIN_EXPERIENCE_HOOK_TEST_REVIEW_SECONDS: '1',
-        },
-      });
-      expect(waited.status).toBe(0);
-      expect(JSON.parse(waited.stdout).status).toBe('approved');
-
-      const storedReviewState = readdirSync(stateDir, { recursive: true })
-        .map(String)
-        .filter((entry) => statSync(join(stateDir, entry)).isFile())
-        .map((entry) => readFileSync(join(stateDir, entry), 'utf8'))
-        .join('\n');
-      expect(storedReviewState).not.toContain(reviewToken!);
-
-      const uncaptured = runHook(script, stateDir, event('Stop', {
-        stop_hook_active: true,
-        last_assistant_message: '等待期结束。',
-      }));
-      expect(uncaptured.json.decision).toBe('block');
-      expect(uncaptured.json.reason).toContain('写入');
-
-      for (const [tool_name, tool_use_id] of [
-        ['mcp__gbrain__put_page', 'put-after-timeout'],
-        ['mcp__gbrain__get_page', 'get-after-timeout'],
-      ]) {
-        runHook(script, stateDir, event('PostToolUse', {
-          tool_name, tool_use_id, tool_input: { slug: 'inbox/timeout-review' }, tool_response: { isError: false },
-        }));
-      }
-      const captured = spawnSync('python3', [
-        script, 'receipt', '--token', reviewToken!, '--outcome', 'captured', '--slug', 'inbox/timeout-review',
-      ], { encoding: 'utf8', env: { ...process.env, GBRAIN_EXPERIENCE_HOOK_STATE_DIR: stateDir } });
-      expect(captured.status).toBe(0);
-      const released = runHook(script, stateDir, event('Stop', {
-        stop_hook_active: true,
-        last_assistant_message: '草稿已写入并验证。',
-      }));
-      expect(released.json.decision).toBeUndefined();
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
   test('state stores only bounded metadata with private permissions and per-tool event files', async () => {
     const root = tempRoot();
     try {
@@ -397,21 +338,63 @@ describe('Codex GBrain experience guard', () => {
       spawnSync('python3', [
         script, 'receipt', '--token', receiptToken!, '--outcome', 'previewed', '--slug', 'inbox/interrupted-review',
       ], { encoding: 'utf8', env: { ...process.env, GBRAIN_EXPERIENCE_HOOK_STATE_DIR: stateDir } });
-      const preview = completeVerifiedPreview('inbox/interrupted-review');
+      const preview = completeServerCompliantPreview('inbox/interrupted-review');
       const review = runHook(script, stateDir, event('Stop', { stop_hook_active: true, last_assistant_message: preview }));
-      const reviewToken = String(review.json.reason).match(/wait --token ([A-Za-z0-9_-]+)/)?.[1];
-      expect(reviewToken).toBeTruthy();
+      expect(review.json.systemMessage).toContain('后台');
 
       const interrupted = runHook(script, stateDir, event('UserPromptSubmit', {
         turn_id: 'turn-user-response',
         prompt: '这条经验需要修改。',
       }));
       expect(interrupted.json.systemMessage).toContain('自动同意已取消');
-      const waited = spawnSync('python3', [script, 'wait', '--token', reviewToken!], {
-        encoding: 'utf8', env: { ...process.env, GBRAIN_EXPERIENCE_HOOK_STATE_DIR: stateDir },
-      });
-      expect(waited.status).toBe(0);
-      expect(JSON.parse(waited.stdout).status).toBe('interrupted');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a silent review wakes the original Codex session from a detached worker', async () => {
+    const root = tempRoot();
+    try {
+      expect(await runInstallClient(['--json'], deps(root))).toBe(0);
+      const script = join(root, 'codex', 'hooks', 'gbrain-experience-guard.py');
+      const stateDir = join(root, 'state');
+      const binDir = join(root, 'bin');
+      const wakeLog = join(root, 'codex-wake.log');
+      mkdirSync(binDir);
+      const fakeCodex = join(binDir, 'codex');
+      writeFileSync(fakeCodex, '#!/bin/sh\nprintf "%s\\n" "$*" > "$GBRAIN_TEST_WAKE_LOG"\ncat >> "$GBRAIN_TEST_WAKE_LOG"\n');
+      chmodSync(fakeCodex, 0o700);
+
+      runHook(script, stateDir, event('UserPromptSubmit', { prompt: '实现功能并总结经验' }));
+      const first = runHook(script, stateDir, event('Stop', { stop_hook_active: false, last_assistant_message: '完成。' }));
+      const receiptToken = String(first.json.reason).match(/--token ([A-Za-z0-9_-]+)/)?.[1];
+      expect(receiptToken).toBeTruthy();
+      const receipt = spawnSync('python3', [
+        script, 'receipt', '--token', receiptToken!, '--outcome', 'previewed', '--slug', 'inbox/detached-review',
+      ], { encoding: 'utf8', env: { ...process.env, GBRAIN_EXPERIENCE_HOOK_STATE_DIR: stateDir } });
+      expect(receipt.status).toBe(0);
+
+      const review = runHook(
+        script,
+        stateDir,
+        event('Stop', {
+          stop_hook_active: true,
+          last_assistant_message: completeServerCompliantPreview('inbox/detached-review'),
+        }),
+        {
+          GBRAIN_EXPERIENCE_HOOK_TESTING: '1',
+          GBRAIN_EXPERIENCE_HOOK_TEST_REVIEW_SECONDS: '1',
+          GBRAIN_CODEX_BIN: fakeCodex,
+          GBRAIN_TEST_WAKE_LOG: wakeLog,
+        },
+      );
+      expect(review.json.decision).toBeUndefined();
+      expect(review.json.systemMessage).toContain('后台');
+      await waitForPath(wakeLog);
+      const wake = readFileSync(wakeLog, 'utf8');
+      expect(wake).toContain('exec resume');
+      expect(wake).toContain('session-test');
+      expect(wake).toContain('inbox/detached-review');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

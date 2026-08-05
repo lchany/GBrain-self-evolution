@@ -19,6 +19,7 @@ import re
 import secrets
 import shlex
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -31,7 +32,7 @@ MAX_BLOCKS = 2
 RETENTION_SECONDS = 7 * 24 * 60 * 60
 REVIEW_TIMEOUT_SECONDS = 5 * 60
 VALID_OUTCOMES = {"defer", "no_candidate", "previewed", "captured", "rejected"}
-VERIFIED_FRONTMATTER_RE = re.compile(r"(?m)^verification:\s*verified\s*$")
+VERIFIED_EXECUTION_AUTHORITY_RE = re.compile(r"(?m)^authority:\s*verified_execution\s*$")
 SOURCE_REFS_RE = re.compile(r"(?ms)^source_refs:\s*\n(?:\s*-\s*[^\s#][^\n]*\n?)+")
 SECTION_RE = re.compile(r"(?ms)^##\s+([^\n]+)\n(.*?)(?=^##\s+|\Z)")
 INSTRUCTION_AUTHORITY_RE = re.compile(r"(?m)^authority:\s*user_explicit_instruction\s*$")
@@ -195,6 +196,10 @@ def _pending_path(root: Path, session_key: str) -> Path:
     return root / "pending" / f"{session_key}.json"
 
 
+def _resume_path(root: Path, key: str) -> Path:
+    return root / "resumes" / f"{key}.json"
+
+
 def _new_turn_state(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     pending = bool(_read_json(_pending_path(root, _session_key(payload))))
     return {
@@ -202,6 +207,7 @@ def _new_turn_state(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
         "created_at": int(time.time()),
         "updated_at": int(time.time()),
         "session_key": _session_key(payload),
+        "session_id": _safe_identifier(payload.get("session_id"), "missing-session"),
         "intent_nontrivial": False,
         "prior_pending": pending,
         "block_count": 0,
@@ -213,6 +219,12 @@ def _new_turn_state(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
 
 def _load_turn(root: Path, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     key = _turn_key(payload)
+    resume = _read_json(_resume_path(root, key))
+    original_key = resume.get("turn_key") if resume else None
+    if isinstance(original_key, str) and re.fullmatch(r"[a-f0-9]{64}", original_key):
+        state = _read_json(_turn_path(root, original_key))
+        if state:
+            return original_key, state
     state = _read_json(_turn_path(root, key)) or _new_turn_state(root, payload)
     return key, state
 
@@ -290,8 +302,8 @@ def _preview_is_complete(message: Any) -> bool:
 
 
 def _preview_has_verified_evidence(message: Any) -> bool:
-    """Accept only a reusable conclusion backed by completed, concrete evidence."""
-    if not isinstance(message, str) or VERIFIED_FRONTMATTER_RE.search(message) is None:
+    """Accept concrete execution evidence while preserving the service draft schema."""
+    if not isinstance(message, str) or VERIFIED_EXECUTION_AUTHORITY_RE.search(message) is None:
         return False
     if SOURCE_REFS_RE.search(message) is None:
         return False
@@ -425,6 +437,26 @@ def _set_deferred(root: Path, state: dict[str, Any]) -> None:
     })
 
 
+def _resume_prompt(slug: str, token: str) -> str:
+    return (
+        "GBRAIN_REVIEW_RESUME: 静默审核期已结束且没有用户回复。"
+        f"现在将刚才锁定的完整正文写入 {slug}，调用 get_page 验证后执行 "
+        f"gbrain-experience-guard.py receipt --token {token} --outcome captured --slug {slug}。"
+    )
+
+
+def _start_wake_worker(token: str) -> None:
+    if os.environ.get("GBRAIN_EXPERIENCE_HOOK_TESTING") == "1" and "GBRAIN_CODEX_BIN" not in os.environ:
+        return
+    subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve()), "wake", "--token", token],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
 def _start_review(root: Path, key: str, state: dict[str, Any], slug: str) -> str:
     session_key = str(state.get("session_key") or "")
     if not re.fullmatch(r"[a-f0-9]{64}", session_key):
@@ -448,10 +480,12 @@ def _start_review(root: Path, key: str, state: dict[str, Any], slug: str) -> str
             "turn_key": key,
             "token_hash": review["token_hash"],
             "slug": slug,
+            "session_id": state["session_id"],
             "created_at": now,
             "deadline_at": review["deadline_at"],
             "status": "waiting",
         })
+    _start_wake_worker(token)
     return token
 
 
@@ -478,14 +512,12 @@ def _save_review_status(root: Path, key: str, state: dict[str, Any], status_valu
 
 
 def _review_block(token: str, slug: str) -> None:
-    wait_command = f"python3 {shlex.quote(str(Path(__file__).resolve()))} wait --token {token}"
-    reason = (
-        "完整经验正文已展示，现进入 5 分钟静默审核期。请立即执行并等待："
-        f"{wait_command}。返回 approved 时，使用 MCP 将刚才锁定的完整正文写入 "
-        f"{slug}，随后 get_page 验证，再用同一 token 记录 captured 回执；"
-        "返回 interrupted 时不得自动写入，按用户消息处理。Hook 本身不会调用 MCP。"
-    )
-    _json_out({"decision": "block", "reason": reason})
+    _json_out({
+        "systemMessage": (
+            "完整经验正文已展示，已启动后台 5 分钟静默审核。收到任何用户消息会取消自动同意；"
+            f"无回复时将恢复当前会话，以写入并验证锁定草稿 {slug}。Hook 本身不会调用 MCP。"
+        ),
+    })
 
 
 def _capture_block(slug: str) -> None:
@@ -526,9 +558,18 @@ def _handle_hook(root: Path, payload: dict[str, Any]) -> None:
     key, state = _load_turn(root, payload)
     if event_name == "UserPromptSubmit":
         prompt = payload.get("prompt") if isinstance(payload.get("prompt"), str) else ""
+        session_key = _session_key(payload)
+        with _session_lock(root, session_key):
+            pending = _read_json(_pending_path(root, session_key))
+            if prompt.startswith("GBRAIN_REVIEW_RESUME:") and pending and pending.get("status") == "waking":
+                original_key = pending.get("turn_key")
+                current_key = _turn_key(payload)
+                if isinstance(original_key, str) and re.fullmatch(r"[a-f0-9]{64}", original_key):
+                    _atomic_write(_resume_path(root, current_key), {"turn_key": original_key})
+                    _json_out({})
+                    return
         state["intent_nontrivial"] = bool(NONTRIVIAL_RE.search(prompt))
         _save_turn(root, key, state)
-        session_key = _session_key(payload)
         with _session_lock(root, session_key):
             pending = _read_json(_pending_path(root, session_key))
             if pending and pending.get("kind") == "review":
@@ -710,6 +751,41 @@ def _wait_command(root: Path, args: argparse.Namespace) -> int:
         time.sleep(min(0.25, max(0.01, deadline - now)))
 
 
+def _wake_command(root: Path, args: argparse.Namespace) -> int:
+    found = _find_pending_for_token(root, args.token)
+    if not found:
+        return 0
+    pending_path, pending = found
+    session_key = pending_path.stem
+    deadline = pending.get("deadline_at")
+    if not isinstance(deadline, (int, float)):
+        return 1
+    time.sleep(max(0, deadline - time.time()))
+    with _session_lock(root, session_key):
+        current = _read_json(pending_path)
+        if not current or current.get("status") != "waiting":
+            return 0
+        turn_key = current.get("turn_key")
+        if not isinstance(turn_key, str):
+            return 1
+        turn_state = _read_json(_turn_path(root, turn_key))
+        review = turn_state.get("review") if turn_state else None
+        if not turn_state or not isinstance(review, dict) or _review_interrupted(root, turn_state, review):
+            return 0
+        current["status"] = "waking"
+        _atomic_write(pending_path, current)
+        review["status"] = "waking"
+        turn_state["review"] = review
+        _save_turn(root, turn_key, turn_state)
+        session_id = current.get("session_id")
+        slug = current.get("slug")
+        if not isinstance(session_id, str) or not SAFE_ID_RE.fullmatch(session_id) or not isinstance(slug, str):
+            return 1
+    codex_bin = os.environ.get("GBRAIN_CODEX_BIN", "codex")
+    subprocess.Popen([codex_bin, "exec", "resume", session_id, _resume_prompt(slug, args.token)], start_new_session=True)
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="gbrain-experience-guard.py")
     subparsers = parser.add_subparsers(dest="command")
@@ -719,6 +795,8 @@ def _parser() -> argparse.ArgumentParser:
     receipt.add_argument("--slug")
     wait = subparsers.add_parser("wait")
     wait.add_argument("--token", required=True)
+    wake = subparsers.add_parser("wake")
+    wake.add_argument("--token", required=True)
     return parser
 
 
@@ -733,6 +811,8 @@ def main() -> int:
                 return _receipt_command(root, args)
             if args.command == "wait":
                 return _wait_command(root, args)
+            if args.command == "wake":
+                return _wake_command(root, args)
             raise ValueError("missing command")
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw.strip() else {}
