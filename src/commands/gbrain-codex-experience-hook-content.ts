@@ -540,7 +540,6 @@ def _handle_hook(root: Path, payload: dict[str, Any]) -> None:
                     token = _start_review(root, key, state, slug)
                     _review_block(token, slug)
                     return
-                token_hash = str(review.get("token_hash") or "")
                 if _review_interrupted(root, state, review) or review.get("status") == "interrupted":
                     _clear_pending(root, session_key)
                     _remove_turn(root, key)
