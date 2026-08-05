@@ -31,6 +31,13 @@ MAX_BLOCKS = 2
 RETENTION_SECONDS = 7 * 24 * 60 * 60
 REVIEW_TIMEOUT_SECONDS = 5 * 60
 VALID_OUTCOMES = {"defer", "no_candidate", "previewed", "captured", "rejected"}
+VERIFIED_FRONTMATTER_RE = re.compile(r"(?m)^verification:\s*verified\s*$")
+SOURCE_REFS_RE = re.compile(r"(?ms)^source_refs:\s*\n(?:\s*-\s*[^\s#][^\n]*\n?)+")
+SECTION_RE = re.compile(r"(?ms)^##\s+([^\n]+)\n(.*?)(?=^##\s+|\Z)")
+INSTRUCTION_AUTHORITY_RE = re.compile(r"(?m)^authority:\s*user_explicit_instruction\s*$")
+INSTRUCTION_SCOPE_RE = re.compile(r"(?m)^instruction_scope:\s*(global|project)\s*$")
+INSTRUCTION_SOURCE_RE = re.compile(r"(?ms)^source_refs:\s*\n(?:\s*-\s*user_instruction:(global|project):[^\s#][^\n]*\n?)+")
+UNVERIFIED_VALUE_RE = re.compile(r"(?:待验证|未验证|未知|不适用|猜测|推测|假设|\btbd\b|\bunknown\b|\bunverified\b)", re.IGNORECASE)
 NONTRIVIAL_RE = re.compile(
     r"(修改|实现|开发|修复|部署|迁移|诊断|排查|安全|隐私|项目规则|总结|复盘|"
     r"modify|implement|build|fix|deploy|migrat|diagnos|debug|security|privacy|summari[sz]e)",
@@ -282,12 +289,46 @@ def _preview_is_complete(message: Any) -> bool:
     return all(part in message for part in required)
 
 
+def _preview_has_verified_evidence(message: Any) -> bool:
+    """Accept only a reusable conclusion backed by completed, concrete evidence."""
+    if not isinstance(message, str) or VERIFIED_FRONTMATTER_RE.search(message) is None:
+        return False
+    if SOURCE_REFS_RE.search(message) is None:
+        return False
+    sections = {match.group(1).strip(): match.group(2) for match in SECTION_RE.finditer(message)}
+    evidence = sections.get("验证证据", "")
+    values: list[str] = []
+    for label in ("验证环境", "验证方法", "预期结果", "实际结果", "验证时间"):
+        match = re.search(r"(?m)^\s*-\s*" + re.escape(label) + r"\s*[:：]\s*([^\n]+?)\s*$", evidence)
+        if match is None:
+            return False
+        value = match.group(1).strip()
+        if not value or UNVERIFIED_VALUE_RE.search(value):
+            return False
+        values.append(value)
+    return bool(values)
+
+
+def _preview_has_instruction_evidence(message: Any) -> bool:
+    """Explicit global/project instructions are authoritative evidence, not hypotheses."""
+    if not isinstance(message, str):
+        return False
+    scope = INSTRUCTION_SCOPE_RE.search(message)
+    if INSTRUCTION_AUTHORITY_RE.search(message) is None or scope is None:
+        return False
+    source = INSTRUCTION_SOURCE_RE.search(message)
+    return source is not None and source.group(1) == scope.group(1)
+
+
 def _receipt_valid(receipt: dict[str, Any], events: list[dict[str, Any]], message: Any) -> tuple[bool, str]:
     outcome = receipt.get("outcome")
     if outcome not in VALID_OUTCOMES:
         return False, "unknown outcome"
-    if outcome == "previewed" and not _preview_is_complete(message):
-        return False, "preview missing the full template, preclassification, or five-minute notice"
+    if outcome == "previewed":
+        if not _preview_is_complete(message):
+            return False, "preview missing the full template, preclassification, or five-minute notice"
+        if not _preview_has_verified_evidence(message) and not _preview_has_instruction_evidence(message):
+            return False, "preview must be either a verified experience with concrete evidence or an explicit global/project user instruction with authoritative source metadata"
     if outcome == "captured":
         slug = receipt.get("slug")
         put_slugs = {event.get("put_slug") for event in events}

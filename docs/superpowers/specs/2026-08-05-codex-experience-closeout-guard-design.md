@@ -23,7 +23,9 @@
 要求 `defer`、`no_candidate`、`previewed`、`captured` 或 `rejected`
 结构化回执。缺少或无效回执最多自动续跑两次，随后 fail-open。
 
-`previewed` 必须能在最后一条 Agent 消息中找到完整模板关键章节、预分类和 5 分钟提示。
+`previewed` 必须能在最后一条 Agent 消息中找到完整模板关键章节、预分类和 5 分钟提示；默认必须包含 `verification: verified`、至少一个脱敏 `source_refs` 指针，以及无占位符的验证环境、方法、预期结果、实际结果和验证时间。未经验证的分析只能以 `no_candidate`、`defer` 或 `rejected` 收尾，不能进入自动写入审核。
+
+用户明确的全局指令或项目指令是权威事实，可作为例外经验候选，不要求伪造执行验证。该预览必须同时声明 `authority: user_explicit_instruction` 和 `instruction_scope: global|project`，并有对应的脱敏 `source_refs` 条目 `user_instruction:global:<摘要>` 或 `user_instruction:project:<摘要>`；范围与来源前缀必须一致。
 `captured` 必须有相同 slug 的成功 `mcp__gbrain__put_page` 与 `get_page` 事件。
 
 ## 静默审核

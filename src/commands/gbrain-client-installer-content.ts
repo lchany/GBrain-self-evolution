@@ -14,7 +14,7 @@ export const GBRAIN_CLIENT_RULES = `${GBRAIN_RULES_BLOCK_START}
 - 经验正文经写入前审核后视为锁定。后续人工审核只调整分类、标签、目标目录、slug 和审核状态；正文、证据、适用条件、不适用条件或验证结果有问题时，拒绝或退回草稿，重新生成并再次审核。
 - 只通过连接的 GBrain MCP 写入 \`inbox/\` 草稿。写入前搜索已有页面，优先更新相同经验，避免重复创建。不得把原始会话、密集日志、令牌、密码、私钥、个人标识符或未脱敏的非回环 IP 地址写入 GBrain。
 - 使用 GBrain MCP 的 \`list_pages\` 和 \`get_page\` 检查草稿。晋升只能在认证的管理员审核界面完成，匿名 MCP 客户端不得晋升。
-- Codex 默认安装独立的经验收尾守卫，使用 \`UserPromptSubmit\`、\`PostToolUse\` 和 \`Stop\` 记录最小化元数据并检查结构化回执。守卫不调用 MCP、不写 GBrain、不读取 transcript、不创建本地经验队列；实际召回、去重、预览、用户写入前审核和 \`put_page\` 仍由 Agent 按本规则执行。\`Stop\` 只在 Agent 准备结束当前回合时运行，不会打断正在执行的命令或后台进程。
+- Codex 默认安装独立的经验收尾守卫，使用 \`UserPromptSubmit\`、\`PostToolUse\` 和 \`Stop\` 记录最小化元数据并检查结构化回执。守卫不调用 MCP、不写 GBrain、不读取 transcript、不创建本地经验队列；实际召回、去重、预览、用户写入前审核和 \`put_page\` 仍由 Agent 按本规则执行。\`Stop\` 只在 Agent 准备结束当前回合时运行，不会打断正在执行的命令或后台进程。只有 \`verification: verified\`、脱敏 \`source_refs\` 和完整、非占位的验证环境/方法/预期结果/实际结果/时间都存在时，守卫才接受 \`previewed\` 并开始审核；未验证分析必须以 \`no_candidate\`、\`defer\` 或 \`rejected\` 收尾，不得作为待自动写入的经验结论。**例外：用户明确给出的全局或项目指令本身是权威事实，可以作为经验候选。** 该候选必须标记 \`authority: user_explicit_instruction\`、\`instruction_scope: global|project\`，并以匹配范围的脱敏 \`source_refs: [user_instruction:global:<摘要>|user_instruction:project:<摘要>]\` 指向该明确指令；它不需要伪造测试验证证据。
 - 经验草稿完整展示后统一进入 5 分钟静默审核期。期间收到任何用户消息都会取消自动同意；完全没有用户消息时默认同意，Agent 继续把锁定正文写入 \`inbox/\` 并用 \`get_page\` 验证。该默认同意只授权写入草稿，不授权晋升。永久移除守卫 handler 可使用 \`gbrain install-client --no-experience-hook\`。
 - 客户端网络访问由云防火墙白名单控制；安装器不创建或分发凭据。
 - Codex \`SessionStart\` Hook 只检查会话 \`cwd\` 直接目录中的 \`.gbrain-project.yaml\` 或显式提交的 \`.gbrain/project.yaml\`，不调用 MCP，也不创建项目 ID。本地标记缺失但发现仓库身份记录时，提示先通过 MCP 精确校验并绑定；否则只警告并继续会话。该 Hook 只检查项目身份，不参与经验采集或审核。
@@ -121,6 +121,8 @@ date: <YYYY-MM-DD>
 status: draft
 sensitivity: <internal|private|public>
 verification: <unverified|verified>
+authority: <verified_execution|user_explicit_instruction>
+instruction_scope: <null|global|project>
 applicability:
   - <必须满足的适用条件>
 non_applicable:
@@ -212,7 +214,11 @@ project_id: prj-0123456789abcdef
 都是必填项。缺少任何一项时不得写入。
 
 项目规则类经验没有故障信息时，可以把“现象与识别信号”“结论与根因”和
-“无效尝试”填写为“不适用”，但不能删除章节。
+“无效尝试”填写为“不适用”，但不能删除章节。用户明确给出的全局指令或
+当前项目指令可作为经验：填写 \`authority: user_explicit_instruction\` 与
+\`instruction_scope: global\` 或 \`project\`，并将 \`source_refs\` 写为相同范围的
+脱敏 \`user_instruction:global:<摘要>\` 或 \`user_instruction:project:<摘要>\`；它是
+指令事实，不应伪造为已测试的因果结论或补造验证结果。
 
 ## 五、脱敏与证据
 
