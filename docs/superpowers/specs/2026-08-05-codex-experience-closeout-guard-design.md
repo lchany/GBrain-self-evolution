@@ -1,5 +1,7 @@
 # Codex 经验收尾守卫设计
 
+> **历史设计（已废止）**：本文描述的写入前 5 分钟静默审核已由同步采集替代。现行方案在活跃回合内去重、脱敏、写入 `inbox/` 并调用 `get_page` 验证；守卫只校验与 `captured` 回执匹配的 `put_page` / `get_page` 事件，不再创建倒计时、后台任务或恢复会话。以 `docs/deployment/client-onboarding.md`、`src/commands/gbrain-codex-experience-hook-content.ts` 和 `test/gbrain-experience-hook.test.ts` 为准。
+
 ## 目标
 
 用 Codex 生命周期 Hook 机械提醒 Agent 完成经验收尾检查，降低仅依赖 `AGENTS.md`

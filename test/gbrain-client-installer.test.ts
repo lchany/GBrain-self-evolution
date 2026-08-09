@@ -79,7 +79,8 @@ describe('gbrain install-client', () => {
       expect(opencodeRules).toContain('默认使用中文');
       expect(opencodeRules).toContain('只读召回');
       expect(opencodeRules).toContain('第 2 次');
-      expect(opencodeRules).toContain('5 分钟');
+      expect(opencodeRules).toContain('直接通过 MCP 写入');
+      expect(opencodeRules).not.toContain('5 分钟');
       expect(opencodeRules).toContain('.gbrain-project.yaml');
       expect(opencodeRules).toContain('project_id');
       expect(opencodeRules).toContain('match_project');
@@ -90,7 +91,8 @@ describe('gbrain install-client', () => {
       expect(codexRules).toContain('默认使用中文');
       expect(codexRules).toContain('只读召回');
       expect(codexRules).toContain('第 2 次');
-      expect(codexRules).toContain('5 分钟');
+      expect(codexRules).toContain('直接通过 MCP 写入');
+      expect(codexRules).not.toContain('5 分钟');
       expect(codexRules).toContain('match_project');
       expect(codexRules).toContain('Codex `SessionStart` Hook');
       expect(codexRules).toContain('只检查会话 `cwd` 直接目录');
@@ -118,8 +120,9 @@ describe('gbrain install-client', () => {
       expect(opencodeCapture).toContain('applicability');
       expect(opencodeCapture).toContain('non_applicable');
       expect(opencodeCapture).toContain('预分类建议');
-      expect(opencodeCapture).toContain('5 分钟没有任何回复');
-      expect(opencodeCapture).toContain('重新计算 5 分钟');
+      expect(opencodeCapture).toContain('## 六、同步写入');
+      expect(opencodeCapture).toContain('立即调用 `put_page`');
+      expect(opencodeCapture).not.toContain('5 分钟');
       expect(opencodeCapture).toContain('project_binding');
       expect(opencodeCapture).toContain('match_project');
       expect(opencodeCapture).toContain('ensure_project');
@@ -150,10 +153,9 @@ describe('gbrain install-client', () => {
       const hooksJsonPath = join(codexRoot, 'hooks.json');
       expect(existsSync(hookScript)).toBe(true);
       expect(existsSync(experienceHookScript)).toBe(true);
-      expect(existsSync(opencodeExperiencePlugin)).toBe(true);
+      expect(existsSync(opencodeExperiencePlugin)).toBe(false);
       expect(statSync(hookScript).mode & 0o777).toBe(0o700);
       expect(statSync(experienceHookScript).mode & 0o777).toBe(0o700);
-      expect(statSync(opencodeExperiencePlugin).mode & 0o777).toBe(0o600);
       expect(statSync(hooksJsonPath).mode & 0o777).toBe(0o600);
       const hooksConfig = JSON.parse(readFileSync(hooksJsonPath, 'utf8')) as {
         description?: string;
@@ -178,7 +180,7 @@ describe('gbrain install-client', () => {
         surfaces: Array<{
           name: string;
           hook?: { script: string; config: string; trust_required: boolean };
-          experience_hook?: { script?: string; plugin?: string; review_timeout_seconds: number };
+          experience_hook?: { script?: string; mode: string } | null;
         }>;
       };
       expect(summary.ok).toBe(true);
@@ -189,12 +191,9 @@ describe('gbrain install-client', () => {
       });
       expect(summary.surfaces.find((surface) => surface.name === 'codex')?.experience_hook).toEqual({
         script: experienceHookScript,
-        review_timeout_seconds: 300,
+        mode: 'synchronous_capture',
       });
-      expect(summary.surfaces.find((surface) => surface.name === 'opencode')?.experience_hook).toEqual({
-        plugin: opencodeExperiencePlugin,
-        review_timeout_seconds: 300,
-      });
+      expect(summary.surfaces.find((surface) => surface.name === 'opencode')?.experience_hook).toBeUndefined();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

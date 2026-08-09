@@ -18,10 +18,6 @@ import {
   GBRAIN_CODEX_EXPERIENCE_HOOK_FILENAME,
   GBRAIN_CODEX_EXPERIENCE_HOOK_STATUS,
 } from './gbrain-codex-experience-hook-content.ts';
-import {
-  GBRAIN_OPENCODE_EXPERIENCE_PLUGIN,
-  GBRAIN_OPENCODE_EXPERIENCE_PLUGIN_FILENAME,
-} from './gbrain-opencode-experience-plugin-content.ts';
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -35,7 +31,6 @@ export interface InstallClientDeps {
 interface Paths {
   readonly opencodeAgents: string;
   readonly opencodeSkills: string;
-  readonly opencodeExperiencePlugin: string;
   readonly codexAgents: string;
   readonly codexSkills: string;
   readonly codexHooksConfig: string;
@@ -50,7 +45,7 @@ Usage:
 
 Installs user-level OpenCode and Codex GBrain rules and skills, plus a read-only
 Codex SessionStart project hook and, by default, a turn-close experience guard.
-Use --no-experience-hook to remove only the GBrain experience guard handlers.
+Use --no-experience-hook to remove only the GBrain synchronous experience guard handlers.
 Client credentials and network access are managed outside this installer.
 `;
 
@@ -74,10 +69,6 @@ export async function runInstallClient(args: readonly string[], deps: InstallCli
           name: 'opencode',
           rules: paths.opencodeAgents,
           skills: ['gbrain-capture', 'gbrain-review'],
-          experience_hook: {
-            plugin: paths.opencodeExperiencePlugin,
-            review_timeout_seconds: flags.experienceHook ? 300 : 0,
-          },
         },
         {
           name: 'codex',
@@ -88,10 +79,10 @@ export async function runInstallClient(args: readonly string[], deps: InstallCli
             config: paths.codexHooksConfig,
             trust_required: true,
           },
-          experience_hook: {
+          experience_hook: flags.experienceHook ? {
             script: paths.codexExperienceHook,
-            review_timeout_seconds: flags.experienceHook ? 300 : 0,
-          },
+            mode: 'synchronous_capture',
+          } : null,
         },
       ],
     };
@@ -133,7 +124,6 @@ function resolvePaths(env: Env, home: string): Paths {
   return {
     opencodeAgents: join(opencodeDir, 'AGENTS.md'),
     opencodeSkills: join(opencodeDir, 'skills'),
-    opencodeExperiencePlugin: join(opencodeDir, 'plugins', GBRAIN_OPENCODE_EXPERIENCE_PLUGIN_FILENAME),
     codexAgents: join(codexHome, 'AGENTS.md'),
     codexSkills: join(codexHome, 'skills'),
     codexHooksConfig: join(codexHome, 'hooks.json'),
@@ -150,12 +140,9 @@ function installClientAssets(paths: Paths, experienceHook: boolean): void {
   writeSkill(paths.codexSkills, 'gbrain-capture', GBRAIN_CAPTURE_SKILL);
   writeSkill(paths.codexSkills, 'gbrain-review', GBRAIN_REVIEW_SKILL);
   writeCodexProjectHook(paths.codexProjectHook);
-  if (experienceHook) {
-    writeCodexExperienceHook(paths.codexExperienceHook);
-    writeOpenCodeExperiencePlugin(paths.opencodeExperiencePlugin);
-  } else {
-    unlinkIfPresent(paths.opencodeExperiencePlugin);
-  }
+  if (experienceHook) writeCodexExperienceHook(paths.codexExperienceHook);
+  // Remove the former OpenCode review timer when upgrading an existing client.
+  unlinkIfPresent(join(paths.opencodeAgents, '..', 'plugins', 'gbrain-experience-guard.ts'));
   mergeCodexHooksConfig(paths.codexHooksConfig, paths.codexProjectHook, paths.codexExperienceHook, experienceHook);
 }
 
@@ -191,15 +178,6 @@ function writeCodexExperienceHook(path: string): void {
     mode: 0o700,
   });
   chmodSync(path, 0o700);
-}
-
-function writeOpenCodeExperiencePlugin(path: string): void {
-  mkdirSync(join(path, '..'), { recursive: true });
-  writeFileSync(path, GBRAIN_OPENCODE_EXPERIENCE_PLUGIN.endsWith('\n') ? GBRAIN_OPENCODE_EXPERIENCE_PLUGIN : `${GBRAIN_OPENCODE_EXPERIENCE_PLUGIN}\n`, {
-    encoding: 'utf8',
-    mode: 0o600,
-  });
-  chmodSync(path, 0o600);
 }
 
 function unlinkIfPresent(path: string): void {

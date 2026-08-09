@@ -1,5 +1,7 @@
 # Codex 经验收尾守卫 TDD 证据
 
+> **历史记录（已废止）**：本文记录的是写入前 5 分钟静默审核方案。该方案已由同步采集替代：Agent 在当前回合完成去重和脱敏后直接写入 `inbox/`，以匹配的 `put_page` / `get_page` 事件和 `captured` 回执收尾；不再创建倒计时、后台任务或恢复会话。现行行为见 `docs/deployment/client-onboarding.md` 与 `test/gbrain-experience-hook.test.ts`。
+
 ## 用户路径
 
 1. 非平凡回合要求结构化经验回执。
