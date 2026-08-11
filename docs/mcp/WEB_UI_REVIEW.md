@@ -1,92 +1,75 @@
-# GBrain Web 审核界面（/admin/review）
+# GBrain 经验审核界面
 
-本文档描述服务端渲染的 GBrain 审核控制台：引导操作者从 inbox 分诊到安全的审核决定，全程中文界面，保留 promote/merge 人工确认门禁，并定义结果回执、端点契约、Origin/CSRF 规则与浏览器安全 JSON 契约。
+GBrain 的默认人工审核只做一件事：确定 inbox 草稿的最终分类。
 
-## 流程总览
+## 审核者看到什么
 
-1. **Inbox 分诊台** `GET /admin/review` — 导航式列表。仅支持现有 API 筛选（`type`、`verification`、`stale`、`project_id`）；风险与重复列在预检前一律显示「未预检」；每行通过「开始审核」进入详情。列表不含任何写入控件。
-2. **草稿详情** `GET /admin/review/detail/<slug>` — 摘要优先：草稿类型、用途、证据充分性、敏感内容状态、重复状态、建议下一步；元数据与内容为可展开的浏览器安全预览（脱敏 + 最长 2000 字符）。处理方式以中文决策卡呈现：常用处理（留在项目内、变成通用经验、合并到已有内容、先补证据）与更多处理方式（丢弃这条草稿、修复审核记录、清理草稿残留）。
-3. **目标选择或审核说明** `GET /admin/review/plan/<slug>?action=<action>` — 目标类型必须由人工从七种审核目标类型（knowledge、runbook、incident、decision、project、environment、agent-skill）中选择，绝不从源页 PageType 推断。keep/promote 生成确定性 slug（规范前缀 + inbox 尾部，小写化、非法字符转 `-`、合并重复 `-`、最长 80 字符），先做 `engine.getPage(targetSlug)` 精确冲突检查，再做有界重复候选搜索；merge 只能选择当前审核来源内已存在的页面；手动输入 slug 是带校验的高级路径。`reject` 与 `needs_evidence` 先要求填写非空审核说明，才能进入预检。
-4. **预检** `GET /admin/review/plan/<slug>?action=...&target_type=...&target=...` — 只读预览：选择的操作、来源、目标、影响、证据缺口、敏感内容检查、重复检查、门禁结果、确认要求。promote/merge 的确认门禁显示「待输入确认短语」；预检不会授权或执行写入。
-5. **确认执行** `POST /admin/api/review/confirm` — 服务端重新解析确认短语、重新运行全部门禁，全部通过后才执行写入计划。
-6. **审核结果** — 浏览器表单提交（`Accept: text/html`）返回 HTML 结果页；其他客户端返回浏览器安全 JSON（见下文契约）。
-7. **审核历史** `GET /admin/review/history` — 读取 `decisions/reviews/*`，展示操作含义、来源、目标、状态与日期。
+打开 `/admin/review`，选择一条草稿进入详情页。详情页展示：
 
-项目经验额外受项目身份门禁约束：已绑定草稿只能写入
-`projects/<project_id>/` 下与 frontmatter 一致的目录；晋升到全局
-`knowledge/` 或 `runbooks/` 时删除活动绑定字段，但必须保留
-`source_project_ids` 作为来源追踪。
+- 脱敏后的中文摘要、适用场景和验证状态；
+- 大模型推荐的分类、使用场景和推荐理由；
+- 一个分类下拉框；
+- 一个确认按钮。
 
-## HTML 结果页面
+分类只有五项：
 
-确认执行的回执是中文审计回执，只包含固定九字段：
+- `project`：项目经验
+- `knowledge`：通用知识
+- `runbook`：操作手册
+- `incident`：故障经验
+- `reject`：拒绝并删除
 
-| 字段 | 含义 |
-| --- | --- |
-| `ok` | 执行是否成功 |
-| `code` | 稳定结果码（成功为 `ok`；执行失败为 `review_error`；门禁失败为对应门禁码） |
-| `message` | 固定中文说明 |
-| `source` | 来源 inbox 草稿 slug |
-| `action` | 执行的动作（keep/promote/merge/reject/needs_evidence/repair/cleanup） |
-| `target` | 目标页 slug（无目标动作与门禁失败时为 `null`） |
-| `review_slug` | 审核记录页 slug（门禁失败时为 `null`） |
-| `retrieval_verified` | 目标页检索验证是否通过 |
-| `next_action` | 中文下一步提示 |
+系统会预选模型建议。审核者同意时直接确认；不同意时修改下拉框后确认。
+选择“拒绝并删除”后，按钮显示“确认并删除”。审核者不需要填写 slug、审核说明、
+目标目录、确认短语，也不需要操作预检或门禁页面。
 
-检索验证或审核记录写入失败时，文案明确说明 **inbox 草稿已保留，需要修复后重试**（建议使用「修复审核记录」）；草稿在验证或审核记录写入失败时不会被删除。
+## 模型建议
 
-## 端点契约
+新草稿应在采集时写入以下 frontmatter：
 
-### `GET /admin/api/review/inbox`
+```yaml
+review_recommendation:
+  category: project
+  scenario: 设计或修改当前项目的经验审核流程。
+  reason: 这条规则只约束当前项目，不适合作为跨项目知识。
+  generated_by: model
+```
 
-返回 inbox 草稿列表（浏览器安全投影）：`{ drafts: [{ slug, type, title, verification, status, updated_at, stale, project_id? }] }`。`project_id` 仅在草稿具有该值时返回，并与其他动态字段一样先经过共享脱敏器。查询参数：`type`、`verification`、`stale`、`project_id`。
+旧草稿缺少该字段时，详情页会自动通过受保护的同源 POST 请求调用服务端配置的
+聊天模型。成功结果按 `source_id + slug + content_hash` 缓存在进程内，最多 256 项。
+详情页 GET 本身不会调用模型，避免浏览器预取产生费用。
 
-### `GET /admin/api/review/inbox/<slug>`
+模型未配置、超时或返回非法 JSON 时，页面显示“暂时无法生成模型建议”并禁用确认。
+系统不会用规则推断冒充模型结论。
 
-返回单个草稿的浏览器安全详情：列表字段 + 允许清单内的 frontmatter 元数据（`date`、`status`、`sensitivity`、`verification`、`applicability`、`non_applicable`、`review_action`）、证据引用计数、摘要（证据充分性/敏感内容状态/重复状态/建议下一步）、脱敏内容预览与时间线预览（最长 2000 字符）。404：`{ error: 'not_found' }`。
+## 确认后的服务端行为
 
-### `GET /admin/api/review/targets`
+浏览器只提交：
 
-只读目标搜索：`?q=<可选>&type=<可选>&limit=<1-50>`，返回 `{ targets: [{ slug, type, title, updated_at }] }`。内部绑定服务端审核来源；忽略客户端提交的 `source_id`；不返回正文、frontmatter、source refs 或异常细节。
+```json
+{
+  "sourceSlug": "inbox/example",
+  "category": "incident"
+}
+```
 
-### `POST /admin/api/review/plan`
+服务端拒绝未知字段，重新读取最新草稿，自行生成目标 slug 和内部审核动作，然后复用
+`planReview` 与 `applyReviewPlan` 完成内容检查、重复检查、写入、回读验证和审核记录。
+分类只决定归档位置，不改变草稿原有的 `verification`。
 
-预检规划。请求体（JSON 或 URL-encoded）：`kind`/`action`、`sourceSlug`、`targetSlug`/`target`、`targetType`/`target_type`、可选 `reviewNotes`。`reject` 与 `needs_evidence` 的 `reviewNotes` 必须是非空文本；缺失或仅空白时在调用 `planReview` 前返回 400。响应为浏览器安全计划：`{ ok, code, message, gates: [{ code, ok, message }], plan?: { action, source, target: { slug, type } | null } }`，不含门禁 `details`/`candidates`、执行 `steps`、`review_slug` 或原始 action payload。
+“拒绝并删除”先写审核记录，再调用 writer 的 `delete_page`。该操作是软删除，遵循现有
+72 小时恢复窗口。任何写入或验证失败都会保留 inbox 草稿。
 
-### `POST /admin/api/review/confirm`
+## 安全边界
 
-确认执行。请求体同 plan，外加 `confirmation`（promote/merge 必填）。`reject` 与 `needs_evidence` 再次要求非空 `reviewNotes`，确保预检之后不能绕过说明门禁。响应为固定九字段回执（见上表），状态码：
+- 所有页面和接口都要求管理员认证。
+- 两个新 POST 接口执行严格同源校验。
+- 模型只接收浏览器安全投影，不接收原始 frontmatter、认证材料或密集日志。
+- 推荐文本进入浏览器前再次脱敏并转义。
+- writer URL 校验、source attestation 和服务端写入顺序保持不变。
+- `review_recommendation` 只用于审核界面，不复制到最终知识页。
 
-| 状态码 | 场景 |
-| --- | --- |
-| 200 | 执行成功 |
-| 400 | 参数无效（`invalid_request`）或确认短语缺失/错误（`confirmation_required`） |
-| 403 | Origin 校验失败（`forbidden`） |
-| 409 | 门禁未通过（回执 `code` 为门禁码，`review_slug` 为 `null`） |
-| 503 | 执行失败（回执 `code` 为 `review_error`）或内部错误（`{ error: 'review_error', message }`） |
+## 兼容接口
 
-JSON 与 URL-encoded 解析错误返回 400 `{ error: 'review_error', message: '审核操作失败，请查看服务端日志。' }`，不含异常细节。
-
-### `GET /admin/api/review/history`
-
-返回审核记录列表：`{ reviews: [{ slug, action, action_label, source, target, status, date, updated_at }] }`。`action_label` 为动作的中文含义；`source` 为被审核的 inbox 草稿 slug；`target` 为目标页 slug（无目标动作为 `null`）。不返回 `source_refs`、标题正文或任何敏感字段。
-
-## Origin/CSRF 规则
-
-- 每个 `/admin/api/review/*` POST（plan、confirm）在请求体解析**之前**执行严格同源 `Origin` 校验。
-- 期望来源 `expectedAdminOrigin` 取自显式 `GBRAIN_ADMIN_ORIGIN`，未设置时回退到 `issuerUrl.origin`，**绝不**从 `Host` 或 `X-Forwarded-*` 请求头推导；伪造这些头不会改变期望来源。
-- 以下情况一律返回固定 403（JSON `{ error: 'forbidden', message: '请求来源不被允许。' }`；`Accept: text/html` 客户端得到同文案 HTML 页）：缺失 `Origin`、`Origin: null`、畸形 Origin、多个 Origin（逗号连接）、与期望来源不匹配（含尾部斜杠等任何非精确相等的形式）。
-- 校验失败的请求不会到达 `planReview`、writer 会话或 delete 路径。
-
-## 确认规则
-
-- `promote` → 必须精确输入 `PROMOTE <target-slug>`。
-- `merge` → 必须精确输入 `MERGE <target-slug>`。
-- Web 提交的 `keep` 若目标类型为 `knowledge` 或 `runbook`，会在适配层归一化为 `promote`，同样需要精确的 `PROMOTE <target-slug>`；直接 API 调用同样受此约束。
-- 确认短语不自动填充、不本地化；CLI 与 Web 契约一致。
-
-## 浏览器安全 JSON 契约
-
-- 预检 JSON 只包含动作、来源、目标和固定门禁字段；确认结果 JSON 只包含固定九字段（见上表）。两者均不包含门禁 `details`、`candidates`、执行 `steps`、`review_slug`、`expected`、原始 action payload、原始 receipts、writer 回执/错误或异常文本。
-- writer 返回的结构化错误与抛出的异常都映射为稳定 `review_error` 加固定中文文案；任何动态字段在渲染前都经过共享浏览器安全脱敏器（令牌、私钥、PII、原始转录、原始 JSON/认证响应、原始环境变量、密集日志一律隐藏或脱敏）。
-- 所有 HTML 动态文本与属性先脱敏再 HTML 转义；URL 路径段使用 `encodeURIComponent`；不通过 `innerHTML` 注入审核数据。
+`/admin/api/review/plan`、`/admin/api/review/confirm` 和旧预检 HTML 路由暂时保留，
+供已有集成兼容使用；默认审核页面不再链接这些入口。
