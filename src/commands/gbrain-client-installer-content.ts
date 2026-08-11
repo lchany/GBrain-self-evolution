@@ -10,6 +10,7 @@ export const GBRAIN_CLIENT_RULES = `${GBRAIN_RULES_BLOCK_START}
 - 相同或高度相似的失败场景第 2 次独立出现时，停止盲目重试并整理错误总结。未改变条件的连续重试只算一次；跨任务、跨运行，或经过有效干预后再次发生，才增加发生次数。
 - 客户或项目规则、任务或里程碑总结、失败或根因总结，以及新增或实质更新的知识、runbook 和决策记录，完成搜索去重、脱敏和固定模板整理后，直接通过 MCP 写入 \`inbox/\` 草稿；不需要写入前人工审核。
 - 写入前向用户简要说明预分类和目标 slug，但不要等待用户确认、创建倒计时或恢复会话。随后立即调用 \`put_page\`，再用 \`get_page\` 验证写入结果。
+- 每个新草稿必须由大模型写入 \`review_recommendation\`，包含建议分类、中文使用场景、中文理由和 \`generated_by: model\`；不得要求用户预先选择分类。人工审核只确认或修改分类，“拒绝并删除”也是分类之一。
 - 写入后的正文视为锁定。后续人工审核只调整分类、标签、目标目录、slug 和审核状态；正文、证据、适用条件、不适用条件或验证结果有问题时，拒绝或退回草稿，重新生成。
 - 只通过连接的 GBrain MCP 写入 \`inbox/\` 草稿。写入前搜索已有页面，优先更新相同经验，避免重复创建。不得把原始会话、密集日志、令牌、密码、私钥、个人标识符或未脱敏的非回环 IP 地址写入 GBrain。
 - 使用 GBrain MCP 的 \`list_pages\` 和 \`get_page\` 检查草稿。晋升只能在认证的管理员审核界面完成，匿名 MCP 客户端不得晋升。
@@ -130,6 +131,11 @@ source_refs:
 migrated_from: null
 project_binding: <非项目草稿填 pending；项目经验填 bound>
 project_id: <非项目草稿填 null；项目经验填 prj-0123456789abcdef>
+review_recommendation:
+  category: <project|knowledge|runbook|incident|reject>
+  scenario: <用中文清晰描述这条经验适用的实际场景，最多 500 字>
+  reason: <用中文说明推荐该分类的原因，最多 500 字>
+  generated_by: model
 ---
 
 # <中文经验标题>
@@ -210,6 +216,9 @@ project_id: prj-0123456789abcdef
 
 \`applicability\`、\`non_applicable\`、“适用条件”“不适用条件”和“召回提示”
 都是必填项。缺少任何一项时不得写入。
+review_recommendation 也必须由当前大模型在采集时给出，不能要求用户先选分类，
+也不能用确定性规则冒充模型建议。project 仅适用于已绑定规范 project_id 的草稿；
+审核者不同意建议时，只需在审核页修改分类下拉框。
 
 项目规则类经验没有故障信息时，可以把“现象与识别信号”“结论与根因”和
 “无效尝试”填写为“不适用”，但不能删除章节。用户明确给出的全局指令或

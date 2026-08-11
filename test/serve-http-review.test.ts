@@ -37,7 +37,7 @@ import {
   browserSafeReviewError,
   projectBrowserSafeText,
 } from '../src/core/review/browser-safe.ts';
-import { planReview, type ReviewCoreDeps, type ReviewSourcePage } from '../src/core/review/index.ts';
+import { planReview, type ReviewCoreDeps, type ReviewRecommendationProvider, type ReviewSourcePage } from '../src/core/review/index.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { Page } from '../src/core/types.ts';
 import { createLocalWriterSessionFactory, type WriterSessionFactory } from '../src/commands/gbrain-capture-writer.ts';
@@ -147,6 +147,7 @@ type CreateAppOptions = {
   readonly adminOrigin?: URL;
   readonly writerSessionFactory?: WriterSessionFactory;
   readonly reviewSourceId?: string;
+  readonly recommendationProvider?: ReviewRecommendationProvider;
 };
 
 function createApp(
@@ -173,6 +174,7 @@ function createApp(
     issuerUrl: new URL('http://review.test'),
     reviewDate: () => REVIEW_DATE,
     reviewSourceId: options.reviewSourceId,
+    recommendationProvider: options.recommendationProvider,
   });
   return app;
 }
@@ -756,7 +758,7 @@ describe('review web routes', () => {
     expect(result.text).toContain('inbox/html-test');
   });
 
-  test('GET /admin/review renders navigation-only triage console with 开始审核 and 未预检', async () => {
+  test('GET /admin/review renders a simple classification queue', async () => {
     // given
     const engine = mockEngine([makePage('inbox/triage-test', { title: '分诊测试草稿' })]);
     const app = createApp(engine);
@@ -764,13 +766,14 @@ describe('review web routes', () => {
     // when
     const result = await fetchApp(app, '/admin/review');
 
-    // then: title, type, verification, status, stale, updated time, 开始审核 link
+    // then
     expect(result.status).toBe(200);
     expect(result.text).toContain('分诊测试草稿');
     expect(result.text).toContain('开始审核');
     expect(result.text).toContain('/admin/review/detail/' + encodeURIComponent('inbox/triage-test'));
-    // risk and duplicate fields render 未预检 (no preflight on list)
-    expect(result.text).toContain('未预检');
+    expect(result.text).toContain('建议分类');
+    expect(result.text).toContain('待生成');
+    expect(result.text).not.toContain('预检');
     // updated date present
     expect(result.text).toContain('2026-07-26');
     // only the four API-backed filters are offered; no risk filter
@@ -825,7 +828,7 @@ describe('review web routes', () => {
 
     // then
     expect(result.status).toBe(200);
-    expect(result.text).toContain('草稿详情');
+    expect(result.text).toContain('确认经验分类');
     expect(result.text).toContain('inbox/html-detail');
   });
 
@@ -992,8 +995,8 @@ describe('review inbox triage console', () => {
     expect(result.status).toBe(200);
     expect(result.text).toContain('稀疏草稿');
     expect(result.text).toContain('unverified');
-    expect(result.text).toContain('draft');
-    expect(result.text).toContain('未预检');
+    expect(result.text).toContain('待生成');
+    expect(result.text).not.toContain('预检');
   });
 
   test('Given an engine that throws on listPages When the list is requested Then 503 with fixed Chinese and no exception leak', async () => {
@@ -1077,12 +1080,10 @@ describe('detail summary', () => {
     expect(metadataIndex).toBeGreaterThan(summaryIndex);
     expect(result.text).toContain('草稿类型');
     expect(result.text).toContain('用途');
-    expect(result.text).toContain('证据充分性');
-    expect(result.text).toContain('敏感内容状态');
-    expect(result.text).toContain('重复状态');
-    expect(result.text).toContain('建议下一步');
-    expect(result.text).toContain('选择处理方式后查看完整预检');
-    expect(result.text.match(/未预检/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(result.text).toContain('验证状态');
+    expect(result.text).toContain('模型建议');
+    expect(result.text).toContain('正在生成模型建议');
+    expect(result.text).not.toContain('预检');
     expect(result.text).toContain('unrecognized-source-type');
     expect(result.text).not.toContain('name="target_type"');
     expect(result.text).not.toContain('name="target"');
@@ -1170,97 +1171,144 @@ describe('detail summary canary', () => {
   });
 });
 
-describe('decision cards', () => {
-  test('Given a draft detail When rendered Then common actions are primary Chinese decision cards with complete guidance', async () => {
-    // given
-    const page = makePage('inbox/decision-cards', { title: '决策卡草稿' });
-    const app = createApp(mockEngine([page]));
+describe('single classification review', () => {
+  test('Given a draft detail When rendered Then only category and one confirmation are editable', async () => {
+    const page = makePage('inbox/single-review', { title: '单一审核草稿' });
+    page.frontmatter.review_recommendation = {
+      category: 'incident',
+      scenario: '定位可复用的故障处理经验。',
+      reason: '正文包含故障现象、根因和验证结果。',
+      generated_by: 'model',
+    };
+    const result = await fetchApp(createApp(mockEngine([page])), `/admin/review/detail/${encodeURIComponent(page.slug)}`);
 
-    // when
-    const result = await fetchApp(app, `/admin/review/detail/${encodeURIComponent(page.slug)}`);
-
-    // then
     expect(result.status).toBe(200);
-    const primaryStart = result.text.indexOf('class="decision-card-section decision-card-section-primary"');
-    const rareStart = result.text.indexOf('class="decision-card-section decision-card-section-rare"');
-    expect(primaryStart).toBeGreaterThan(-1);
-    expect(rareStart).toBeGreaterThan(primaryStart);
-    expect(result.text).toContain('常用处理');
-
-    const primarySection = result.text.slice(primaryStart, rareStart);
-    expect([...primarySection.matchAll(/data-action="([^"]+)"/g)].map((match) => match[1])).toEqual([
-      'keep', 'promote', 'merge', 'needs_evidence',
-    ]);
-
-    for (const action of ['keep', 'promote', 'merge', 'needs_evidence'] as const) {
-      const entry = REVIEW_ACTION_CATALOG[action];
-      const actionStart = primarySection.indexOf(`data-action="${entry.value}"`);
-      const cardStart = primarySection.lastIndexOf('<a ', actionStart);
-      const cardEnd = primarySection.indexOf('</a>', cardStart);
-      const card = primarySection.slice(cardStart, cardEnd);
-
-      expect(card).toContain('decision-card-primary');
-      expect(card).toContain(entry.label);
-      expect(card).toContain(entry.explanation);
-      expect(card).toContain(entry.example);
-      expect(card).toContain(entry.riskText);
-      expect(card).toContain(`data-confirmation="${entry.confirmationRequirement}"`);
-      expect(card).toContain(`href="/admin/review/plan/${encodeURIComponent(page.slug)}?action=${entry.value}"`);
-      for (const field of entry.requiredFields) {
-        expect(card).toContain(`<code data-required-field="${field}">${field}</code>`);
-      }
+    expect(result.text).toContain('大模型建议');
+    expect(result.text).toContain('定位可复用的故障处理经验');
+    expect(result.text.match(/<select/g)?.length).toBe(1);
+    expect(result.text.match(/type="submit"/g)?.length).toBe(1);
+    expect(result.text).toContain('拒绝并删除');
+    for (const hidden of ['预检', '门禁', '确认短语', 'name="target"', 'name="reviewNotes"', '更多处理方式']) {
+      expect(result.text).not.toContain(hidden);
     }
-    expect(result.text).not.toContain('method="post"');
-    expect(result.text).not.toContain('name="confirmation"');
-    expect(result.text).not.toContain('value="PROMOTE ');
-    expect(result.text).not.toContain('value="MERGE ');
   });
-});
 
-describe('rare actions', () => {
-  test('Given a draft detail When rendered Then rare actions stay under 更多处理方式 without execution controls', async () => {
-    // given
-    const page = makePage('inbox/rare-actions', { title: '少用操作草稿' });
-    const app = createApp(mockEngine([page]));
+  test('old drafts request a real recommendation once and reuse the bounded cache', async () => {
+    const page = makePage('inbox/model-fallback');
+    let calls = 0;
+    const recommendationProvider: ReviewRecommendationProvider = async () => {
+      calls += 1;
+      return { category: 'knowledge', scenario: '跨项目复用。', reason: '内容是通用方法。', generated_by: 'model' };
+    };
+    const app = createApp(mockEngine([page]), undefined, { recommendationProvider });
 
-    // when
-    const result = await fetchApp(app, `/admin/review/detail/${encodeURIComponent(page.slug)}`);
+    const detail = await fetchApp(app, `/admin/review/detail/${encodeURIComponent(page.slug)}`);
+    expect(detail.status).toBe(200);
+    expect(calls).toBe(0);
+    expect(detail.text).toContain('正在生成模型建议');
+    expect(detail.text).toContain('id="review-category" name="category" disabled');
+    expect(detail.text).toContain('id="classification-submit" type="submit" disabled');
 
-    // then
+    const request = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sourceSlug: page.slug }),
+    } as const;
+    const first = await fetchApp(app, '/admin/api/review/recommendation', request);
+    const second = await fetchApp(app, '/admin/api/review/recommendation', request);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(calls).toBe(1);
+    expect(first.body).toMatchObject({ recommendation: { category: 'knowledge', generated_by: 'model' } });
+  });
+
+  test('model failures return fixed Chinese guidance and never invent a recommendation', async () => {
+    const page = makePage('inbox/model-failure');
+    const app = createApp(mockEngine([page]), undefined, {
+      recommendationProvider: async () => { throw new Error('SECRET_PROVIDER_FAILURE'); },
+    });
+    const result = await fetchApp(app, '/admin/api/review/recommendation', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sourceSlug: page.slug }),
+    });
+    expect(result.status).toBe(503);
+    expect(result.body).toEqual({
+      error: 'recommendation_unavailable',
+      message: '暂时无法生成模型建议，请稍后刷新。',
+    });
+    expect(result.text).not.toContain('SECRET_PROVIDER_FAILURE');
+  });
+
+  test('captured recommendations bypass the provider and extra request fields fail closed', async () => {
+    const page = makePage('inbox/captured-recommendation');
+    page.frontmatter.review_recommendation = {
+      category: 'incident', scenario: '故障复盘。', reason: '包含根因。', generated_by: 'model',
+    };
+    let calls = 0;
+    const app = createApp(mockEngine([page]), undefined, {
+      recommendationProvider: async () => {
+        calls += 1;
+        throw new Error('must not run');
+      },
+    });
+    const result = await fetchApp(app, '/admin/api/review/recommendation', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sourceSlug: page.slug }),
+    });
+    const rejected = await fetchApp(app, '/admin/api/review/recommendation', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sourceSlug: page.slug, target: 'incidents/evil' }),
+    });
     expect(result.status).toBe(200);
-    const rareStart = result.text.indexOf('class="decision-card-section decision-card-section-rare"');
-    expect(rareStart).toBeGreaterThan(-1);
-    const rareSection = result.text.slice(rareStart);
-    expect(rareSection).toContain('更多处理方式');
-    expect([...rareSection.matchAll(/data-action="([^"]+)"/g)].map((match) => match[1])).toEqual([
-      'reject', 'repair', 'cleanup',
-    ]);
+    expect(rejected.status).toBe(400);
+    expect(calls).toBe(0);
+  });
 
-    for (const action of ['reject', 'repair', 'cleanup'] as const) {
-      const entry = REVIEW_ACTION_CATALOG[action];
-      const actionStart = rareSection.indexOf(`data-action="${entry.value}"`);
-      const cardStart = rareSection.lastIndexOf('<a ', actionStart);
-      const cardEnd = rareSection.indexOf('</a>', cardStart);
-      const card = rareSection.slice(cardStart, cardEnd);
+  test('classification cannot bypass the required model recommendation', async () => {
+    const page = makePage('inbox/recommendation-required');
+    const result = await fetchApp(createApp(mockEngine([page])), '/admin/api/review/classify', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sourceSlug: page.slug, category: 'incident' }),
+    });
+    expect(result.status).toBe(409);
+    expect(result.body).toMatchObject({ error: 'model_recommendation_required' });
+  });
 
-      expect(card).toContain('decision-card-rare');
-      expect(card).toContain(entry.label);
-      expect(card).toContain(entry.explanation);
-      expect(card).toContain(entry.example);
-      expect(card).toContain(entry.riskText);
-      expect(card).toContain(`data-confirmation="${entry.confirmationRequirement}"`);
-      expect(card).toContain(`href="/admin/review/plan/${encodeURIComponent(page.slug)}?action=${entry.value}"`);
-      if (entry.requiredFields.length === 0) {
-        expect(card).toContain('无需补充字段');
-      } else {
-        for (const field of entry.requiredFields) {
-          expect(card).toContain(`<code data-required-field="${field}">${field}</code>`);
-        }
-      }
-    }
-    expect(rareSection).not.toContain('method="post"');
-    expect(rareSection).not.toContain('name="confirmation"');
-    expect(rareSection).not.toContain('确认执行');
+  test('classification accepts only source and category, then writes and deletes through the attested writer', async () => {
+    const page = makePage('inbox/classify-incident');
+    page.frontmatter.review_recommendation = {
+      category: 'incident', scenario: '故障复盘。', reason: '包含根因。', generated_by: 'model',
+    };
+    const backed = writerBackedEngine(page, 'incidents/classify-incident');
+    const writes: Array<{ readonly name: string; readonly args: Record<string, unknown> }> = [];
+    const app = createApp(backed.engine, async (name, args) => {
+      writes.push({ name, args });
+      if (name === 'put_page' && args.slug === 'incidents/classify-incident') backed.markTargetWritten();
+      return { ok: true };
+    });
+    const result = await fetchApp(app, '/admin/api/review/classify', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sourceSlug: page.slug, category: 'incident' }),
+    });
+    const rejected = await fetchApp(app, '/admin/api/review/classify', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sourceSlug: page.slug, category: 'incident', targetSlug: 'incidents/evil' }),
+    });
+    expect(result.status).toBe(200);
+    expect(rejected.status).toBe(400);
+    expect(writes.map((write) => write.name)).toEqual(['put_page', 'put_page', 'delete_page']);
+    expect(writes[0]?.args.slug).toBe('incidents/classify-incident');
+    expect(String(writes[0]?.args.content)).not.toContain('review_recommendation');
+  });
+
+  test('reject is a category and writes the audit record before soft deletion', async () => {
+    const page = makePage('inbox/classify-reject');
+    page.frontmatter.review_recommendation = {
+      category: 'reject', scenario: '不应归档。', reason: '没有可复用经验。', generated_by: 'model',
+    };
+    const calls: string[] = [];
+    const result = await fetchApp(createApp(mockEngine([page]), async (name) => {
+      calls.push(name);
+      return { ok: true };
+    }), '/admin/api/review/classify', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sourceSlug: page.slug, category: 'reject' }),
+    });
+    expect(result.status).toBe(200);
+    expect(calls).toEqual(['put_page', 'delete_page']);
   });
 });
 

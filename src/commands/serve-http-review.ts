@@ -21,10 +21,9 @@ import express from 'express';
 import type { Express, NextFunction, Request, Response } from 'express';
 import type { BrainEngine } from '../core/engine.ts';
 import type { Page } from '../core/types.ts';
+import { chat, getChatModel, isAvailable } from '../core/ai/gateway.ts';
 import { browserSafeHtml as escapeHtml, browserSafeReviewError, projectBrowserSafeText, REVIEW_ERROR_TEXT, REVIEW_ERROR_CODE } from '../core/review/browser-safe.ts';
 import {
-  COMMON_REVIEW_ACTIONS,
-  RARE_REVIEW_ACTIONS,
   REVIEW_ACTION_CATALOG,
   type ReviewActionCatalogEntry,
 } from '../core/review/action-catalog.ts';
@@ -41,6 +40,18 @@ import {
   type ReviewTargetType,
   REVIEW_TARGET_PREFIXES,
   REVIEW_TARGET_TYPES,
+  REVIEW_CATEGORY_LABELS,
+  REVIEW_CATEGORIES,
+  ReviewRecommendationCache,
+  buildClassificationAction,
+  parseModelRecommendationJson,
+  parseReviewCategory,
+  parseReviewRecommendation,
+  recommendationCacheKey,
+  type ReviewCategory,
+  type ReviewRecommendation,
+  type ReviewRecommendationInput,
+  type ReviewRecommendationProvider,
 } from '../core/review/index.ts';
 import {
   createLocalWriterSessionFactory,
@@ -65,6 +76,8 @@ export interface MountReviewRoutesOptions {
   /** Inject reviewDate for tests. Defaults to today's YYYY-MM-DD. */
   reviewDate?: () => string;
   reviewSourceId?: string;
+  /** Injected for hermetic tests. Production uses the configured chat model. */
+  recommendationProvider?: ReviewRecommendationProvider;
 }
 
 /**
@@ -85,6 +98,9 @@ export function mountReviewRoutes(
   const expectedAdminOrigin = options.adminOrigin?.origin ?? options.issuerUrl?.origin ?? null;
   const getReviewDate = options.reviewDate ?? (() => new Date().toISOString().slice(0, 10));
   const reviewSourceId = options.reviewSourceId ?? 'default';
+  const recommendationProvider = options.recommendationProvider ?? defaultReviewRecommendationProvider;
+  const recommendationCache = new ReviewRecommendationCache(256);
+  const recommendationInFlight = new Map<string, Promise<ReviewRecommendation>>();
 
   // --- Helpers: build ReviewCoreDeps from engine + writer caller ---
 
@@ -290,6 +306,99 @@ export function mountReviewRoutes(
     }
   });
 
+  // --- API: POST /admin/api/review/recommendation ---
+
+  app.post('/admin/api/review/recommendation', requireAdmin, requireSameOrigin, express.json(), reviewParserError, async (req: Request, res: Response) => {
+    const sourceSlug = parseExactSourceBody(req.body);
+    if (sourceSlug === null) {
+      res.status(400).json({ error: 'invalid_request', message: '请求只能包含 sourceSlug。' });
+      return;
+    }
+    try {
+      const page = await engine.getPage(sourceSlug, { sourceId: reviewSourceId });
+      if (page === null || page.deleted_at || !page.slug.startsWith('inbox/')) {
+        res.status(404).json({ error: 'not_found', message: '找不到该 inbox 草稿。' });
+        return;
+      }
+      const captured = parseReviewRecommendation(page.frontmatter.review_recommendation, page);
+      if (captured !== null) {
+        res.json({ recommendation: projectRecommendation(captured) });
+        return;
+      }
+
+      const key = recommendationCacheKey(page);
+      const cached = recommendationCache.get(key);
+      if (cached !== undefined) {
+        res.json({ recommendation: projectRecommendation(cached) });
+        return;
+      }
+      if (recommendationInFlight.size >= 32 && !recommendationInFlight.has(key)) {
+        res.status(503).json({ error: 'recommendation_busy', message: '模型建议服务繁忙，请稍后刷新。' });
+        return;
+      }
+      let pending = recommendationInFlight.get(key);
+      if (pending === undefined) {
+        pending = recommendationProvider(recommendationInput(page));
+        recommendationInFlight.set(key, pending);
+      }
+      try {
+        const recommendation = parseReviewRecommendation(await pending, page);
+        if (recommendation === null) throw new Error('invalid recommendation');
+        recommendationCache.set(key, recommendation);
+        res.json({ recommendation: projectRecommendation(recommendation) });
+      } finally {
+        recommendationInFlight.delete(key);
+      }
+    } catch {
+      res.status(503).json({ error: 'recommendation_unavailable', message: '暂时无法生成模型建议，请稍后刷新。' });
+    }
+  });
+
+  // --- API: POST /admin/api/review/classify ---
+
+  app.post('/admin/api/review/classify', requireAdmin, requireSameOrigin, express.json(), reviewParserError, reviewUrlEncodedParser, reviewParserError, async (req: Request, res: Response) => {
+    const request = parseClassificationBody(req.body);
+    if (request === null) {
+      respondSimpleError(req, res, 400, { error: 'invalid_request', message: '请求只能包含 sourceSlug 和 category。' });
+      return;
+    }
+    try {
+      const page = await engine.getPage(request.sourceSlug, { sourceId: reviewSourceId });
+      if (page === null || page.deleted_at || !page.slug.startsWith('inbox/')) {
+        respondSimpleError(req, res, 404, { error: 'not_found', message: '找不到该 inbox 草稿。' });
+        return;
+      }
+      const availableRecommendation = parseReviewRecommendation(page.frontmatter.review_recommendation, page)
+        ?? recommendationCache.get(recommendationCacheKey(page));
+      if (availableRecommendation === undefined || availableRecommendation === null) {
+        respondSimpleError(req, res, 409, {
+          error: 'model_recommendation_required',
+          message: '请等待大模型给出分类建议后再确认。',
+        });
+        return;
+      }
+      const action = buildClassificationAction(request.category, pageToReviewSource(page));
+      if (action === null) {
+        respondSimpleError(req, res, 400, { error: 'invalid_category_target', message: '该草稿未绑定项目，无法归为项目经验。' });
+        return;
+      }
+      const writerSession = await createAttestedWriterSession();
+      try {
+        const planResult = await planReview(buildDeps(), { action, reviewDate: getReviewDate() });
+        if (!planResult.ok || planResult.plan === undefined) {
+          respondSummary(req, res, 409, buildGateFailureSummary(planResult, action));
+          return;
+        }
+        const applyResult = await applyReviewPlan(buildDeps(writerSession), planResult.plan);
+        respondSummary(req, res, applyResult.ok ? 200 : 503, buildExecutionSummary(planResult, applyResult));
+      } finally {
+        await writerSession.close();
+      }
+    } catch {
+      respondSimpleError(req, res, 503, { error: REVIEW_ERROR_CODE, message: REVIEW_ERROR_TEXT });
+    }
+  });
+
   // --- API: POST /admin/api/review/plan ---
 
   app.post('/admin/api/review/plan', requireAdmin, requireSameOrigin, express.json(), reviewParserError, reviewUrlEncodedParser, reviewParserError, async (req: Request, res: Response) => {
@@ -394,14 +503,14 @@ export function mountReviewRoutes(
       const bodyContent = drafts.length === 0
         ? renderEmptyState(typeFilter, verificationFilter, staleOnly, projectId)
         : `<table class="review-table">
-          <thead><tr><th>标题</th><th>类型</th><th>验证</th><th>状态</th><th>过期</th><th>风险</th><th>重复</th><th>更新时间</th><th>操作</th></tr></thead>
-          <tbody>${drafts.map((p) => renderDraftRow(p, now)).join('\n')}</tbody>
+          <thead><tr><th>标题</th><th>建议分类</th><th>验证</th><th>更新时间</th><th>操作</th></tr></thead>
+          <tbody>${drafts.map((p) => renderDraftRow(p)).join('\n')}</tbody>
         </table>`;
 
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.send(renderShell('Inbox 草稿审核', `
         <h1>Inbox 草稿审核</h1>
-        <p class="muted">导航式分诊台。选择草稿开始审核；风险与重复状态需在预检后才会显示，当前一律显示「未预检」。</p>
+        <p class="muted">选择一条草稿，只需确认经验分类；“拒绝并删除”也是一个分类。</p>
         ${filterBar}
         ${bodyContent}
         <p><a href="/admin/review/history">查看审核历史</a></p>
@@ -420,7 +529,8 @@ export function mountReviewRoutes(
         return;
       }
       const summaryHtml = renderDetailSummary(page);
-      const decisionCardsHtml = renderDecisionCards(page);
+      const recommendation = parseReviewRecommendation(page.frontmatter.review_recommendation, page);
+      const classificationHtml = renderClassificationReview(page, recommendation);
       const expandableHtml = renderDetailExpandable(page);
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.send(renderShell(`草稿详情：${escapeHtml(slug)}`, `
@@ -429,8 +539,8 @@ export function mountReviewRoutes(
             ${summaryHtml}
           </div>
           <div class="review-main">
-            <h1>草稿详情</h1>
-            ${decisionCardsHtml}
+            <h1>确认经验分类</h1>
+            ${classificationHtml}
             ${expandableHtml}
             <p><a href="/admin/review">返回列表</a></p>
           </div>
@@ -537,6 +647,67 @@ export function pageToReviewSource(page: Page): ReviewSourcePage {
     compiledTruth: page.compiled_truth,
     timeline: page.timeline,
     frontmatter: page.frontmatter,
+  };
+}
+
+export function parseClassificationBody(body: unknown): { readonly sourceSlug: string; readonly category: ReviewCategory } | null {
+  if (!isPlainRecord(body)) return null;
+  if (Object.keys(body).some((key) => key !== 'sourceSlug' && key !== 'category')) return null;
+  if (typeof body.sourceSlug !== 'string' || !body.sourceSlug.startsWith('inbox/')) return null;
+  const category = parseReviewCategory(body.category);
+  return category === null ? null : { sourceSlug: body.sourceSlug, category };
+}
+
+function parseExactSourceBody(body: unknown): string | null {
+  if (!isPlainRecord(body) || Object.keys(body).some((key) => key !== 'sourceSlug')) return null;
+  return typeof body.sourceSlug === 'string' && body.sourceSlug.startsWith('inbox/') ? body.sourceSlug : null;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+async function defaultReviewRecommendationProvider(input: ReviewRecommendationInput): Promise<ReviewRecommendation> {
+  if (!isAvailable('chat')) throw new Error('chat model unavailable');
+  const result = await chat({
+    model: getChatModel(),
+    system: [
+      '你是 GBrain 经验审核分类助手。根据脱敏后的草稿摘要给出真实的分类建议。',
+      '只输出单行 JSON，不要 Markdown。字段必须且只能是 category、scenario、reason、generated_by。',
+      'category 只能是 project、knowledge、runbook、incident、reject。',
+      'scenario 和 reason 使用清晰中文，各不超过 500 字。generated_by 固定为 model。',
+      '只有存在 projectId 时才能选择 project。信息明显不可复用或不应归档时选择 reject。',
+    ].join('\n'),
+    messages: [{ role: 'user', content: JSON.stringify(input) }],
+    maxTokens: 320,
+    abortSignal: AbortSignal.timeout(20_000),
+    cacheSystem: true,
+  });
+  const recommendation = parseModelRecommendationJson(result.text);
+  if (recommendation === null) throw new Error('invalid model recommendation');
+  return recommendation;
+}
+
+function recommendationInput(page: Page): ReviewRecommendationInput {
+  return {
+    title: projectBrowserSafeText(page.title),
+    type: projectBrowserSafeText(page.type),
+    projectId: typeof page.frontmatter.project_id === 'string'
+      ? projectBrowserSafeText(page.frontmatter.project_id)
+      : null,
+    verification: projectBrowserSafeText(page.frontmatter.verification ?? 'unverified'),
+    applicability: projectBrowserSafeText(page.frontmatter.applicability),
+    nonApplicable: projectBrowserSafeText(page.frontmatter.non_applicable),
+    contentPreview: projectBrowserSafeText(page.compiled_truth, 'preview'),
+  };
+}
+
+function projectRecommendation(recommendation: ReviewRecommendation): ReviewRecommendation {
+  return {
+    category: recommendation.category,
+    scenario: projectBrowserSafeText(recommendation.scenario, 'preview').slice(0, 500),
+    reason: projectBrowserSafeText(recommendation.reason, 'preview').slice(0, 500),
+    generated_by: 'model',
   };
 }
 
@@ -969,9 +1140,8 @@ function detailEvidenceStatus(page: Page): string {
 }
 
 function detailSuggestedNext(page: Page): string {
-  return page.frontmatter.verification === 'verified'
-    ? '选择处理方式后查看完整预检'
-    : REVIEW_ACTION_CATALOG.needs_evidence.label;
+  const recommendation = parseReviewRecommendation(page.frontmatter.review_recommendation, page);
+  return recommendation === null ? '正在生成模型建议' : REVIEW_CATEGORY_LABELS[recommendation.category];
 }
 
 function renderDetailSummary(page: Page): string {
@@ -981,12 +1151,76 @@ function renderDetailSummary(page: Page): string {
     <table class="review-table"><tbody>
       <tr><th>草稿类型</th><td>${escapeHtml(detail.type)}</td></tr>
       <tr><th>用途</th><td>${escapeHtml(detail.applicability)}</td></tr>
-      <tr><th>证据充分性</th><td>${detailEvidenceStatus(page)}</td></tr>
-      <tr><th>敏感内容状态</th><td><span class="badge badge-na">未预检</span></td></tr>
-      <tr><th>重复状态</th><td><span class="badge badge-na">未预检</span></td></tr>
-      <tr><th>建议下一步</th><td>${detailSuggestedNext(page)}</td></tr>
+      <tr><th>验证状态</th><td>${detailEvidenceStatus(page)}</td></tr>
+      <tr><th>模型建议</th><td>${detailSuggestedNext(page)}</td></tr>
     </tbody></table>
   </section>`;
+}
+
+function renderClassificationReview(page: Page, recommendation: ReviewRecommendation | null): string {
+  const safeRecommendation = recommendation === null ? null : projectRecommendation(recommendation);
+  const selected = safeRecommendation?.category;
+  const options = REVIEW_CATEGORIES.map((category) => {
+    const selectedAttribute = category === selected ? ' selected' : '';
+    return `<option value="${category}"${selectedAttribute}>${escapeHtml(REVIEW_CATEGORY_LABELS[category])}</option>`;
+  }).join('');
+  const sourceSlug = projectBrowserSafeText(page.slug);
+  const disabled = safeRecommendation === null ? ' disabled' : '';
+  const recommendationStatus = safeRecommendation === null ? '正在生成模型建议…' : '大模型建议';
+  const scenario = safeRecommendation?.scenario ?? '';
+  const reason = safeRecommendation?.reason ?? '';
+  const script = safeRecommendation === null ? renderRecommendationLoader(page.slug) : '';
+  return `<section class="classification-review" aria-labelledby="classification-title">
+    <div class="recommendation-panel">
+      <div class="recommendation-kicker" id="recommendation-status">${recommendationStatus}</div>
+      <h2 id="classification-title">建议归为：<span id="recommendation-label">${selected === undefined ? '加载中' : escapeHtml(REVIEW_CATEGORY_LABELS[selected])}</span></h2>
+      <p><strong>使用场景：</strong><span id="recommendation-scenario">${escapeHtml(scenario, 'preview')}</span></p>
+      <p><strong>推荐理由：</strong><span id="recommendation-reason">${escapeHtml(reason, 'preview')}</span></p>
+      <p class="recommendation-error" id="recommendation-error" role="alert"></p>
+    </div>
+    <form method="post" action="/admin/api/review/classify" class="classification-form">
+      <input type="hidden" name="sourceSlug" value="${escapeHtml(sourceSlug)}" />
+      <label for="review-category">经验分类</label>
+      <select id="review-category" name="category"${disabled}>${options}</select>
+      <button id="classification-submit" type="submit"${disabled}>${selected === 'reject' ? '确认并删除' : '确认分类'}</button>
+    </form>
+  </section>${script}`;
+}
+
+function renderRecommendationLoader(sourceSlug: string): string {
+  const encodedSlug = encodeURIComponent(sourceSlug);
+  return `<script>
+  (() => {
+    const sourceSlug = decodeURIComponent(${JSON.stringify(encodedSlug)});
+    const select = document.getElementById('review-category');
+    const submit = document.getElementById('classification-submit');
+    const error = document.getElementById('recommendation-error');
+    fetch('/admin/api/review/recommendation', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sourceSlug })
+    }).then(async (response) => {
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.message || '暂时无法生成模型建议');
+      const recommendation = payload.recommendation;
+      document.getElementById('recommendation-status').textContent = '大模型建议';
+      document.getElementById('recommendation-label').textContent = select.querySelector('option[value="' + recommendation.category + '"]').textContent;
+      document.getElementById('recommendation-scenario').textContent = recommendation.scenario;
+      document.getElementById('recommendation-reason').textContent = recommendation.reason;
+      select.value = recommendation.category;
+      select.disabled = false;
+      submit.disabled = false;
+      submit.textContent = recommendation.category === 'reject' ? '确认并删除' : '确认分类';
+    }).catch(() => {
+      document.getElementById('recommendation-status').textContent = '模型建议不可用';
+      error.textContent = '暂时无法生成模型建议，请稍后刷新。';
+    });
+    select.addEventListener('change', () => {
+      submit.textContent = select.value === 'reject' ? '确认并删除' : '确认分类';
+    });
+  })();
+  </script>`;
 }
 
 function renderDetailExpandable(page: Page): string {
@@ -1017,49 +1251,6 @@ function renderDetailExpandable(page: Page): string {
       <pre>${escapeHtml(detail.eventPreview, 'preview')}</pre>
     </details>
   </section>`;
-}
-
-function renderDecisionCards(page: Page): string {
-  const sourceSlug = projectBrowserSafeText(page.slug);
-  const commonCards = COMMON_REVIEW_ACTIONS
-    .map((action) => renderDecisionCard(sourceSlug, REVIEW_ACTION_CATALOG[action]))
-    .join('\n');
-  const rareCards = RARE_REVIEW_ACTIONS
-    .map((action) => renderDecisionCard(sourceSlug, REVIEW_ACTION_CATALOG[action]))
-    .join('\n');
-  return `<section class="decision-card-section decision-card-section-primary" aria-labelledby="common-actions-title">
-    <h2 id="common-actions-title">常用处理</h2>
-    <p class="muted">选择后进入后续目标与预检流程；本页不会执行写入。</p>
-    <div class="decision-card-grid decision-card-grid-primary">${commonCards}</div>
-  </section>
-  <section class="decision-card-section decision-card-section-rare" aria-labelledby="rare-actions-title">
-    <h2 id="rare-actions-title">更多处理方式</h2>
-    <p class="muted">仅在常用处理不适用时选择，仍需通过后续预检。</p>
-    <div class="decision-card-grid decision-card-grid-rare">${rareCards}</div>
-  </section>`;
-}
-
-function renderDecisionCard(sourceSlug: string, entry: ReviewActionCatalogEntry): string {
-  const cardClass = entry.group === 'common' ? 'primary' : 'rare';
-  const actionHref = `/admin/review/plan/${encodeURIComponent(sourceSlug)}?action=${encodeURIComponent(entry.value)}`;
-  const confirmationHint = entry.confirmationRequirement === 'none'
-    ? '无需输入确认短语'
-    : '需要人工输入确认短语';
-  return `<a class="decision-card decision-card-${cardClass}" data-action="${escapeHtml(entry.value)}" data-group="${escapeHtml(entry.group)}" data-confirmation="${escapeHtml(entry.confirmationRequirement)}" href="${escapeHtml(actionHref)}">
-    <h3>${escapeHtml(entry.label)}</h3>
-    <dl class="decision-card-details">
-      <div><dt>处理结果</dt><dd>${escapeHtml(entry.explanation)}</dd></div>
-      <div><dt>何时使用</dt><dd>${escapeHtml(entry.example)}</dd></div>
-      <div><dt>需要提供</dt><dd>${renderRequiredFields(entry.requiredFields)}</dd></div>
-      <div class="decision-card-risk"><dt>风险提示</dt><dd>${escapeHtml(entry.riskText)}</dd></div>
-      <div><dt>确认要求</dt><dd>${confirmationHint}</dd></div>
-    </dl>
-  </a>`;
-}
-
-function renderRequiredFields(fields: readonly string[]): string {
-  if (fields.length === 0) return '无需补充字段';
-  return fields.map((field) => `<code data-required-field="${escapeHtml(field)}">${escapeHtml(field)}</code>`).join('、');
 }
 
 function projectDetailJson(page: Page): Record<string, unknown> {
@@ -1110,10 +1301,8 @@ function renderEmptyState(typeFilter: string | undefined, verificationFilter: st
   return `<div class="empty-state"><p>暂无 inbox 草稿。</p><p>新草稿捕获后会出现在这里。</p></div>`;
 }
 
-function renderDraftRow(p: Page, now: number): string {
-  const stale = (now - p.updated_at.getTime()) > STALE_DAYS * 24 * 60 * 60 * 1000;
+function renderDraftRow(p: Page): string {
   const verification = String(p.frontmatter.verification ?? 'unverified');
-  const status = String(p.frontmatter.status ?? 'draft');
   const updatedDate = p.updated_at.toISOString().slice(0, 10);
   const detailHref = `/admin/review/detail/${encodeURIComponent(p.slug)}`;
   const projectIdRaw = typeof p.frontmatter.project_id === 'string' ? p.frontmatter.project_id : '';
@@ -1121,16 +1310,12 @@ function renderDraftRow(p: Page, now: number): string {
   const verificationBadge = verification === 'verified'
     ? `<span class="badge badge-verified">${escapeHtml(verification)}</span>`
     : `<span class="badge badge-unverified">${escapeHtml(verification)}</span>`;
-  const statusBadge = `<span class="badge badge-draft">${escapeHtml(status)}</span>`;
-  const staleBadge = stale ? `<span class="badge badge-stale">是</span>` : `<span>否</span>`;
+  const recommendation = parseReviewRecommendation(p.frontmatter.review_recommendation, p);
+  const recommendationLabel = recommendation === null ? '待生成' : REVIEW_CATEGORY_LABELS[recommendation.category];
   return `<tr>
   <td data-label="草稿"><div>${escapeHtml(p.title)}</div><div class="slug-mono">${escapeHtml(p.slug)}</div>${projectIdLine}</td>
-  <td data-label="类型">${escapeHtml(p.type)}</td>
+  <td data-label="建议分类">${escapeHtml(recommendationLabel)}</td>
   <td data-label="验证">${verificationBadge}</td>
-  <td data-label="状态">${statusBadge}</td>
-  <td data-label="过期">${staleBadge}</td>
-  <td data-label="风险"><span class="badge badge-na">未预检</span></td>
-  <td data-label="重复"><span class="badge badge-na">未预检</span></td>
   <td class="slug-mono" data-label="更新时间">${escapeHtml(updatedDate)}</td>
   <td data-label="操作"><a class="action-link" href="${detailHref}">开始审核</a></td>
 </tr>`;
