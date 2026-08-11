@@ -19,15 +19,19 @@ these values in the repository or client installer inputs.
 
 The checked-in systemd/env templates and read-only verification script are in
 [`deploy/`](../../deploy/). `deploy/scripts/install-client-assets.sh` and
-`gbrain install-client` installs rules, skills, a read-only Codex
-`SessionStart` project Hook, and the Codex experience closeout guard. The
-project Hook checks only the session `cwd` for
-`.gbrain-project.yaml`; it does not walk parents, call MCP, or create an ID.
-The experience guard observes only bounded metadata around `UserPromptSubmit`,
-`PostToolUse`, and `Stop`; it never calls MCP or writes GBrain. After a full
-experience draft is shown, any user message within five minutes cancels
-automatic approval. With no response, the Agent proceeds with the locked
-`inbox/` draft and verifies it with `get_page`.
+`gbrain install-client` installs rules, skills, and project/experience guards
+for both OpenCode and Codex. Each project guard checks only the session `cwd`;
+it does not walk parents or call MCP. When unbound, it emits a bootstrap task
+with one atomically reused local creation key so concurrent sessions converge
+on one project registry. Both clients share the Python experience state machine,
+which observes only bounded metadata and never calls MCP or writes GBrain.
+Nontrivial turns arm separate one-time recall and closeout tokens. An isolated
+Recall Worker owns read-only retrieval; an isolated Closeout Worker owns
+deduplication, capture, recoverable server-rejection retries, and read-back
+verification. Workers submit explicit cross-session receipts and return only
+bounded envelopes to the parent. Codex enforces both phases through `Stop`;
+OpenCode adapts `chat.message`, `tool.execute.after`, and `session.idle`,
+resuming the same session when a receipt is missing.
 Client credentials are not created or distributed. Client reachability is
 controlled by the cloud firewall allowlist.
 

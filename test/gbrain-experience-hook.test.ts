@@ -12,7 +12,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { runInstallClient, type InstallClientDeps } from '../src/commands/gbrain-client-installer.ts';
 
 function tempRoot(): string {
@@ -61,7 +61,144 @@ function event(eventName: string, extra: Record<string, unknown> = {}): Record<s
   };
 }
 
+function tokenFrom(value: unknown, marker: 'RECALL' | 'CLOSEOUT'): string {
+  const token = JSON.stringify(value).match(
+    new RegExp(`GBRAIN_EXPERIENCE_${marker}_WORKER_TOKEN=([A-Za-z0-9_-]+)`),
+  )?.[1];
+  if (!token) throw new Error(`missing ${marker.toLowerCase()} worker token`);
+  return token;
+}
+
+function receipt(script: string, stateDir: string, args: string[]) {
+  return spawnSync('python3', [script, 'receipt', ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, GBRAIN_EXPERIENCE_HOOK_STATE_DIR: stateDir },
+  });
+}
+
+function receiptAsync(script: string, stateDir: string, args: string[]): Promise<{ status: number | null; stdout: string }> {
+  return new Promise((resolve) => {
+    const child = spawn('python3', [script, 'receipt', ...args], {
+      env: { ...process.env, GBRAIN_EXPERIENCE_HOOK_STATE_DIR: stateDir },
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    let stdout = '';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => { stdout += chunk; });
+    child.on('close', (status) => resolve({ status, stdout }));
+  });
+}
+
+function completeRecall(script: string, stateDir: string, token: string, constraints: string[] = []) {
+  return receipt(script, stateDir, [
+    '--token', token,
+    '--classification', constraints.length > 0 ? 'direct' : 'none',
+    '--constraints-json', JSON.stringify(constraints),
+  ]);
+}
+
+function completeCloseout(
+  script: string,
+  stateDir: string,
+  token: string,
+  outcome: 'captured' | 'no_candidate' = 'no_candidate',
+  slug?: string,
+) {
+  return receipt(script, stateDir, [
+    '--token', token,
+    '--outcome', outcome,
+    '--verified',
+    ...(slug ? ['--slug', slug] : []),
+  ]);
+}
+
 describe('Codex GBrain experience guard', () => {
+  test('Given a nontrivial prompt When the turn starts Then recall and closeout are armed for isolated workers', async () => {
+    const root = tempRoot();
+    try {
+      expect(await runInstallClient(['--json'], deps(root))).toBe(0);
+      const script = join(root, 'codex', 'hooks', 'gbrain-experience-guard.py');
+      const stateDir = join(root, 'state');
+
+      const started = runHook(script, stateDir, event('UserPromptSubmit', { prompt: '请修改代码并完成部署配置' }));
+      const context = JSON.stringify(started.json);
+      expect(context).toContain('GBRAIN_EXPERIENCE_RECALL_REQUIRED');
+      expect(context).toContain('GBRAIN_EXPERIENCE_RECALL_WORKER_TOKEN=gbr_');
+      expect(context).toContain('GBRAIN_EXPERIENCE_CLOSEOUT_REQUIRED');
+      expect(context).toContain('GBRAIN_EXPERIENCE_CLOSEOUT_WORKER_TOKEN=gbc_');
+      expect(context).toContain('主 Agent 全程等待');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('Given explicit cross-turn worker receipts When the parent stops Then the first Stop releases without child tool events', async () => {
+    const root = tempRoot();
+    try {
+      expect(await runInstallClient(['--json'], deps(root))).toBe(0);
+      const script = join(root, 'codex', 'hooks', 'gbrain-experience-guard.py');
+      const stateDir = join(root, 'state');
+      const started = runHook(script, stateDir, event('UserPromptSubmit', { prompt: '请修改代码并完成部署配置' }));
+      const recallToken = tokenFrom(started.json, 'RECALL');
+      const closeoutToken = tokenFrom(started.json, 'CLOSEOUT');
+      expect(JSON.stringify(started.json)).toContain(`python3 ${script} receipt --token ${recallToken}`);
+      expect(JSON.stringify(started.json)).toContain(`python3 ${script} receipt --token ${closeoutToken}`);
+
+      const workerEvent = (eventName: string, extra: Record<string, unknown> = {}) => event(eventName, {
+        session_id: 'session-worker',
+        turn_id: 'turn-worker',
+        ...extra,
+      });
+      const workerStarted = runHook(script, stateDir, workerEvent('UserPromptSubmit', {
+        prompt: `GBRAIN_EXPERIENCE_CLOSEOUT_WORKER_TOKEN=${closeoutToken}\n完成经验收尾。`,
+      }));
+      expect(JSON.stringify(workerStarted.json)).toContain('GBRAIN_EXPERIENCE_CLOSEOUT_WORKER');
+      const recallReceipt = completeRecall(script, stateDir, recallToken, ['使用显式跨 turn receipt']);
+      expect(recallReceipt.status).toBe(0);
+      expect(JSON.parse(recallReceipt.stdout)).toEqual({
+        phase: 'recall', classification: 'direct', constraints: ['使用显式跨 turn receipt'], receipt_status: 'accepted',
+      });
+      const closeoutReceipt = completeCloseout(
+        script, stateDir, closeoutToken, 'captured', 'inbox/isolated-capture',
+      );
+      expect(closeoutReceipt.status).toBe(0);
+      expect(JSON.parse(closeoutReceipt.stdout)).toEqual({
+        phase: 'closeout', outcome: 'captured', slug: 'inbox/isolated-capture', verified: true,
+        receipt_status: 'accepted', blocker_code: null,
+      });
+      expect(runHook(script, stateDir, workerEvent('Stop')).json.decision).toBeUndefined();
+
+      const released = runHook(script, stateDir, event('Stop', { stop_hook_active: false }));
+      expect(released.json.decision).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('Given a generic prompt with a write tool When the tool completes Then isolated closeout is armed before Stop', async () => {
+    const root = tempRoot();
+    try {
+      expect(await runInstallClient(['--json'], deps(root))).toBe(0);
+      const script = join(root, 'codex', 'hooks', 'gbrain-experience-guard.py');
+      const stateDir = join(root, 'state');
+      expect(runHook(script, stateDir, event('UserPromptSubmit', { prompt: 'please take care of it' })).json).toEqual({});
+
+      const tool = runHook(script, stateDir, event('PostToolUse', {
+        tool_name: 'apply_patch', tool_use_id: 'edit', tool_input: { command: 'patch' }, tool_response: 'Done!',
+      }));
+      const context = JSON.stringify(tool.json);
+      expect(context).toContain('GBRAIN_EXPERIENCE_CLOSEOUT_REQUIRED');
+      const token = tokenFrom(tool.json, 'CLOSEOUT');
+      expect(context).toContain(`python3 ${script} receipt --token ${token}`);
+
+      const completed = completeCloseout(script, stateDir, token);
+      expect(completed.status).toBe(0);
+      expect(runHook(script, stateDir, event('Stop', { stop_hook_active: false })).json.decision).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('enforce blocks a nontrivial turn until a valid no-candidate receipt is recorded', async () => {
     const root = tempRoot();
     try {
@@ -76,16 +213,15 @@ describe('Codex GBrain experience guard', () => {
       }));
       expect(stopped.status).toBe(0);
       expect(stopped.json.decision).toBe('block');
-      expect(stopped.json.reason).toContain('经验收尾检查');
-      const token = String(stopped.json.reason).match(/--token ([A-Za-z0-9_-]+)/)?.[1];
-      expect(token).toBeTruthy();
+      expect(stopped.json.reason).toContain('GBRAIN_EXPERIENCE_RECALL_REQUIRED');
+      expect(stopped.json.reason).toContain('GBRAIN_EXPERIENCE_CLOSEOUT_REQUIRED');
+      const recallToken = tokenFrom(stopped.json, 'RECALL');
+      const closeoutToken = tokenFrom(stopped.json, 'CLOSEOUT');
 
-      const receipt = spawnSync('python3', [script, 'receipt', '--token', token!, '--outcome', 'no_candidate'], {
-        encoding: 'utf8',
-        env: { ...process.env, GBRAIN_EXPERIENCE_HOOK_STATE_DIR: stateDir },
-      });
-      expect(receipt.status).toBe(0);
-      expect(JSON.parse(receipt.stdout).ok).toBe(true);
+      expect(completeRecall(script, stateDir, recallToken).status).toBe(0);
+      const completed = completeCloseout(script, stateDir, closeoutToken);
+      expect(completed.status).toBe(0);
+      expect(JSON.parse(completed.stdout).receipt_status).toBe('accepted');
 
       const released = runHook(script, stateDir, event('Stop', {
         stop_hook_active: true,
@@ -98,7 +234,7 @@ describe('Codex GBrain experience guard', () => {
     }
   });
 
-  test('captured receipt is released only after matching successful put and get events', async () => {
+  test('captured receipt requires an explicit verified claim and does not depend on parent-turn MCP events', async () => {
     const root = tempRoot();
     try {
       expect(await runInstallClient(['--json'], deps(root))).toBe(0);
@@ -108,22 +244,64 @@ describe('Codex GBrain experience guard', () => {
         tool_name: 'apply_patch', tool_use_id: 'edit', tool_input: { command: 'patch' }, tool_response: 'Done!',
       }));
       const first = runHook(script, stateDir, event('Stop', { stop_hook_active: false, last_assistant_message: '收尾。' }));
-      const token = String(first.json.reason).match(/--token ([A-Za-z0-9_-]+)/)?.[1];
-      expect(token).toBeTruthy();
-      for (const [tool_name, tool_use_id] of [
-        ['mcp__gbrain__put_page', 'put'],
-        ['mcp__gbrain__get_page', 'get'],
-      ]) {
-        runHook(script, stateDir, event('PostToolUse', {
-          tool_name, tool_use_id, tool_input: { slug: 'inbox/verified-capture' }, tool_response: { isError: false },
-        }));
-      }
-      const receipt = spawnSync('python3', [
-        script, 'receipt', '--token', token!, '--outcome', 'captured', '--slug', 'inbox/verified-capture',
-      ], { encoding: 'utf8', env: { ...process.env, GBRAIN_EXPERIENCE_HOOK_STATE_DIR: stateDir } });
-      expect(receipt.status).toBe(0);
+      const token = tokenFrom(first.json, 'CLOSEOUT');
+      const unverified = receipt(script, stateDir, [
+        '--token', token, '--outcome', 'captured', '--slug', 'inbox/verified-capture',
+      ]);
+      expect(unverified.status).toBe(1);
+      expect(JSON.parse(unverified.stdout).error).toContain('verified inbox slug');
+      const completed = completeCloseout(script, stateDir, token, 'captured', 'inbox/verified-capture');
+      expect(completed.status).toBe(0);
       const released = runHook(script, stateDir, event('Stop', { stop_hook_active: true, last_assistant_message: '已验证写入。' }));
       expect(released.json.decision).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('phase tokens reject mixed, oversized, incomplete, and replayed envelopes without consuming a valid retry', async () => {
+    const root = tempRoot();
+    try {
+      expect(await runInstallClient(['--json'], deps(root))).toBe(0);
+      const script = join(root, 'codex', 'hooks', 'gbrain-experience-guard.py');
+      const stateDir = join(root, 'state');
+      const started = runHook(script, stateDir, event('UserPromptSubmit', { prompt: '请实现并验证功能' }));
+      const recallToken = tokenFrom(started.json, 'RECALL');
+      const closeoutToken = tokenFrom(started.json, 'CLOSEOUT');
+
+      const mixed = receipt(script, stateDir, [
+        '--token', recallToken, '--outcome', 'no_candidate', '--verified',
+      ]);
+      expect(mixed.status).toBe(1);
+      expect(JSON.parse(mixed.stdout).error).toBe('phase_argument_mismatch');
+
+      const oversized = receipt(script, stateDir, [
+        '--token', recallToken, '--classification', 'direct',
+        '--constraints-json', JSON.stringify(['one', 'two', 'three', 'four']),
+      ]);
+      expect(oversized.status).toBe(1);
+      expect(JSON.parse(oversized.stdout).error).toContain('at most three');
+      expect(completeRecall(script, stateDir, recallToken).status).toBe(0);
+      expect(completeRecall(script, stateDir, recallToken).status).toBe(1);
+
+      const incompleteBlocked = receipt(script, stateDir, [
+        '--token', closeoutToken, '--outcome', 'blocked',
+      ]);
+      expect(incompleteBlocked.status).toBe(1);
+      expect(JSON.parse(incompleteBlocked.stdout).error).toContain('blocker code');
+      expect(completeCloseout(script, stateDir, closeoutToken).status).toBe(0);
+      expect(runHook(script, stateDir, event('Stop')).json.decision).toBeUndefined();
+
+      const raced = runHook(script, stateDir, event('UserPromptSubmit', {
+        session_id: 'session-race', turn_id: 'turn-race', prompt: '请实现并验证另一个功能',
+      }));
+      const racedToken = tokenFrom(raced.json, 'RECALL');
+      const raceArgs = ['--token', racedToken, '--classification', 'none', '--constraints-json', '[]'];
+      const results = await Promise.all(Array.from({ length: 4 }, () => (
+        receiptAsync(script, stateDir, raceArgs)
+      )));
+      expect(results.filter((result) => result.status === 0)).toHaveLength(1);
+      expect(results.filter((result) => result.status === 1)).toHaveLength(3);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -197,6 +375,7 @@ describe('Codex GBrain experience guard', () => {
       expect(stored).not.toContain(secretPrompt);
       expect(stored).not.toContain(secretCommand);
       expect(stored).not.toContain('do-not-store');
+      expect(stored).not.toContain('session-test');
       for (const file of files) expect(statSync(join(stateDir, file)).mode & 0o777).toBe(0o600);
     } finally {
       rmSync(root, { recursive: true, force: true });

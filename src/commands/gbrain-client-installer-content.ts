@@ -5,19 +5,21 @@ export const GBRAIN_CLIENT_RULES = `${GBRAIN_RULES_BLOCK_START}
 # GBrain 客户端规则
 
 - 面向用户的规则、说明、标题、总结和审核提示默认使用中文。命令、代码、路径、协议字段、错误原文和必要的专有名词可以保留英文。
-- 收到非平凡任务时，先通过 GBrain MCP 执行只读召回，并把结果分为“直接适用”“部分适用”或“不适用”。非平凡任务包括多步骤工作、代码或配置修改、部署迁移、故障诊断、安全隐私决策，以及影响后续工作的客户或项目规则。
+- 收到非平凡任务时，主 Agent 不得直接调用 GBrain MCP 执行经验召回；必须派发独立 Recall Worker，由 Worker 完成只读召回并把结果分为“直接适用”“部分适用”或“不适用”。非平凡任务包括多步骤工作、代码或配置修改、部署迁移、故障诊断、安全隐私决策，以及影响后续工作的客户或项目规则。
 - 关键执行失败只触发只读故障召回，不等于自动写入。预期失败测试、正常否定探测、无匹配、立即修正的命令错误，以及一次重试即恢复且无复用价值的瞬时故障，不计入需要总结的失败。
 - 相同或高度相似的失败场景第 2 次独立出现时，停止盲目重试并整理错误总结。未改变条件的连续重试只算一次；跨任务、跨运行，或经过有效干预后再次发生，才增加发生次数。
-- 客户或项目规则、任务或里程碑总结、失败或根因总结，以及新增或实质更新的知识、runbook 和决策记录，完成搜索去重、脱敏和固定模板整理后，直接通过 MCP 写入 \`inbox/\` 草稿；不需要写入前人工审核。
-- 写入前向用户简要说明预分类和目标 slug，但不要等待用户确认、创建倒计时或恢复会话。随后立即调用 \`put_page\`，再用 \`get_page\` 验证写入结果。
+- 客户或项目规则、任务或里程碑总结、失败或根因总结，以及新增或实质更新的知识、runbook 和决策记录，由独立 Closeout Worker 完成搜索去重、脱敏、固定模板整理和 \`inbox/\` 写入；不需要写入前人工审核。
+- Closeout Worker 直接调用 \`put_page\`，再用 \`get_page\` 验证。遇到模板、字段、项目绑定或去重等可修复服务端拒绝时，Worker 必须在自己的上下文内修正并重试；主 Agent 继续等待，不接收中间错误和修改过程。
 - 每个新草稿必须由大模型写入 \`review_recommendation\`，包含建议分类、中文使用场景、中文理由和 \`generated_by: model\`；不得要求用户预先选择分类。人工审核只确认或修改分类，“拒绝并删除”也是分类之一。
 - 写入后的正文视为锁定。后续人工审核只调整分类、标签、目标目录、slug 和审核状态；正文、证据、适用条件、不适用条件或验证结果有问题时，拒绝或退回草稿，重新生成。
 - 只通过连接的 GBrain MCP 写入 \`inbox/\` 草稿。写入前搜索已有页面，优先更新相同经验，避免重复创建。不得把原始会话、密集日志、令牌、密码、私钥、个人标识符或未脱敏的非回环 IP 地址写入 GBrain。
 - 使用 GBrain MCP 的 \`list_pages\` 和 \`get_page\` 检查草稿。晋升只能在认证的管理员审核界面完成，匿名 MCP 客户端不得晋升。
-- Codex 默认安装独立的经验收尾守卫，在任务结束前要求 Agent 完成经验收尾。守卫不调用 MCP、不写 GBrain、不读取 transcript、不创建本地经验队列；实际召回、去重、直接写入和验证仍由 Agent 按本规则执行。服务端 inbox 草稿使用 \`status: draft\` + \`verification: unverified\`；写入仍要求脱敏 \`source_refs\` 和完整、非占位的验证环境/方法/预期结果/实际结果/时间。**例外：用户明确给出的全局或项目指令本身是权威事实，可以作为经验候选。** 该候选必须标记 \`authority: user_explicit_instruction\`、\`instruction_scope: global|project\`，并以匹配范围的脱敏 \`source_refs: [user_instruction:global:<摘要>|user_instruction:project:<摘要>]\` 指向该明确指令；它不需要伪造测试验证证据。
+- OpenCode 与 Codex 默认安装双阶段经验守卫：任务开始时要求 Recall Worker，任务结束前要求 Closeout Worker。守卫不调用 MCP、不写 GBrain、不读取 transcript、不创建本地经验队列；Worker 通过不可混用的一次性 token 和显式 receipt 跨 session/turn 完成阶段。服务端 inbox 草稿使用 \`status: draft\` + \`verification: unverified\`；写入仍要求脱敏 \`source_refs\` 和完整、非占位的验证环境/方法/预期结果/实际结果/时间。**例外：用户明确给出的全局或项目指令本身是权威事实，可以作为经验候选。** 该候选必须标记 \`authority: user_explicit_instruction\`、\`instruction_scope: global|project\`，并以匹配范围的脱敏 \`source_refs: [user_instruction:global:<摘要>|user_instruction:project:<摘要>]\` 指向该明确指令；它不需要伪造测试验证证据。
 - 客户端网络访问由云防火墙白名单控制；安装器不创建或分发凭据。
-- Codex \`SessionStart\` Hook 只检查会话 \`cwd\` 直接目录中的 \`.gbrain-project.yaml\` 或显式提交的 \`.gbrain/project.yaml\`，不调用 MCP，也不创建项目 ID。本地标记缺失但发现仓库身份记录时，提示先通过 MCP 精确校验并绑定；否则只警告并继续会话。该 Hook 只检查项目身份，不参与经验采集或审核。
-- 进入项目目录或开始项目任务时，只读检查祖先目录中的 \`.gbrain-project.yaml\` 和仓库根目录的 \`.gbrain/project.yaml\`，并运行 \`gbrain project current --json\` 与 \`gbrain project match --json\`；普通召回和一次性任务不得因此创建项目 ID。项目身份只认规范 \`project_id\`，不使用 Git、仓库路径、目录名、项目名称、别名或语义相似度匹配；只读取仓库中明确提交的规范 ID 记录。
+- OpenCode 首消息守卫与 Codex \`SessionStart\` Hook 只检查会话 \`cwd\` 直接目录中的 \`.gbrain-project.yaml\` 或显式提交的 \`.gbrain/project.yaml\`，不直接调用 MCP。缺少两种标记时会注入 \`GBRAIN_PROJECT_BOOTSTRAP_REQUIRED\` 和本机原子复用的一小时 \`GBRAIN_PROJECT_BOOTSTRAP_CREATION_KEY\` lease；主 Agent 必须立即派发一个 prompt 含 \`GBRAIN_PROJECT_BOOTSTRAP_WORKER\` 的独立子 Agent，由子 Agent 使用该协调键调用 \`ensure_project\`，禁止自行生成新键，再执行 \`bind --resolved\`、读取登记页验证并运行 Hook 提供的 \`complete-bootstrap\` 清理命令。bootstrap 子 Agent 不得继续派生 bootstrap 子 Agent。
+- 收到 \`GBRAIN_EXPERIENCE_RECALL_REQUIRED\` 时，主 Agent 必须立即派发独立 Recall Worker，并把 \`GBRAIN_EXPERIENCE_RECALL_WORKER_TOKEN\` 原样放入 Worker prompt。主 Agent 等待只含分类、最多三条脱敏约束和 receipt 状态的最小 envelope 后再继续任务；不得接收正文、搜索列表、模板或日志。
+- 收到 \`GBRAIN_EXPERIENCE_CLOSEOUT_REQUIRED\` 时，主 Agent 必须在最终答复前派发独立 Closeout Worker，并把 \`GBRAIN_EXPERIENCE_CLOSEOUT_WORKER_TOKEN\` 原样放入 Worker prompt。主 Agent 只传递脱敏后的任务目标、变更、失败和验证证据；Worker 完成完整经验事务和 receipt 后，主 Agent 才输出最终答复。带有任一 worker token 的 Worker 不得再次派生同类 Worker。
+- 进入项目目录或开始项目任务时，只读检查祖先目录中的 \`.gbrain-project.yaml\` 和仓库根目录的 \`.gbrain/project.yaml\`，并运行 \`gbrain project current --json\` 与 \`gbrain project match --json\`。项目身份只认规范 \`project_id\`，不使用 Git、仓库路径、目录名、项目名称、别名或语义相似度匹配；只读取仓库中明确提交的规范 ID 记录。
 - 准备写入项目经验时：先运行 \`gbrain project match --json\`。如果返回仓库记录中的 \`project_id\`，就调用 MCP \`match_project({project_id})\` 精确验证，成功后运行 \`gbrain project bind <project_id> --resolved --json\`。如果登记页不存在，调用 \`ensure_project({project_id})\` 使用同一 ID 创建。只有本地和仓库都没有 ID 时，才为本次创建生成随机 \`creation_key\`，调用 \`ensure_project({creation_key})\`，再绑定本地标记。项目身份记录只保存规范 ID，不保存密码、Token 或私钥；不得通过远程 \`put_page\` 创建或修改项目登记页。
 - 写入项目经验前必须取得规范 ID，并确认当前 source 存在 \`projects/<project_id>/index\`；草稿写入 \`project_binding: bound\` 和相同 \`project_id\`。本地标记写入失败时，报告 \`project_marker_write_failed\`，保留内存中的 \`project_id\` 并继续当前任务，不创建离线队列；下一次会话不得根据 Git 或名称猜测恢复。
 
@@ -38,9 +40,22 @@ description: 将经过验证和脱敏的持久经验同步写入 GBrain inbox �
 只使用已连接的 GBrain MCP 操作。不要安装本地 GBrain CLI，不要创建本地
 离线队列，也不要索取客户端凭据作为降级方案。
 
+## 零、隔离执行契约
+
+主 Agent 不得直接执行经验召回、去重、模板整理、写入或回读验证。收到
+\`GBRAIN_EXPERIENCE_RECALL_REQUIRED\` 或 \`GBRAIN_EXPERIENCE_CLOSEOUT_REQUIRED\`
+时，必须把对应 token 原样交给独立 Worker 并等待最小结构化 envelope。
+
+带有 Recall Worker token 的 Worker 只执行只读召回。带有 Closeout Worker token
+的 Worker 拥有完整经验事务：召回、去重、模板整理、写入、可修复拒绝的修正与重试、
+回读验证和 receipt。Worker 不得再派生同类 Worker。
+
+主 Agent 只能接收固定 envelope。不得把页面正文、搜索结果列表、模板、工具输出、
+服务端原始错误或重试轨迹返回主会话。
+
 ## 一、区分召回与写入
 
-非平凡任务开始时，先调用 \`search\` 或 \`query\`，再对相关候选调用
+Recall Worker 在非平凡任务开始时调用 \`search\` 或 \`query\`，再对相关候选调用
 \`get_page\`。把结果明确分为“直接适用”“部分适用”或“不适用”。
 
 非平凡任务包括：
@@ -235,7 +250,7 @@ review_recommendation 也必须由当前大模型在采集时给出，不能要�
 
 ## 六、同步写入
 
-以下内容完成搜索去重、自动脱敏和固定模板整理后，直接同步写入：
+Closeout Worker 对以下内容完成搜索去重、自动脱敏和固定模板整理后，直接同步写入：
 
 - 客户要求、项目规则、偏好和约束；
 - 任务总结和项目里程碑；
@@ -244,15 +259,16 @@ review_recommendation 也必须由当前大模型在采集时给出，不能要�
 
 写入规则：
 
-- 向用户简要说明预分类和目标 \`inbox/\` slug，但不等待确认或审核；
-- 立即调用 \`put_page\` 写入完整正文，再调用 \`get_page\` 验证；
+- Worker 立即调用 \`put_page\` 写入完整正文，再调用 \`get_page\` 验证；
+- 可修复服务端拒绝由 Worker 在自身上下文中修正后重试，直到写入和回读验证成功；
+- Worker 只向主 Agent 返回 outcome、合法 \`inbox/\` slug、verified、receipt 状态和可选脱敏阻塞码；
 - 用户随后提出拒绝或修改时，按反馈更新或删除草稿，不创建本地离线队列；
 - 正文发生变化时，重新完成脱敏、去重和写入；
 - 不得绕过固定模板、\`inbox/\` 限制、项目身份校验和后续晋升审核。
 
 ## 七、写入后内容锁定
 
-写入前确认或静默超时只授权写入刚刚展示的完整版本。写入后正文视为锁定。
+写入后正文视为锁定。
 后续审核可以修改分类、标签、目标目录、slug 和审核状态，但不得修改正文、
 证据、适用条件、不适用条件或验证结果。
 `;

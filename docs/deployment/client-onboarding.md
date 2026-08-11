@@ -24,7 +24,7 @@ bun run build
 ./bin/gbrain --help
 ```
 
-## 2. 安装规则、skills 与 Codex 启动检查
+## 2. 安装规则、skills 与双客户端守卫
 
 ```bash
 bun src/cli.ts install-client --json
@@ -35,6 +35,9 @@ bun src/cli.ts install-client --json
 - `~/.config/opencode/AGENTS.md`
 - `~/.config/opencode/skills/gbrain-capture/SKILL.md`
 - `~/.config/opencode/skills/gbrain-review/SKILL.md`
+- `~/.config/opencode/hooks/gbrain-project-check.py`
+- `~/.config/opencode/hooks/gbrain-experience-guard.py`
+- `~/.config/opencode/plugins/gbrain-experience-guard.ts`
 - `~/.codex/AGENTS.md`
 - `~/.codex/skills/gbrain-capture/SKILL.md`
 - `~/.codex/skills/gbrain-review/SKILL.md`
@@ -42,16 +45,20 @@ bun src/cli.ts install-client --json
 - `~/.codex/hooks/gbrain-experience-guard.py`
 - `~/.codex/hooks.json` 中由 GBrain 管理的 `SessionStart`、`UserPromptSubmit`、`PostToolUse` 和 `Stop` handler
 
-## Codex 经验收尾守卫
+## OpenCode 与 Codex 经验 Worker 守卫
 
-安装器默认启用经验收尾守卫。它在用户提交 prompt 和本地工具完成后只记录最小化元数据，
-并在 Agent 准备结束当前回合时检查是否已有结构化经验回执。它不会调用 MCP、不会写入
+安装器默认启用经验 Worker 守卫。它在用户提交 prompt 和本地工具完成后只记录最小化元数据，
+并在 Agent 准备结束当前回合时检查是否已有结构化召回与收尾回执。它不会调用 MCP、不会写入
 GBrain、不会保存原始 prompt、命令、工具输出或 transcript，也不会中断正在运行的命令。
 
-非平凡回合缺少回执时，`Stop` 返回 `decision: "block"`，Codex
-自动创建一次续跑 prompt，让 Agent 完成只读召回、去重和候选判断。最多续跑两次；回执仍
-无效或 Hook 自身异常时 fail-open。发现候选后，Agent 简要说明预分类和目标 slug，
-并在同一活跃回合内直接写入 `inbox/`，随后调用 `get_page` 验证。该写入不包括晋升，Hook 本身也不调用 MCP。
+非平凡回合会预发互不混用的一次性召回 token 与收尾 token。主 Agent 先派发独立 Recall Worker，
+等待其完成只读召回后，只接收受字段、条数和总字节限制的结构化 envelope；正文、搜索结果和日志不返回
+主会话。最终答复前，主 Agent 再派发独立 Closeout Worker，只传递脱敏后的任务目标、变更、失败和验证证据。
+Closeout Worker 独占搜索去重、候选判断、`inbox/` 写入、服务端可修复拒绝的修改重试、`get_page`
+验证和结构化回执。首次 `Stop` 已有两个有效回执时直接放行。若 Agent 未履约，`Stop` 仍返回
+`decision: "block"` 作为兜底，最多续跑两次后
+fail-open。Codex 使用 `Stop` block；OpenCode 没有等价阻断 Hook，因此在 `session.idle` 后通过
+`promptAsync` 续跑同一 session。守卫本身不调用 MCP。
 
 守卫不会创建倒计时、后台等待任务或恢复会话；长期任务仍应使用合适的作业管理器、日志和检查点机制。永久禁用经验守卫时运行：
 
@@ -59,21 +66,24 @@ GBrain、不会保存原始 prompt、命令、工具输出或 transcript，也�
 gbrain install-client --no-experience-hook --json
 ```
 
-此参数只移除 GBrain 管理的三个经验 handler，不影响项目身份 `SessionStart` Hook 或用户
-已有的其他 Hook。
+此参数移除两端经验脚本、Codex 的三个经验 handler，并禁用 OpenCode 插件中的经验路径。
+两端项目身份检查和用户已有的其他 Hook/插件不受影响。
 
 它不会读取或生成 `local-read.env`、`local-writer.env`、Bearer token 或
 client secret。
 
-Codex Hook 在 `startup|resume` 时运行，检查 Hook 输入 `cwd` 直接目录中的
-`.gbrain-project.yaml`，以及当前目录显式提交的 `.gbrain/project.yaml`。它不
-调用 MCP，也不会自动创建项目 ID。存在仓库身份指针但没有本地标记时，提示
-项目写入前先通过 MCP 精确校验并绑定；两者都缺失、不可信或格式错误时只显示
-中文警告并继续会话。
+Codex Hook 在 `startup|resume` 时运行；OpenCode 插件在每个 session 的首个 `chat.message`
+运行。两者都检查当前 `cwd` 直接目录中的
+`.gbrain-project.yaml`，以及当前目录显式提交的 `.gbrain/project.yaml`。Hook 本身不
+调用 MCP；缺少本地标记时注入 `GBRAIN_PROJECT_BOOTSTRAP_REQUIRED`，要求主 Agent 立即
+派发独立 bootstrap 子 Agent。仓库已有 ID 时子 Agent 精确校验并绑定；两种标记都没有时，
+并发会话在一小时 lease 内原子复用 Hook 提供的 `GBRAIN_PROJECT_BOOTSTRAP_CREATION_KEY`，子 Agent
+必须使用该键调用 `ensure_project` 创建 ID、绑定本地标记并读取登记页验证，不得自行生成新键；
+成功后执行 Hook 提供的 `complete-bootstrap` 命令清除 lease。
 
 Codex 会对新增或变化的非托管 Hook 执行一次性信任检查。首次安装或更新后，
 在 Codex 中运行 `/hooks`，确认来源和命令后信任该 Hook。此后每次启动或恢复
-会话都会自动执行。
+会话都会自动执行。OpenCode 从用户配置的 `plugins/` 目录自动加载适配器，无需 `/hooks` 信任步骤。
 
 安装后的规则默认要求 Agent 使用中文说明经验召回、候选总结、预分类和
 审核结论。命令、代码、路径、协议字段和错误原文可以保留英文。

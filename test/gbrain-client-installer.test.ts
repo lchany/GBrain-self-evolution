@@ -12,7 +12,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { runInstallClient, type InstallClientDeps } from '../src/commands/gbrain-client-installer.ts';
 
 function tempRoot(): string {
@@ -41,8 +41,35 @@ function runProjectHook(script: string, cwd: string): Record<string, unknown> {
   return JSON.parse(result.stdout) as Record<string, unknown>;
 }
 
+function runProjectHookAsync(script: string, cwd: string, sessionId: string): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('python3', [script], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => { stdout += chunk; });
+    child.stderr.on('data', (chunk: string) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code !== 0 || stderr) {
+        reject(new Error(`project hook failed: code=${code} stderr=${stderr}`));
+        return;
+      }
+      resolve(JSON.parse(stdout) as Record<string, unknown>);
+    });
+    child.stdin.end(JSON.stringify({
+      session_id: sessionId,
+      cwd,
+      hook_event_name: 'SessionStart',
+      source: 'startup',
+      model: 'test-model',
+    }));
+  });
+}
+
 describe('gbrain install-client', () => {
-  test('Given an isolated home When installer runs twice Then rules, skills and the Codex hook are idempotently installed without credentials', async () => {
+  test('Given an isolated home When installer runs twice Then both client guards are idempotently installed without credentials', async () => {
     const root = tempRoot();
     try {
       const codexRoot = join(root, 'codex');
@@ -78,8 +105,10 @@ describe('gbrain install-client', () => {
       expect(codexRules.match(/GBRAIN_CLIENT_RULES_START/g)).toHaveLength(1);
       expect(opencodeRules).toContain('默认使用中文');
       expect(opencodeRules).toContain('只读召回');
+      expect(opencodeRules).toContain('主 Agent 不得直接调用 GBrain MCP 执行经验召回');
+      expect(opencodeRules).toContain('GBRAIN_EXPERIENCE_RECALL_REQUIRED');
       expect(opencodeRules).toContain('第 2 次');
-      expect(opencodeRules).toContain('直接通过 MCP 写入');
+      expect(opencodeRules).toContain('Closeout Worker 直接调用 `put_page`');
       expect(opencodeRules).not.toContain('5 分钟');
       expect(opencodeRules).toContain('.gbrain-project.yaml');
       expect(opencodeRules).toContain('project_id');
@@ -91,12 +120,15 @@ describe('gbrain install-client', () => {
       expect(codexRules).toContain('默认使用中文');
       expect(codexRules).toContain('只读召回');
       expect(codexRules).toContain('第 2 次');
-      expect(codexRules).toContain('直接通过 MCP 写入');
+      expect(codexRules).toContain('Closeout Worker 直接调用 `put_page`');
       expect(codexRules).not.toContain('5 分钟');
       expect(codexRules).toContain('match_project');
-      expect(codexRules).toContain('Codex `SessionStart` Hook');
+      expect(codexRules).toContain('OpenCode 首消息守卫与 Codex `SessionStart` Hook');
       expect(codexRules).toContain('只检查会话 `cwd` 直接目录');
-      expect(codexRules).toContain('不调用 MCP，也不创建项目 ID');
+      expect(codexRules).toContain('不直接调用 MCP');
+      expect(codexRules).toContain('GBRAIN_PROJECT_BOOTSTRAP_REQUIRED');
+      expect(codexRules).toContain('GBRAIN_EXPERIENCE_RECALL_REQUIRED');
+      expect(codexRules).toContain('GBRAIN_EXPERIENCE_CLOSEOUT_REQUIRED');
 
       const opencodeCapture = readFileSync(
         join(root, 'xdg', 'opencode', 'skills', 'gbrain-capture', 'SKILL.md'),
@@ -112,6 +144,9 @@ describe('gbrain install-client', () => {
       expect(opencodeReview).toBe(codexReview);
 
       expect(opencodeCapture).toContain('put_page');
+      expect(opencodeCapture).toContain('## 零、隔离执行契约');
+      expect(opencodeCapture).toContain('主 Agent 不得直接执行经验召回');
+      expect(opencodeCapture).toContain('可修复服务端拒绝由 Worker');
       expect(opencodeCapture).toContain('inbox/');
       expect(opencodeCapture).toContain('## 场景与目标');
       expect(opencodeCapture).toContain('## 适用条件');
@@ -149,17 +184,28 @@ describe('gbrain install-client', () => {
 
       const hookScript = join(codexRoot, 'hooks', 'gbrain-project-check.py');
       const experienceHookScript = join(codexRoot, 'hooks', 'gbrain-experience-guard.py');
+      const opencodeRoot = join(root, 'xdg', 'opencode');
+      const opencodeProjectHook = join(opencodeRoot, 'hooks', 'gbrain-project-check.py');
+      const opencodeExperienceHook = join(opencodeRoot, 'hooks', 'gbrain-experience-guard.py');
       const opencodeExperiencePlugin = join(root, 'xdg', 'opencode', 'plugins', 'gbrain-experience-guard.ts');
       const hooksJsonPath = join(codexRoot, 'hooks.json');
       expect(existsSync(hookScript)).toBe(true);
       expect(existsSync(experienceHookScript)).toBe(true);
-      expect(existsSync(opencodeExperiencePlugin)).toBe(false);
+      expect(existsSync(opencodeProjectHook)).toBe(true);
+      expect(existsSync(opencodeExperienceHook)).toBe(true);
+      expect(existsSync(opencodeExperiencePlugin)).toBe(true);
       expect(statSync(hookScript).mode & 0o777).toBe(0o700);
       expect(statSync(experienceHookScript).mode & 0o777).toBe(0o700);
+      expect(statSync(opencodeProjectHook).mode & 0o777).toBe(0o700);
+      expect(statSync(opencodeExperienceHook).mode & 0o777).toBe(0o700);
+      expect(statSync(opencodeExperiencePlugin).mode & 0o777).toBe(0o600);
       expect(statSync(hooksJsonPath).mode & 0o777).toBe(0o600);
       const hooksConfig = JSON.parse(readFileSync(hooksJsonPath, 'utf8')) as {
         description?: string;
-        hooks: Record<string, Array<{ matcher?: string; hooks?: Array<{ command?: string; statusMessage?: string }> }>>;
+        hooks: Record<string, Array<{
+          matcher?: string;
+          hooks?: Array<{ command?: string; statusMessage?: string; additionalContextLimit?: number }>;
+        }>>;
       };
       expect(hooksConfig.description).toBe('existing hooks');
       expect(hooksConfig.hooks.PostToolUse[0].hooks?.[0].command).toBe('printf existing-post-hook');
@@ -170,9 +216,10 @@ describe('gbrain install-client', () => {
       expect(gbrainHandlers[0].command).toContain('gbrain-project-check.py');
       for (const eventName of ['UserPromptSubmit', 'PostToolUse', 'Stop']) {
         const handlers = hooksConfig.hooks[eventName].flatMap((entry) => entry.hooks ?? [])
-          .filter((handler) => handler.statusMessage === 'GBrain 经验收尾守卫');
+          .filter((handler) => handler.statusMessage === 'GBrain 经验 Worker 守卫');
         expect(handlers).toHaveLength(1);
         expect(handlers[0].command).toContain('gbrain-experience-guard.py');
+        if (eventName !== 'Stop') expect(handlers[0].additionalContextLimit).toBe(2048);
       }
 
       const summary = JSON.parse(output.join('')) as {
@@ -180,7 +227,7 @@ describe('gbrain install-client', () => {
         surfaces: Array<{
           name: string;
           hook?: { script: string; config: string; trust_required: boolean };
-          experience_hook?: { script?: string; mode: string } | null;
+          experience_hook?: { script?: string; plugin?: string; mode: string } | null;
         }>;
       };
       expect(summary.ok).toBe(true);
@@ -191,9 +238,18 @@ describe('gbrain install-client', () => {
       });
       expect(summary.surfaces.find((surface) => surface.name === 'codex')?.experience_hook).toEqual({
         script: experienceHookScript,
-        mode: 'synchronous_capture',
+        mode: 'isolated_subagent_capture',
       });
-      expect(summary.surfaces.find((surface) => surface.name === 'opencode')?.experience_hook).toBeUndefined();
+      expect(summary.surfaces.find((surface) => surface.name === 'opencode')?.hook).toEqual({
+        script: opencodeProjectHook,
+        config: opencodeExperiencePlugin,
+        trust_required: false,
+      });
+      expect(summary.surfaces.find((surface) => surface.name === 'opencode')?.experience_hook).toEqual({
+        script: opencodeExperienceHook,
+        plugin: opencodeExperiencePlugin,
+        mode: 'isolated_subagent_capture',
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -204,7 +260,13 @@ describe('gbrain install-client', () => {
     try {
       expect(await runInstallClient(['--json'], deps(root))).toBe(0);
       expect(await runInstallClient(['--json', '--no-experience-hook'], deps(root))).toBe(0);
-      expect(existsSync(join(root, 'xdg', 'opencode', 'plugins', 'gbrain-experience-guard.ts'))).toBe(false);
+      const opencodeRoot = join(root, 'xdg', 'opencode');
+      expect(existsSync(join(opencodeRoot, 'plugins', 'gbrain-experience-guard.ts'))).toBe(true);
+      expect(existsSync(join(opencodeRoot, 'hooks', 'gbrain-project-check.py'))).toBe(true);
+      expect(existsSync(join(opencodeRoot, 'hooks', 'gbrain-experience-guard.py'))).toBe(false);
+      expect(existsSync(join(root, 'codex', 'hooks', 'gbrain-experience-guard.py'))).toBe(false);
+      expect(readFileSync(join(opencodeRoot, 'plugins', 'gbrain-experience-guard.ts'), 'utf8'))
+        .toContain('const EXPERIENCE_ENABLED = false');
       const config = JSON.parse(readFileSync(join(root, 'codex', 'hooks.json'), 'utf8')) as {
         hooks: Record<string, Array<{ hooks?: Array<{ command?: string }> }>>;
       };
@@ -235,8 +297,60 @@ describe('gbrain install-client', () => {
 
       const childResult = runProjectHook(script, child);
       expect(JSON.stringify(childResult)).toContain('当前目录未找到');
+      expect(JSON.stringify(childResult)).toContain('GBRAIN_PROJECT_BOOTSTRAP_REQUIRED');
+      expect(JSON.stringify(childResult)).toContain('GBRAIN_PROJECT_BOOTSTRAP_WORKER');
+      expect(JSON.stringify(childResult)).toContain('独立子 Agent');
       expect(JSON.stringify(childResult)).not.toContain('prj-0123456789abcdef');
       expect(childResult.continue).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('Given concurrent unbound sessions When SessionStart runs Then both bootstrap workers reuse one creation key', async () => {
+    const root = tempRoot();
+    try {
+      expect(await runInstallClient(['--json'], deps(root))).toBe(0);
+      const script = join(root, 'codex', 'hooks', 'gbrain-project-check.py');
+      const project = join(root, 'project');
+      mkdirSync(project, { recursive: true });
+
+      const results = await Promise.all([
+        runProjectHookAsync(script, project, 'session-a'),
+        runProjectHookAsync(script, project, 'session-b'),
+      ]);
+      const keys = results.map((result) => JSON.stringify(result)
+        .match(/GBRAIN_PROJECT_BOOTSTRAP_CREATION_KEY=([A-Za-z0-9_-]+)/)?.[1]);
+      expect(keys[0]).toBeTruthy();
+      expect(keys[1]).toBe(keys[0]);
+
+      const context = JSON.stringify(results[0]);
+      const complete = context.match(/python3 ([^ ]+) complete-bootstrap --cwd ([^ ]+) --creation-key ([A-Za-z0-9_-]+)/);
+      expect(complete).toBeTruthy();
+      const premature = spawnSync('sh', ['-c', complete![0]], { encoding: 'utf8' });
+      expect(premature.status).not.toBe(0);
+      expect(JSON.parse(premature.stdout).status).toBe('marker_missing');
+      const beforeBinding = runProjectHook(script, project);
+      expect(JSON.stringify(beforeBinding)).toContain(`GBRAIN_PROJECT_BOOTSTRAP_CREATION_KEY=${keys[0]}`);
+
+      writeFileSync(
+        join(project, '.gbrain-project.yaml'),
+        'schema_version: 1\nproject_id: prj-0123456789abcdef\n',
+        { mode: 0o600 },
+      );
+      const completed = spawnSync('sh', ['-c', complete![0]], { encoding: 'utf8' });
+      expect(completed.status).toBe(0);
+      expect(JSON.parse(completed.stdout).status).toBe('completed');
+      const repeated = spawnSync('sh', ['-c', complete![0]], { encoding: 'utf8' });
+      expect(repeated.status).toBe(0);
+      expect(JSON.parse(repeated.stdout).status).toBe('already_completed');
+
+      rmSync(join(project, '.gbrain-project.yaml'));
+      const afterCompletion = runProjectHook(script, project);
+      const nextKey = JSON.stringify(afterCompletion)
+        .match(/GBRAIN_PROJECT_BOOTSTRAP_CREATION_KEY=([A-Za-z0-9_-]+)/)?.[1];
+      expect(nextKey).toBeTruthy();
+      expect(nextKey).not.toBe(keys[0]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -256,6 +370,8 @@ describe('gbrain install-client', () => {
       const result = runProjectHook(script, root);
       expect(JSON.stringify(result)).toContain('prj-0123456789abcdef');
       expect(JSON.stringify(result)).toContain('仓库项目身份记录');
+      expect(JSON.stringify(result)).toContain('GBRAIN_PROJECT_BOOTSTRAP_REQUIRED');
+      expect(JSON.stringify(result)).toContain('GBRAIN_PROJECT_BOOTSTRAP_WORKER');
       expect(result.systemMessage).toBeUndefined();
       expect(result.continue).toBe(true);
     } finally {

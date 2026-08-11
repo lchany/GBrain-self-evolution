@@ -11,13 +11,16 @@ import {
 import {
   GBRAIN_CODEX_PROJECT_HOOK,
   GBRAIN_CODEX_PROJECT_HOOK_FILENAME,
-  GBRAIN_CODEX_PROJECT_HOOK_STATUS,
 } from './gbrain-codex-project-hook-content.ts';
 import {
   GBRAIN_CODEX_EXPERIENCE_HOOK,
   GBRAIN_CODEX_EXPERIENCE_HOOK_FILENAME,
-  GBRAIN_CODEX_EXPERIENCE_HOOK_STATUS,
 } from './gbrain-codex-experience-hook-content.ts';
+import {
+  GBRAIN_OPENCODE_EXPERIENCE_PLUGIN,
+  GBRAIN_OPENCODE_EXPERIENCE_PLUGIN_FILENAME,
+} from './gbrain-opencode-experience-plugin-content.ts';
+import { mergeCodexHooksConfig, shellQuote } from './gbrain-codex-hooks-config.ts';
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -31,6 +34,9 @@ export interface InstallClientDeps {
 interface Paths {
   readonly opencodeAgents: string;
   readonly opencodeSkills: string;
+  readonly opencodeProjectHook: string;
+  readonly opencodeExperienceHook: string;
+  readonly opencodeExperiencePlugin: string;
   readonly codexAgents: string;
   readonly codexSkills: string;
   readonly codexHooksConfig: string;
@@ -38,14 +44,14 @@ interface Paths {
   readonly codexExperienceHook: string;
 }
 
-const HELP = `gbrain install-client — install GBrain rules, skills, and Codex hooks
+const HELP = `gbrain install-client — install GBrain rules, skills, and client guards
 
 Usage:
   gbrain install-client [--json] [--no-experience-hook]
 
-Installs user-level OpenCode and Codex GBrain rules and skills, plus a read-only
-Codex SessionStart project hook and, by default, a turn-close experience guard.
-Use --no-experience-hook to remove only the GBrain synchronous experience guard handlers.
+Installs user-level OpenCode and Codex GBrain rules, skills, project guards, and,
+by default, isolated turn-close experience guards. Use --no-experience-hook to
+disable only the GBrain experience guards on both clients.
 Client credentials and network access are managed outside this installer.
 `;
 
@@ -69,6 +75,16 @@ export async function runInstallClient(args: readonly string[], deps: InstallCli
           name: 'opencode',
           rules: paths.opencodeAgents,
           skills: ['gbrain-capture', 'gbrain-review'],
+          hook: {
+            script: paths.opencodeProjectHook,
+            config: paths.opencodeExperiencePlugin,
+            trust_required: false,
+          },
+          experience_hook: flags.experienceHook ? {
+            script: paths.opencodeExperienceHook,
+            plugin: paths.opencodeExperiencePlugin,
+            mode: 'isolated_subagent_capture',
+          } : null,
         },
         {
           name: 'codex',
@@ -81,14 +97,14 @@ export async function runInstallClient(args: readonly string[], deps: InstallCli
           },
           experience_hook: flags.experienceHook ? {
             script: paths.codexExperienceHook,
-            mode: 'synchronous_capture',
+            mode: 'isolated_subagent_capture',
           } : null,
         },
       ],
     };
     const text = flags.json
       ? `${JSON.stringify(summary, null, 2)}\n`
-      : 'GBrain client rules, skills, and Codex current-directory project hook installed. Trust it once with /hooks.\n';
+      : `GBrain rules, skills, and project guards installed for OpenCode and Codex; experience guards ${flags.experienceHook ? 'enabled' : 'disabled'}. In Codex, trust the hooks once with /hooks.\n`;
     stdout(text);
     return 0;
   } catch (error) {
@@ -124,6 +140,9 @@ function resolvePaths(env: Env, home: string): Paths {
   return {
     opencodeAgents: join(opencodeDir, 'AGENTS.md'),
     opencodeSkills: join(opencodeDir, 'skills'),
+    opencodeProjectHook: join(opencodeDir, 'hooks', GBRAIN_CODEX_PROJECT_HOOK_FILENAME),
+    opencodeExperienceHook: join(opencodeDir, 'hooks', GBRAIN_CODEX_EXPERIENCE_HOOK_FILENAME),
+    opencodeExperiencePlugin: join(opencodeDir, 'plugins', GBRAIN_OPENCODE_EXPERIENCE_PLUGIN_FILENAME),
     codexAgents: join(codexHome, 'AGENTS.md'),
     codexSkills: join(codexHome, 'skills'),
     codexHooksConfig: join(codexHome, 'hooks.json'),
@@ -139,10 +158,16 @@ function installClientAssets(paths: Paths, experienceHook: boolean): void {
   writeSkill(paths.opencodeSkills, 'gbrain-review', GBRAIN_REVIEW_SKILL);
   writeSkill(paths.codexSkills, 'gbrain-capture', GBRAIN_CAPTURE_SKILL);
   writeSkill(paths.codexSkills, 'gbrain-review', GBRAIN_REVIEW_SKILL);
+  writeCodexProjectHook(paths.opencodeProjectHook);
+  writeOpenCodePlugin(paths.opencodeExperiencePlugin, experienceHook);
   writeCodexProjectHook(paths.codexProjectHook);
-  if (experienceHook) writeCodexExperienceHook(paths.codexExperienceHook);
-  // Remove the former OpenCode review timer when upgrading an existing client.
-  unlinkIfPresent(join(paths.opencodeAgents, '..', 'plugins', 'gbrain-experience-guard.ts'));
+  if (experienceHook) {
+    writeCodexExperienceHook(paths.opencodeExperienceHook);
+    writeCodexExperienceHook(paths.codexExperienceHook);
+  } else {
+    unlinkIfPresent(paths.opencodeExperienceHook);
+    unlinkIfPresent(paths.codexExperienceHook);
+  }
   mergeCodexHooksConfig(paths.codexHooksConfig, paths.codexProjectHook, paths.codexExperienceHook, experienceHook);
 }
 
@@ -180,118 +205,18 @@ function writeCodexExperienceHook(path: string): void {
   chmodSync(path, 0o700);
 }
 
+function writeOpenCodePlugin(path: string, experienceHook: boolean): void {
+  mkdirSync(join(path, '..'), { recursive: true });
+  const content = GBRAIN_OPENCODE_EXPERIENCE_PLUGIN.replace(
+    '__EXPERIENCE_ENABLED__',
+    experienceHook ? 'true' : 'false',
+  );
+  writeFileSync(path, content.endsWith('\n') ? content : `${content}\n`, { encoding: 'utf8', mode: 0o600 });
+  chmodSync(path, 0o600);
+}
+
 function unlinkIfPresent(path: string): void {
   if (existsSync(path)) unlinkSync(path);
-}
-
-function mergeCodexHooksConfig(
-  configPath: string,
-  projectScriptPath: string,
-  experienceScriptPath: string,
-  experienceHook: boolean,
-): void {
-  mkdirSync(join(configPath, '..'), { recursive: true });
-  const config = readHooksConfig(configPath);
-  const hooks = getHooksTable(config);
-  const sessionStart = getSessionStartGroups(hooks);
-  const withoutManagedHandler = sessionStart.flatMap((group) => removeManagedHandlers(group));
-  withoutManagedHandler.push({
-    matcher: '^(startup|resume)$',
-    hooks: [{
-      type: 'command',
-      command: `python3 ${shellQuote(projectScriptPath)}`,
-      statusMessage: GBRAIN_CODEX_PROJECT_HOOK_STATUS,
-      timeout: 5,
-      additionalContextLimit: 300,
-    }],
-  });
-  hooks.SessionStart = withoutManagedHandler;
-  for (const eventName of ['UserPromptSubmit', 'PostToolUse', 'Stop']) {
-    const groups = getHookGroups(hooks, eventName);
-    const withoutExperience = groups.flatMap((group) => removeManagedExperienceHandlers(group));
-    if (experienceHook) {
-      withoutExperience.push({
-        ...(eventName === 'PostToolUse' ? { matcher: '*' } : {}),
-        hooks: [{
-          type: 'command',
-          command: `python3 ${shellQuote(experienceScriptPath)}`,
-          statusMessage: GBRAIN_CODEX_EXPERIENCE_HOOK_STATUS,
-          timeout: 5,
-          additionalContextLimit: 1200,
-        }],
-      });
-    }
-    if (withoutExperience.length > 0) hooks[eventName] = withoutExperience;
-    else delete hooks[eventName];
-  }
-  config.hooks = hooks;
-  writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-  chmodSync(configPath, 0o600);
-}
-
-function readHooksConfig(configPath: string): Record<string, unknown> {
-  if (!existsSync(configPath)) return {};
-  const parsed: unknown = JSON.parse(readFileSync(configPath, 'utf8'));
-  if (!isRecord(parsed)) throw new Error(`invalid Codex hooks config: ${configPath} must contain a JSON object`);
-  return parsed;
-}
-
-function getHooksTable(config: Record<string, unknown>): Record<string, unknown> {
-  if (config.hooks === undefined) return {};
-  if (!isRecord(config.hooks)) throw new Error(`invalid Codex hooks config: hooks must be a JSON object`);
-  return { ...config.hooks };
-}
-
-function getSessionStartGroups(hooks: Record<string, unknown>): unknown[] {
-  if (hooks.SessionStart === undefined) return [];
-  if (!Array.isArray(hooks.SessionStart)) {
-    throw new Error(`invalid Codex hooks config: hooks.SessionStart must be an array`);
-  }
-  return hooks.SessionStart;
-}
-
-function getHookGroups(hooks: Record<string, unknown>, eventName: string): unknown[] {
-  if (hooks[eventName] === undefined) return [];
-  if (!Array.isArray(hooks[eventName])) {
-    throw new Error(`invalid Codex hooks config: hooks.${eventName} must be an array`);
-  }
-  return hooks[eventName];
-}
-
-function removeManagedHandlers(group: unknown): unknown[] {
-  if (!isRecord(group) || !Array.isArray(group.hooks)) return [group];
-  const handlers = group.hooks.filter((handler) => !isManagedProjectHook(handler));
-  if (handlers.length === group.hooks.length) return [group];
-  if (handlers.length === 0) return [];
-  return [{ ...group, hooks: handlers }];
-}
-
-function removeManagedExperienceHandlers(group: unknown): unknown[] {
-  if (!isRecord(group) || !Array.isArray(group.hooks)) return [group];
-  const handlers = group.hooks.filter((handler) => !isManagedExperienceHook(handler));
-  if (handlers.length === group.hooks.length) return [group];
-  if (handlers.length === 0) return [];
-  return [{ ...group, hooks: handlers }];
-}
-
-function isManagedProjectHook(handler: unknown): boolean {
-  if (!isRecord(handler)) return false;
-  if (handler.statusMessage === GBRAIN_CODEX_PROJECT_HOOK_STATUS) return true;
-  return typeof handler.command === 'string' && handler.command.includes(GBRAIN_CODEX_PROJECT_HOOK_FILENAME);
-}
-
-function isManagedExperienceHook(handler: unknown): boolean {
-  if (!isRecord(handler)) return false;
-  if (handler.statusMessage === GBRAIN_CODEX_EXPERIENCE_HOOK_STATUS) return true;
-  return typeof handler.command === 'string' && handler.command.includes(GBRAIN_CODEX_EXPERIENCE_HOOK_FILENAME);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\"'\"'")}'`;
 }
 
 function escapeRegExp(value: string): string {
