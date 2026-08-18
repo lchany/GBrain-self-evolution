@@ -80,6 +80,7 @@ import {
 } from './admin-basic-auth.ts';
 import { resolveOwnerHolder } from '../core/owner-holder.ts';
 import { registerCleanup } from '../core/process-cleanup.ts';
+import { createAnonymousOrBearerAuthMiddleware } from './anonymous-mcp-auth.ts';
 
 /**
  * /health endpoint timeout. 3s rather than 5s: Fly.io's default
@@ -2187,10 +2188,10 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     scopes: ['read', 'write'],
     sourceId: 'default',
   };
-  const allowAnonymousMcpRequest: express.RequestHandler = (req, _res, next) => {
-    req.auth = anonymousMcpAuthInfo;
-    next();
-  };
+  const bearerMcpRequest = requireBearerAuth({ verifier: oauthProvider, resourceMetadataUrl });
+  const authenticateMcpRequest = allowAnonymousMcp
+    ? createAnonymousOrBearerAuthMiddleware(anonymousMcpAuthInfo, bearerMcpRequest)
+    : bearerMcpRequest;
 
   /**
    * WP4 (D2): resolve this request's effective surface from the caller's
@@ -2234,9 +2235,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
 
   app.post(
     '/mcp',
-    allowAnonymousMcp
-      ? allowAnonymousMcpRequest
-      : requireBearerAuth({ verifier: oauthProvider, resourceMetadataUrl }),
+    authenticateMcpRequest,
     async (req: Request, res: Response) => {
       const startTime = Date.now();
     const authInfo = (req as any).auth as AuthInfo;

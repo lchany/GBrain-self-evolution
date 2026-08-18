@@ -18,7 +18,7 @@ Anonymous clients remain registration-free. Admin routes, MCP operation scope fi
 
 ## Implementation Boundary
 
-Add a small exported middleware selector near the existing anonymous MCP identity setup in `serve-http.ts`. It chooses between the already-existing anonymous middleware and `requireBearerAuth` based only on whether a non-empty Authorization header was supplied. Mount this selector at `/mcp` when anonymous mode is enabled.
+Add a small exported middleware selector in a focused command helper and use it from the existing anonymous MCP identity setup in `serve-http.ts`. It chooses between the already-existing anonymous identity and `requireBearerAuth` based only on whether an Authorization header was supplied. Even an empty or malformed supplied header must take the verifier path and fail closed. Mount this selector at `/mcp` when anonymous mode is enabled.
 
 Do not change `whoami`, accept anonymous identity as writer attestation, add a second listener, or expose writer credentials to the browser.
 
