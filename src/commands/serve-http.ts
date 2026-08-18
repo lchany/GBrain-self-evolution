@@ -73,6 +73,11 @@ import {
   type IngestionContentType,
   type IngestionEvent,
 } from '../core/ingestion/types.ts';
+import {
+  createAdminBasicAuthMiddleware,
+  resolveAdminBasicAuth,
+  resolveAdminOrigin,
+} from './admin-basic-auth.ts';
 import { resolveOwnerHolder } from '../core/owner-holder.ts';
 import { registerCleanup } from '../core/process-cleanup.ts';
 
@@ -83,6 +88,21 @@ import { registerCleanup } from '../core/process-cleanup.ts';
  * 3s leaves 2s of headroom for TCP, response framing, and clock skew.
  */
 export const HEALTH_TIMEOUT_MS = 3000;
+
+export function resolveReviewWriterMcpUrl(raw: string | undefined, port: number): URL {
+  const value = raw?.trim() || `http://127.0.0.1:${port}/mcp`;
+  const url = new URL(value);
+  if (
+    url.pathname !== '/mcp'
+    || url.username !== ''
+    || url.password !== ''
+    || url.search !== ''
+    || url.hash !== ''
+  ) {
+    throw new Error('GBRAIN_REVIEW_WRITER_MCP_URL must be an absolute MCP URL ending in /mcp');
+  }
+  return url;
+}
 
 /**
  * The narrowest contract this module actually consumes: subscribe, unsubscribe.
@@ -808,6 +828,23 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // — otherwise refuse to start. Logging the bootstrap-token value every
   // restart is the original gripe; with `GBRAIN_ADMIN_BOOTSTRAP_TOKEN` set
   // and `--suppress-bootstrap-token`, no value reaches the log.
+  const adminBasicAuth = resolveAdminBasicAuth(process.env);
+  if (adminBasicAuth.kind === 'error') {
+    console.error(adminBasicAuth.message);
+    process.exit(1);
+  }
+  const basicAdminMiddleware = adminBasicAuth.kind === 'enabled'
+    ? createAdminBasicAuthMiddleware(adminBasicAuth.credentials)
+    : null;
+  const adminOriginResolution = resolveAdminOrigin(process.env.GBRAIN_ADMIN_ORIGIN);
+  if (adminOriginResolution.kind === 'error') {
+    console.error(adminOriginResolution.message);
+    process.exit(1);
+  }
+  const adminOrigin = adminOriginResolution.kind === 'enabled'
+    ? adminOriginResolution.origin
+    : undefined;
+
   const resolved = resolveBootstrapToken(process.env.GBRAIN_ADMIN_BOOTSTRAP_TOKEN);
   if (resolved.kind === 'error') {
     console.error(resolved.message);
@@ -1338,6 +1375,10 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
 
   // Admin auth middleware
   function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (basicAdminMiddleware !== null) {
+      basicAdminMiddleware(req, res, next);
+      return;
+    }
     const sessionId = (req.cookies as Record<string, string>)?.gbrain_admin;
     if (!sessionId || !adminSessions.has(sessionId)) {
       res.status(401).json({ error: 'Admin authentication required' });
@@ -2031,6 +2072,19 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     req.on('close', () => sseClients.delete(res));
   });
 
+  // Review routes must be mounted before the SPA fallback. Writer credentials
+  // stay server-side and the loopback endpoint is attested independently.
+  const { mountReviewRoutes } = await import('./serve-http-review.ts');
+  const reviewWriterMcpUrl = resolveReviewWriterMcpUrl(
+    process.env.GBRAIN_REVIEW_WRITER_MCP_URL,
+    port,
+  );
+  mountReviewRoutes(app, engine, requireAdmin, {
+    adminOrigin,
+    issuerUrl,
+    writerMcpUrl: reviewWriterMcpUrl,
+  });
+
   // ---------------------------------------------------------------------------
   // Admin SPA static files (v0.36.x #1090)
   // ---------------------------------------------------------------------------
@@ -2053,7 +2107,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   if (useDevPath) {
     app.use('/admin', express.static(adminDistPath));
     app.get('/admin/{*path}', (req: Request, res: Response, next: NextFunction) => {
-      if (req.path.startsWith('/admin/api/') || req.path === '/admin/events' || req.path === '/admin/login') {
+      if (req.path.startsWith('/admin/api/') || req.path.startsWith('/admin/review') || req.path === '/admin/events' || req.path === '/admin/login') {
         return next();
       }
       res.sendFile(path.join(adminDistPath, 'index.html'));
@@ -2072,7 +2126,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       return buf;
     }
     app.get('/admin/{*path}', (req: Request, res: Response, next: NextFunction) => {
-      if (req.path.startsWith('/admin/api/') || req.path === '/admin/events' || req.path === '/admin/login') {
+      if (req.path.startsWith('/admin/api/') || req.path.startsWith('/admin/review') || req.path === '/admin/events' || req.path === '/admin/login') {
         return next();
       }
       const hit = ADMIN_ASSETS[req.path];
