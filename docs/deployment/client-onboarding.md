@@ -43,16 +43,16 @@ bun src/cli.ts install-client --json
 - `~/.codex/skills/gbrain-review/SKILL.md`
 - `~/.codex/hooks/gbrain-project-check.py`
 - `~/.codex/hooks/gbrain-experience-guard.py`
-- `~/.codex/hooks.json` 中由 GBrain 管理的 `SessionStart` 和 `UserPromptSubmit` handler
+- `~/.codex/hooks.json` 中由 GBrain 管理的 `SessionStart`、`UserPromptSubmit` 和 `PostToolUse` handler
 
 ## OpenCode 与 Codex 只读 Recall 守卫
 
-安装器默认启用只读 Recall 守卫。非平凡回合只生成一次性 recall token；主 Agent 派发独立
+安装器默认启用只读 Recall 守卫。只有重大决策执行前、当前方案首次出现非预期执行错误后，或用户明确要求召回时才生成一次性 recall token；主 Agent 派发独立
 Recall Worker，并只接收受字段、条数和总字节限制的结构化 envelope。守卫不会调用 MCP、写入
 GBrain、保存原始 prompt、命令、工具输出或 transcript，也不会中断正在运行的命令。
 
-自动 Closeout 已关闭。Codex 不再安装 GBrain 管理的 `PostToolUse` 或 `Stop` 经验处理器；OpenCode
-不再转发工具事件、注入 system transform 或在 `session.idle` 后发起内部续跑。安装或升级时会移除
+自动 Closeout 已关闭。Codex 安装 GBrain 管理的 error-only `PostToolUse` 处理器，但不安装 `Stop` 处理器；OpenCode
+仅转发非预期工具失败并在下一次 system transform 注入召回要求，绝不在 `session.idle` 后发起内部续跑。安装或升级时会移除
 旧的 GBrain 管理处理器，并保留其他来源的 Hook。只有用户明确要求保存经验时，Agent 才使用
 `gbrain-capture` 完成搜索去重、脱敏、写入和回读验证。
 
@@ -62,7 +62,7 @@ GBrain、保存原始 prompt、命令、工具输出或 transcript，也不会�
 gbrain install-client --no-experience-hook --json
 ```
 
-此参数移除两端经验脚本、Codex 的 `UserPromptSubmit` 经验 handler，并禁用 OpenCode 插件中的经验路径。
+此参数移除两端经验脚本、Codex 的 `UserPromptSubmit`/`PostToolUse` 经验 handler，并禁用 OpenCode 插件中的经验路径。
 两端项目身份检查和用户已有的其他 Hook/插件不受影响。
 
 它不会读取或生成 `local-read.env`、`local-writer.env`、Bearer token 或
@@ -86,8 +86,8 @@ Codex 会对新增或变化的非托管 Hook 执行一次性信任检查。首�
 
 经验工作流区分只读召回和写入：
 
-1. 非平凡任务开始时，Agent 先通过 MCP 只读召回已有经验。
-2. 关键失败只触发故障召回；同类故障第 2 次独立出现时，Agent 停止盲目
+1. 重大决策执行前，Agent 先通过 MCP 只读召回已有经验；普通任务不自动召回。
+2. 当前方案首次出现非预期执行错误后触发一次故障召回；同类故障第 2 次独立出现时，Agent 停止盲目
    重试并整理错误总结。
 3. 只有用户明确要求持久化时，候选经验才完成搜索去重、自动脱敏、固定模板整理和预分类。
 4. Agent 简要说明预分类和目标 slug，并写入。

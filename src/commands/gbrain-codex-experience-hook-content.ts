@@ -26,7 +26,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAX_BLOCKS = 2
 RETENTION_SECONDS = 7 * 24 * 60 * 60
 TOKEN_TTL_SECONDS = 24 * 60 * 60
@@ -42,15 +42,23 @@ INSTRUCTION_AUTHORITY_RE = re.compile(r"(?m)^authority:\s*user_explicit_instruct
 INSTRUCTION_SCOPE_RE = re.compile(r"(?m)^instruction_scope:\s*(global|project)\s*$")
 INSTRUCTION_SOURCE_RE = re.compile(r"(?ms)^source_refs:\s*\n(?:\s*-\s*user_instruction:(global|project):[^\s#][^\n]*\n?)+")
 UNVERIFIED_VALUE_RE = re.compile(r"(?:待验证|未验证|未知|不适用|猜测|推测|假设|\btbd\b|\bunknown\b|\bunverified\b)", re.IGNORECASE)
-NONTRIVIAL_RE = re.compile(
-    r"(修改|实现|开发|修复|部署|迁移|诊断|排查|安全|隐私|项目规则|总结|复盘|"
-    r"modify|implement|build|fix|deploy|migrat|diagnos|debug|security|privacy|summari[sz]e)",
+EXPLICIT_RECALL_RE = re.compile(
+    r"(召回.{0,12}经验|查(?:找|询)?.{0,12}(?:历史|既有|已有)经验|"
+    r"(?:recall|search|look\s+up).{0,20}(?:experience|lesson))",
     re.IGNORECASE,
 )
-CRITICAL_BASH_RE = re.compile(
-    r"(^|\s)(git\s+(commit|push)|docker|kubectl|helm|systemctl|ssh|scp|rsync|"
-    r"npm\s+(install|publish)|pnpm\s+(install|publish)|bun\s+(install|publish)|"
-    r"rm\s|mv\s|cp\s|chmod\s|chown\s|sed\s+-i|deploy|migrat)",
+DECISION_INTENT_RE = re.compile(
+    r"(选择|选型|比较.{0,16}方案|决定|决策|取舍|要不要|该不该|是否采用|是否切换|"
+    r"改变.{0,12}(?:架构|策略|边界|规则)|设计.{0,12}(?:架构|策略|方案)|"
+    r"choose|select|decid|trade[ -]?off|should\s+we|whether\s+to\s+(?:adopt|switch)|redesign)",
+    re.IGNORECASE,
+)
+HIGH_IMPACT_RE = re.compile(
+    r"(架构|技术栈|数据库|核心协议|认证|授权|权限|安全|隐私|密钥|生产环境|生产拓扑|"
+    r"流量入口|基础设施|数据迁移|批量删除|不可逆|恢复策略|全局规则|项目规则|长期约束|"
+    r"architecture|tech(?:nology)?\s+stack|database|core\s+protocol|auth(?:entication|orization)?|"
+    r"permission|security|privacy|secret|production|topology|infrastructure|data\s+migration|"
+    r"bulk\s+delet|irreversible|recovery\s+strategy|global\s+rule|project\s+rule|long-term\s+constraint)",
     re.IGNORECASE,
 )
 EXPECTED_TEST_RE = re.compile(
@@ -59,6 +67,11 @@ EXPECTED_TEST_RE = re.compile(
 )
 EXPECTED_NEGATIVE_RE = re.compile(r"(^|\s)(rg|grep|git\s+diff\s+--quiet)(\s|$)", re.IGNORECASE)
 FAILED_RESPONSE_RE = re.compile(r"(process exited with code|exit[_ -]?code[\"']?\s*[:=])\s*[1-9]", re.IGNORECASE)
+CANCELLED_OR_INPUT_ERROR_RE = re.compile(
+    r"(cancelled|canceled|aborted by user|invalid (?:input|argument)|missing required (?:input|argument)|"
+    r"用户取消|已取消|参数无效|缺少必填)",
+    re.IGNORECASE,
+)
 INBOX_SLUG_RE = re.compile(r"^inbox/[a-z0-9][a-z0-9/_-]{0,180}$")
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,240}$")
 RECALL_WORKER_RE = re.compile(r"(?:^|\n)GBRAIN_EXPERIENCE_RECALL_WORKER_TOKEN=(gbr_[A-Za-z0-9_-]+)(?:\n|$)")
@@ -198,10 +211,6 @@ def _turn_path(root: Path, key: str) -> Path:
     return root / "turns" / f"{key}.json"
 
 
-def _pending_path(root: Path, session_key: str) -> Path:
-    return root / "pending" / f"{session_key}.json"
-
-
 @contextmanager
 def _turn_lock(root: Path, key: str):
     if re.fullmatch(r"[a-f0-9]{64}", key) is None:
@@ -225,14 +234,12 @@ def _turn_lock(root: Path, key: str):
 
 
 def _new_turn_state(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
-    pending = bool(_read_json(_pending_path(root, _session_key(payload))))
     return {
         "schema_version": SCHEMA_VERSION,
         "created_at": int(time.time()),
         "updated_at": int(time.time()),
         "session_key": _session_key(payload),
-        "intent_nontrivial": False,
-        "prior_pending": pending,
+        "decision_intent": False,
         "block_count": 0,
         "recall_token_hash": None,
         "closeout_token_hash": None,
@@ -240,6 +247,8 @@ def _new_turn_state(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
         "worker_phase": None,
         "closeout_worker": False,
         "recall_notified": False,
+        "failure_recall_notified": False,
+        "recall_kind": None,
         "closeout_notified": False,
         "recall_receipt": None,
         "closeout_receipt": None,
@@ -260,6 +269,8 @@ def _upgrade_turn_state(state: dict[str, Any]) -> dict[str, Any]:
     state.setdefault("worker_token_hash", None)
     state.setdefault("worker_phase", "closeout" if state.get("closeout_worker") else None)
     state.setdefault("recall_notified", False)
+    state.setdefault("failure_recall_notified", False)
+    state.setdefault("recall_kind", None)
     state.setdefault("closeout_notified", False)
     state.setdefault("recall_receipt", None)
     state.setdefault("closeout_receipt", None)
@@ -282,58 +293,30 @@ def _save_turn(root: Path, key: str, state: dict[str, Any]) -> None:
 def _tool_event(payload: dict[str, Any]) -> dict[str, Any]:
     tool_name = _safe_identifier(payload.get("tool_name"), "unknown")
     tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
-    command = tool_input.get("command") if isinstance(tool_input.get("command"), str) else ""
+    raw_command = tool_input.get("command", tool_input.get("cmd"))
+    command = raw_command if isinstance(raw_command, str) else ""
     response = payload.get("tool_response")
     response_dict = response if isinstance(response, dict) else {}
     failed = bool(response_dict.get("isError") or response_dict.get("is_error") or response_dict.get("error"))
     exit_code = response_dict.get("exit_code")
     if isinstance(exit_code, int) and exit_code != 0:
         failed = True
-    if isinstance(response, str) and FAILED_RESPONSE_RE.search(response):
+    response_text = response if isinstance(response, str) else json.dumps(response_dict, ensure_ascii=False)
+    if FAILED_RESPONSE_RE.search(response_text):
         failed = True
-    expected_failure = tool_name == "Bash" and bool(EXPECTED_TEST_RE.search(command) or EXPECTED_NEGATIVE_RE.search(command))
-    write_like = tool_name in {"apply_patch", "Edit", "Write"} or tool_name.endswith("__write_file")
-    critical_bash = tool_name == "Bash" and bool(CRITICAL_BASH_RE.search(command))
-    subagent = tool_name in {"Agent", "spawn_agent"} or tool_name.endswith("__spawn_agent")
-    slug = tool_input.get("slug") if isinstance(tool_input.get("slug"), str) else None
-    safe_slug = slug if slug and INBOX_SLUG_RE.fullmatch(slug) else None
-    success = not failed
+    shell_tool = tool_name.casefold() in {"bash", "exec_command"} or tool_name.casefold().endswith("__exec_command")
+    expected_failure = shell_tool and bool(EXPECTED_TEST_RE.search(command) or EXPECTED_NEGATIVE_RE.search(command))
+    cancelled_or_input_error = bool(CANCELLED_OR_INPUT_ERROR_RE.search(response_text))
     return {
         "schema_version": SCHEMA_VERSION,
         "created_at": int(time.time()),
         "tool_name_hash": _hash(tool_name),
-        "write_like": write_like,
-        "critical_bash": critical_bash,
-        "subagent": subagent,
-        "unexpected_failure": failed and not expected_failure,
-        "put_slug": safe_slug if tool_name == "mcp__gbrain__put_page" and success else None,
-        "get_slug": safe_slug if tool_name == "mcp__gbrain__get_page" and success else None,
+        "unexpected_failure": failed and not expected_failure and not cancelled_or_input_error,
     }
 
 
-def _events(root: Path, key: str) -> list[dict[str, Any]]:
-    directory = root / "events" / key
-    _secure_dir(directory)
-    if not directory.exists():
-        return []
-    values: list[dict[str, Any]] = []
-    for path in directory.glob("*.json"):
-        try:
-            value = _read_json(path)
-            if value:
-                values.append(value)
-        except (OSError, ValueError, RuntimeError):
-            continue
-    return values
-
-
-def _requires_closeout(state: dict[str, Any], events: list[dict[str, Any]]) -> bool:
-    return bool(
-        state.get("intent_nontrivial")
-        or state.get("prior_pending")
-        or len(events) >= 3
-        or any(event.get("write_like") or event.get("critical_bash") or event.get("subagent") or event.get("unexpected_failure") for event in events)
-    )
+def _requires_decision_recall(prompt: str) -> bool:
+    return bool(EXPLICIT_RECALL_RE.search(prompt) or (DECISION_INTENT_RE.search(prompt) and HIGH_IMPACT_RE.search(prompt)))
 
 
 def _valid_constraints(value: Any) -> bool:
@@ -462,13 +445,28 @@ def _receipt_shell_command(token: str | None = None) -> str:
     return command + (" --token " + shlex.quote(token) if token is not None else "")
 
 
-def _parent_context(recall_token: str | None, closeout_token: str | None, event_name: str) -> dict[str, Any]:
+def _parent_context(
+    recall_token: str | None,
+    closeout_token: str | None,
+    event_name: str,
+    recall_kind: str | None = None,
+) -> dict[str, Any]:
     sections: list[str] = []
     if recall_token is not None:
         recall_command = _receipt_shell_command(recall_token)
+        trigger = (
+            "当前方案出现非预期错误后"
+            if recall_kind == "failure"
+            else "重大决策执行前"
+        )
+        scope = (
+            "只传递脱敏后的操作类别、稳定错误码或错误类别和环境类型"
+            if recall_kind == "failure"
+            else "只传递脱敏任务目标"
+        )
         sections.append(
-            "GBRAIN_EXPERIENCE_RECALL_REQUIRED：开始当前非平凡任务前，必须派发独立 Recall Worker。"
-            "主 Agent 只传递脱敏任务目标并等待最小结构化 envelope，不得自行调用 GBrain MCP 进行经验召回。"
+            f"GBRAIN_EXPERIENCE_RECALL_REQUIRED：{trigger}，必须派发独立 Recall Worker。"
+            f"主 Agent {scope}并等待最小结构化 envelope，不得自行调用 GBrain MCP 进行经验召回。"
             f"\nGBRAIN_EXPERIENCE_RECALL_WORKER_TOKEN={recall_token}\n"
             f"Worker 完成只读召回和分类后执行：{recall_command} "
             "--classification <direct|partial|none> --constraints-json '<JSON array>'。"
@@ -527,7 +525,7 @@ def _handle_hook(root: Path, payload: dict[str, Any]) -> None:
                 _remove_turn(root, key)
                 _json_out({"systemMessage": f"GBRAIN_EXPERIENCE_{phase.upper()}_WORKER_INVALID：token 无效；Worker 不得继续。"})
                 return
-            state["intent_nontrivial"] = False
+            state["decision_intent"] = False
             state["worker_phase"] = phase
             state["closeout_worker"] = phase == "closeout"
             state["worker_token_hash"] = _hash(token)
@@ -547,14 +545,31 @@ def _handle_hook(root: Path, payload: dict[str, Any]) -> None:
                 },
             })
             return
-        state["intent_nontrivial"] = bool(NONTRIVIAL_RE.search(prompt))
-        needs_experience = state["intent_nontrivial"] or state.get("prior_pending")
-        recall_token = _arm_phase(state, "recall") if needs_experience and not state.get("recall_notified") else None
+        state["decision_intent"] = _requires_decision_recall(prompt)
+        recall_token = _arm_phase(state, "recall") if state["decision_intent"] and not state.get("recall_notified") else None
+        if recall_token is not None:
+            state["recall_kind"] = "decision"
         _save_turn(root, key, state)
         if recall_token is not None:
-            _json_out(_parent_context(recall_token, None, "UserPromptSubmit"))
+            _json_out(_parent_context(recall_token, None, "UserPromptSubmit", "decision"))
         else:
             _json_out({})
+        return
+    if event_name == "PostToolUse":
+        tool_event = _tool_event(payload)
+        if state.get("worker_phase") or not tool_event.get("unexpected_failure") or state.get("failure_recall_notified"):
+            _json_out({})
+            return
+        if state.get("recall_notified") and not isinstance(state.get("recall_receipt"), dict):
+            _json_out({})
+            return
+        state["recall_receipt"] = None
+        state["recall_notified"] = False
+        recall_token = _arm_phase(state, "recall")
+        state["failure_recall_notified"] = True
+        state["recall_kind"] = "failure"
+        _save_turn(root, key, state)
+        _json_out(_parent_context(recall_token, None, "PostToolUse", "failure"))
         return
     if event_name != "Stop":
         _json_out({})

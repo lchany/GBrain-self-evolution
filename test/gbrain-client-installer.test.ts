@@ -105,7 +105,9 @@ describe('gbrain install-client', () => {
       expect(codexRules.match(/GBRAIN_CLIENT_RULES_START/g)).toHaveLength(1);
       expect(opencodeRules).toContain('默认使用中文');
       expect(opencodeRules).toContain('只读召回');
-      expect(opencodeRules).toContain('主 Agent 不得直接调用 GBrain MCP 执行经验召回');
+      expect(opencodeRules).toContain('重大决策');
+      expect(opencodeRules).toContain('首次非预期执行错误');
+      expect(opencodeRules).toContain('普通任务不自动 Recall');
       expect(opencodeRules).toContain('GBRAIN_EXPERIENCE_RECALL_REQUIRED');
       expect(opencodeRules).toContain('自动 Closeout 已关闭');
       expect(opencodeRules).not.toContain('GBRAIN_EXPERIENCE_CLOSEOUT_REQUIRED');
@@ -119,6 +121,8 @@ describe('gbrain install-client', () => {
       expect(opencodeRules).toContain('不得通过远程 `put_page` 创建或修改项目登记页');
       expect(codexRules).toContain('默认使用中文');
       expect(codexRules).toContain('只读召回');
+      expect(codexRules).toContain('重大决策');
+      expect(codexRules).toContain('首次非预期执行错误');
       expect(codexRules).toContain('自动 Closeout 已关闭');
       expect(codexRules).not.toContain('5 分钟');
       expect(codexRules).toContain('match_project');
@@ -218,11 +222,14 @@ describe('gbrain install-client', () => {
       expect(recallHandlers).toHaveLength(1);
       expect(recallHandlers[0].command).toContain('gbrain-experience-guard.py');
       expect(recallHandlers[0].additionalContextLimit).toBe(2048);
-      for (const eventName of ['PostToolUse', 'Stop']) {
-        const handlers = (hooksConfig.hooks[eventName] ?? []).flatMap((entry) => entry.hooks ?? [])
-          .filter((handler) => handler.statusMessage === 'GBrain 经验 Worker 守卫');
-        expect(handlers).toHaveLength(0);
-      }
+      const failureHandlers = hooksConfig.hooks.PostToolUse.flatMap((entry) => entry.hooks ?? [])
+        .filter((handler) => handler.statusMessage === 'GBrain 经验 Worker 守卫');
+      expect(failureHandlers).toHaveLength(1);
+      expect(failureHandlers[0].command).toContain('gbrain-experience-guard.py');
+      expect(failureHandlers[0].additionalContextLimit).toBe(2048);
+      const stopHandlers = (hooksConfig.hooks.Stop ?? []).flatMap((entry) => entry.hooks ?? [])
+        .filter((handler) => handler.statusMessage === 'GBrain 经验 Worker 守卫');
+      expect(stopHandlers).toHaveLength(0);
 
       const summary = JSON.parse(output.join('')) as {
         ok: boolean;

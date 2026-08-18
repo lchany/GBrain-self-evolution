@@ -5,15 +5,15 @@ export const GBRAIN_CLIENT_RULES = `${GBRAIN_RULES_BLOCK_START}
 # GBrain 客户端规则
 
 - 面向用户的规则、说明、标题、总结和审核提示默认使用中文。命令、代码、路径、协议字段、错误原文和必要的专有名词可以保留英文。
-- 收到非平凡任务时，主 Agent 不得直接调用 GBrain MCP 执行经验召回；必须派发独立 Recall Worker，由 Worker 完成只读召回并把结果分为“直接适用”“部分适用”或“不适用”。非平凡任务包括多步骤工作、代码或配置修改、部署迁移、故障诊断、安全隐私决策，以及影响后续工作的客户或项目规则。
-- 关键执行失败只触发只读故障召回，不等于自动写入。预期失败测试、正常否定探测、无匹配、立即修正的命令错误，以及一次重试即恢复且无复用价值的瞬时故障，不需要总结。
+- 只有重大决策执行前才自动要求独立 Recall Worker 完成只读召回；重大决策必须同时包含明确的选择、取舍或决策意图，以及架构、技术栈、数据库、核心协议、认证授权、安全隐私、生产基础设施、不可逆数据操作、恢复策略或全局/项目规则等高影响领域。用户明确要求召回经验时不受此门槛限制。
+- 当前方案出现首次非预期执行错误后，自动要求一次独立 Recall Worker 进行故障召回；预期失败测试、正常否定探测、用户取消、确定性的输入错误和无匹配不触发。普通任务不自动 Recall，包括一般代码或配置修改、常规功能实现、已确定方案的部署、首次排障和普通总结。
 - OpenCode 与 Codex 只自动执行只读 Recall；自动 Closeout 已关闭。任务结束、工具执行、部署、失败、会话 idle 和普通总结都不得自动触发经验写入。
 - 只有用户明确要求保存、记录或持久化经验时，才使用 \`gbrain-capture\` 手动完成搜索去重、脱敏、固定模板整理、\`inbox/\` 写入和 \`get_page\` 回读验证。
 - 每个新草稿必须由大模型写入 \`review_recommendation\`，包含建议分类、中文使用场景、中文理由和 \`generated_by: model\`；不得要求用户预先选择分类。人工审核只确认或修改分类，“拒绝并删除”也是分类之一。
 - 写入后的正文视为锁定。后续人工审核只调整分类、标签、目标目录、slug 和审核状态；正文、证据、适用条件、不适用条件或验证结果有问题时，拒绝或退回草稿，重新生成。
 - 只通过连接的 GBrain MCP 写入 \`inbox/\` 草稿。写入前搜索已有页面，优先更新相同经验，避免重复创建。不得把原始会话、密集日志、令牌、密码、私钥、个人标识符或未脱敏的非回环 IP 地址写入 GBrain。
 - 使用 GBrain MCP 的 \`list_pages\` 和 \`get_page\` 检查草稿。晋升只能在认证的管理员审核界面完成，匿名 MCP 客户端不得晋升。
-- OpenCode 与 Codex 默认安装单阶段只读经验守卫：非平凡任务开始时要求 Recall Worker。守卫不调用 MCP、不写 GBrain、不读取 transcript、不创建本地经验队列；Recall Worker 使用一次性 token 和显式 receipt 返回最小 envelope。
+- OpenCode 与 Codex 默认安装只读经验守卫：仅在重大决策前或当前方案首次出现非预期执行错误后要求 Recall Worker。守卫不调用 MCP、不写 GBrain、不读取 transcript、不创建本地经验队列；Recall Worker 使用一次性 token 和显式 receipt 返回最小 envelope。
 - 客户端网络访问由云防火墙白名单控制；安装器不创建或分发凭据。
 - OpenCode 首消息守卫与 Codex \`SessionStart\` Hook 只检查会话 \`cwd\` 直接目录中的 \`.gbrain-project.yaml\` 或显式提交的 \`.gbrain/project.yaml\`，不直接调用 MCP。缺少两种标记时会注入 \`GBRAIN_PROJECT_BOOTSTRAP_REQUIRED\` 和本机原子复用的一小时 \`GBRAIN_PROJECT_BOOTSTRAP_CREATION_KEY\` lease；主 Agent 必须立即派发一个 prompt 含 \`GBRAIN_PROJECT_BOOTSTRAP_WORKER\` 的独立子 Agent，由子 Agent 使用该协调键调用 \`ensure_project\`，禁止自行生成新键，再执行 \`bind --resolved\`、读取登记页验证并运行 Hook 提供的 \`complete-bootstrap\` 清理命令。bootstrap 子 Agent 不得继续派生 bootstrap 子 Agent。
 - 收到 \`GBRAIN_EXPERIENCE_RECALL_REQUIRED\` 时，主 Agent 必须立即派发独立 Recall Worker，并把 \`GBRAIN_EXPERIENCE_RECALL_WORKER_TOKEN\` 原样放入 Worker prompt。主 Agent 等待只含分类、最多三条脱敏约束和 receipt 状态的最小 envelope 后再继续任务；不得接收正文、搜索列表、模板或日志。
@@ -51,16 +51,18 @@ Worker，并只接收最小结构化 envelope。只读召回不授权写入。
 
 ## 一、区分召回与写入
 
-Recall Worker 在非平凡任务开始时调用 \`search\` 或 \`query\`，再对相关候选调用
+Recall Worker 在重大决策前、当前方案首次出现非预期执行错误后，或用户明确要求召回时调用 \`search\` 或 \`query\`，再对相关候选调用
 \`get_page\`。把结果明确分为“直接适用”“部分适用”或“不适用”。
 
-非平凡任务包括：
+自动召回的重大决策必须同时具有明确决策意图和高影响领域，例如：
 
-- 多个有依赖关系的执行步骤；
-- 修改代码、配置、数据、服务器或外部系统；
-- 部署、迁移、调试、架构、安全或隐私判断；
-- 会影响后续工作的客户要求、项目规则、偏好或约束；
-- 具有明显成本、风险或难以撤销影响的工作。
+- 架构、技术栈、数据库或核心协议选型；
+- 认证、授权、安全、隐私或密钥边界的取舍；
+- 生产拓扑、流量入口或基础设施策略的改变；
+- 数据迁移、批量删除、不可逆操作或恢复策略；
+- 全局规则、项目规则或长期约束的决策。
+
+一般代码或配置修改、常规功能实现、已确定方案的部署、首次排障和普通总结不自动召回。
 
 只读召回不需要人工确认，也不授权调用 \`put_page\`。
 

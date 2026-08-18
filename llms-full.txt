@@ -3669,10 +3669,11 @@ it does not walk parents or call MCP. When unbound, it emits a bootstrap task
 with one atomically reused local creation key so concurrent sessions converge
 on one project registry. Both clients share the Python read-only recall state machine,
 which observes only bounded metadata and never calls MCP or writes GBrain.
-Nontrivial turns arm one one-time recall token. An isolated Recall Worker owns
+Only high-impact decisions, explicit recall requests, and the first unexpected execution
+failure arm a one-time recall token. Ordinary tasks do not. An isolated Recall Worker owns
 read-only retrieval and returns only a bounded receipt envelope to the parent.
-Automatic Closeout is disabled: Codex has no GBrain-managed `PostToolUse` or `Stop`
-experience handler, and OpenCode has no tool forwarding or idle continuation. Manual
+Automatic Closeout is disabled: Codex uses an error-only GBrain-managed `PostToolUse`
+handler but no `Stop` handler, and OpenCode forwards only unexpected failures with no idle continuation. Manual
 capture runs only when the user explicitly requests `gbrain-capture`.
 Client credentials are not created or distributed. Client reachability is
 controlled by the cloud firewall allowlist.

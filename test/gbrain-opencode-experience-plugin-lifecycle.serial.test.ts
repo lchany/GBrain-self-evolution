@@ -43,17 +43,23 @@ function hook(harness: Harness, name: string): Hook {
 }
 
 describe('OpenCode GBrain guard lifecycle ordering', () => {
-  test('recall-only mode registers no continuation or tool lifecycle hooks', async () => {
-    const harness = await installPlugin(async () => ({ data: true }));
+  test('failure observation keeps tool hooks but never resumes an idle session', async () => {
+    let promptCalls = 0;
+    const harness = await installPlugin(async () => {
+      promptCalls += 1;
+      return { data: true };
+    });
     try {
       const sessionID = 'session-reentrant';
       await hook(harness, 'chat.message')(
         { sessionID, messageID: 'turn-parent' },
         textOutput('请修改代码', sessionID, 'turn-parent'),
       );
-      expect(harness.hooks.event).toBeUndefined();
-      expect(harness.hooks['tool.execute.after']).toBeUndefined();
-      expect(harness.hooks['experimental.chat.system.transform']).toBeUndefined();
+      expect(harness.hooks.event).toBeFunction();
+      expect(harness.hooks['tool.execute.after']).toBeFunction();
+      expect(harness.hooks['experimental.chat.system.transform']).toBeFunction();
+      await hook(harness, 'event')({ event: { type: 'session.idle', properties: { sessionID } } });
+      expect(promptCalls).toBe(0);
     } finally {
       await hook(harness, 'dispose')({});
       rmSync(harness.root, { recursive: true, force: true });

@@ -98,19 +98,56 @@ function completeRecall(script: string, stateDir: string, token: string, constra
 }
 
 describe('Codex GBrain experience guard', () => {
-  test('Given a nontrivial prompt When the turn starts Then only recall is armed', async () => {
+  test('Given ordinary work prompts When turns start Then recall stays silent', async () => {
     const root = tempRoot();
     try {
       expect(await runInstallClient(['--json'], deps(root))).toBe(0);
       const script = join(root, 'codex', 'hooks', 'gbrain-experience-guard.py');
       const stateDir = join(root, 'state');
 
-      const started = runHook(script, stateDir, event('UserPromptSubmit', { prompt: '请修改代码并完成部署配置' }));
-      const context = JSON.stringify(started.json);
-      expect(context).toContain('GBRAIN_EXPERIENCE_RECALL_REQUIRED');
-      expect(context).toContain('GBRAIN_EXPERIENCE_RECALL_WORKER_TOKEN=gbr_');
-      expect(context).not.toContain('GBRAIN_EXPERIENCE_CLOSEOUT_REQUIRED');
-      expect(context).not.toContain('GBRAIN_EXPERIENCE_CLOSEOUT_WORKER_TOKEN=gbc_');
+      for (const [index, prompt] of [
+        '请修复按钮样式',
+        '实现一个普通查询接口',
+        '部署当前已经验证的构建',
+        '帮我排查这个日志报错',
+        '总结这段代码',
+      ].entries()) {
+        const started = runHook(script, stateDir, event('UserPromptSubmit', {
+          session_id: `session-ordinary-${index}`, turn_id: `turn-ordinary-${index}`, prompt,
+        }));
+        expect(started.json).toEqual({});
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('Given a high-impact decision or explicit request When the turn starts Then decision recall is armed', async () => {
+    const root = tempRoot();
+    try {
+      expect(await runInstallClient(['--json'], deps(root))).toBe(0);
+      const script = join(root, 'codex', 'hooks', 'gbrain-experience-guard.py');
+      const stateDir = join(root, 'state');
+      for (const [index, prompt] of [
+        '请在 PostgreSQL 和 SQLite 之间选型并决定生产数据库架构',
+        '是否应该改变认证和权限边界？请给出方案取舍',
+        '生产数据库要不要切换到 PostgreSQL？',
+        'Should we switch the production database architecture?',
+        '请召回历史经验后再处理这个问题',
+      ].entries()) {
+        const started = runHook(script, stateDir, event('UserPromptSubmit', {
+          session_id: `session-decision-${index}`, turn_id: `turn-decision-${index}`, prompt,
+        }));
+        const context = JSON.stringify(started.json);
+        expect(context).toContain('GBRAIN_EXPERIENCE_RECALL_REQUIRED');
+        expect(context).toContain('重大决策');
+        expect(context).toContain('GBRAIN_EXPERIENCE_RECALL_WORKER_TOKEN=gbr_');
+        expect(context).not.toContain('GBRAIN_EXPERIENCE_CLOSEOUT_REQUIRED');
+      }
+      const mentionOnly = runHook(script, stateDir, event('UserPromptSubmit', {
+        session_id: 'session-mention', turn_id: 'turn-mention', prompt: '修改认证接口的一个返回字段',
+      }));
+      expect(mentionOnly.json).toEqual({});
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -122,7 +159,9 @@ describe('Codex GBrain experience guard', () => {
       expect(await runInstallClient(['--json'], deps(root))).toBe(0);
       const script = join(root, 'codex', 'hooks', 'gbrain-experience-guard.py');
       const stateDir = join(root, 'state');
-      const started = runHook(script, stateDir, event('UserPromptSubmit', { prompt: '请修改代码并完成部署配置' }));
+      const started = runHook(script, stateDir, event('UserPromptSubmit', {
+        prompt: '请在两种数据库之间选型并决定生产架构',
+      }));
       const recallToken = tokenFrom(started.json, 'RECALL');
       expect(JSON.stringify(started.json)).toContain(`python3 ${script} receipt --token ${recallToken}`);
       const mixed = receipt(script, stateDir, [
@@ -141,7 +180,7 @@ describe('Codex GBrain experience guard', () => {
       expect(completeRecall(script, stateDir, recallToken).status).toBe(1);
 
       const raced = runHook(script, stateDir, event('UserPromptSubmit', {
-        session_id: 'session-race', turn_id: 'turn-race', prompt: '请实现并验证另一个功能',
+        session_id: 'session-race', turn_id: 'turn-race', prompt: '请决定生产认证架构的技术选型',
       }));
       const racedToken = tokenFrom(raced.json, 'RECALL');
       const raceArgs = ['--token', racedToken, '--classification', 'none', '--constraints-json', '[]'];
@@ -155,37 +194,109 @@ describe('Codex GBrain experience guard', () => {
     }
   });
 
-  test('Given stale PostToolUse and Stop registrations When invoked Then both fail open without closeout context', async () => {
+  test('Given tool outcomes When observed Then only the first unexpected failure arms failure recall', async () => {
     const root = tempRoot();
     try {
       expect(await runInstallClient(['--json'], deps(root))).toBe(0);
       const script = join(root, 'codex', 'hooks', 'gbrain-experience-guard.py');
       const stateDir = join(root, 'state');
-      const tool = runHook(script, stateDir, event('PostToolUse', {
-        tool_name: 'Bash', tool_use_id: 'failure', tool_input: { command: 'custom-command' },
-        tool_response: 'Process exited with code 2',
+      expect(runHook(script, stateDir, event('UserPromptSubmit', { prompt: '请修复一个普通问题' })).json).toEqual({});
+      const success = runHook(script, stateDir, event('PostToolUse', {
+        tool_name: 'Bash', tool_use_id: 'success', tool_input: { command: 'custom-command' },
+        tool_response: { exit_code: 0 },
       }));
-      const stopped = runHook(script, stateDir, event('Stop', { stop_hook_active: false, last_assistant_message: '失败。' }));
-      expect(tool.json).toEqual({});
+      const expectedTest = runHook(script, stateDir, event('PostToolUse', {
+        tool_name: 'Bash', tool_use_id: 'expected-test', tool_input: { command: 'bun test focused.test.ts' },
+        tool_response: { exit_code: 1 },
+      }));
+      const cancelled = runHook(script, stateDir, event('PostToolUse', {
+        session_id: 'session-cancelled', turn_id: 'turn-cancelled', tool_name: 'exec_command',
+        tool_input: { cmd: 'custom-command' }, tool_response: { exit_code: 1, error: 'cancelled by user' },
+      }));
+      const failure = runHook(script, stateDir, event('PostToolUse', {
+        tool_name: 'Bash', tool_use_id: 'failure', tool_input: { command: 'custom-command' },
+        tool_response: { exit_code: 2, error: 'secret failure details' },
+      }));
+      const repeated = runHook(script, stateDir, event('PostToolUse', {
+        tool_name: 'Bash', tool_use_id: 'failure-2', tool_input: { command: 'different-command' },
+        tool_response: { exit_code: 3 },
+      }));
+      const stopped = runHook(script, stateDir, event('Stop', { stop_hook_active: false }));
+      expect(success.json).toEqual({});
+      expect(expectedTest.json).toEqual({});
+      expect(cancelled.json).toEqual({});
+      expect(JSON.stringify(failure.json)).toContain('当前方案出现非预期错误');
+      expect(JSON.stringify(failure.json)).toContain('GBRAIN_EXPERIENCE_RECALL_WORKER_TOKEN=gbr_');
+      expect(repeated.json).toEqual({});
       expect(stopped.json.decision).toBeUndefined();
-      expect(JSON.stringify([tool.json, stopped.json])).not.toContain('GBRAIN_EXPERIENCE_CLOSEOUT_REQUIRED');
+      expect(JSON.stringify([failure.json, stopped.json])).not.toContain('GBRAIN_EXPERIENCE_CLOSEOUT_REQUIRED');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  test('state stores only bounded metadata with private permissions and per-tool event files', async () => {
+  test('Given completed decision recall When execution later fails Then failure recall gets a distinct token', async () => {
     const root = tempRoot();
     try {
       expect(await runInstallClient(['--json'], deps(root))).toBe(0);
       const script = join(root, 'codex', 'hooks', 'gbrain-experience-guard.py');
       const stateDir = join(root, 'state');
-      const secretPrompt = '修改配置，password=do-not-store';
+      const decision = runHook(script, stateDir, event('UserPromptSubmit', {
+        prompt: '请在两种数据库之间选型并决定生产架构',
+      }));
+      const decisionToken = tokenFrom(decision.json, 'RECALL');
+      expect(completeRecall(script, stateDir, decisionToken).status).toBe(0);
+      const failure = runHook(script, stateDir, event('PostToolUse', {
+        tool_name: 'Bash', tool_use_id: 'failure-after-decision', tool_input: { command: 'apply-plan' },
+        tool_response: { exit_code: 2 },
+      }));
+      const failureToken = tokenFrom(failure.json, 'RECALL');
+      expect(failureToken).not.toBe(decisionToken);
+      expect(JSON.stringify(failure.json)).toContain('当前方案出现非预期错误');
+      expect(completeRecall(script, stateDir, failureToken).status).toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('Given a recall worker turn When its tool fails Then the guard does not recursively request recall', async () => {
+    const root = tempRoot();
+    try {
+      expect(await runInstallClient(['--json'], deps(root))).toBe(0);
+      const script = join(root, 'codex', 'hooks', 'gbrain-experience-guard.py');
+      const stateDir = join(root, 'state');
+      const parent = runHook(script, stateDir, event('UserPromptSubmit', {
+        prompt: '请决定生产数据库架构的技术选型',
+      }));
+      const token = tokenFrom(parent.json, 'RECALL');
+      const worker = runHook(script, stateDir, event('UserPromptSubmit', {
+        session_id: 'worker-session', turn_id: 'worker-turn',
+        prompt: `GBRAIN_EXPERIENCE_RECALL_WORKER_TOKEN=${token}\n`,
+      }));
+      expect(JSON.stringify(worker.json)).toContain('GBRAIN_EXPERIENCE_RECALL_WORKER');
+      const failure = runHook(script, stateDir, event('PostToolUse', {
+        session_id: 'worker-session', turn_id: 'worker-turn', tool_name: 'Bash',
+        tool_input: { command: 'lookup-experience' }, tool_response: { exit_code: 2 },
+      }));
+      expect(failure.json).toEqual({});
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('state stores only bounded private metadata without prompt, command, or error text', async () => {
+    const root = tempRoot();
+    try {
+      expect(await runInstallClient(['--json'], deps(root))).toBe(0);
+      const script = join(root, 'codex', 'hooks', 'gbrain-experience-guard.py');
+      const stateDir = join(root, 'state');
+      const secretPrompt = '修复普通配置，password=do-not-store';
       const secretCommand = 'deploy --token do-not-store';
       runHook(script, stateDir, event('UserPromptSubmit', { prompt: secretPrompt }));
       for (let i = 0; i < 3; i += 1) {
         runHook(script, stateDir, event('PostToolUse', {
-          tool_name: 'Bash', tool_use_id: `tool-${i}`, tool_input: { command: secretCommand }, tool_response: { exit_code: 0 },
+          tool_name: 'Bash', tool_use_id: `tool-${i}`, tool_input: { command: secretCommand },
+          tool_response: i === 0 ? { exit_code: 2, error: 'secret-error-do-not-store' } : { exit_code: 0 },
         }));
       }
 
@@ -198,6 +309,7 @@ describe('Codex GBrain experience guard', () => {
       expect(stored).not.toContain(secretPrompt);
       expect(stored).not.toContain(secretCommand);
       expect(stored).not.toContain('do-not-store');
+      expect(stored).not.toContain('secret-error');
       expect(stored).not.toContain('session-test');
       for (const file of files) expect(statSync(join(stateDir, file)).mode & 0o777).toBe(0o600);
     } finally {

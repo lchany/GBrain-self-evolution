@@ -67,10 +67,10 @@ function hook(harness: PluginHarness, name: string): (input: unknown, output?: u
 }
 
 describe('OpenCode GBrain client guard', () => {
-  test('Given an unbound project and nontrivial prompt When the first message runs Then bootstrap and recall are injected', async () => {
+  test('Given an unbound project and major decision prompt When the first message runs Then bootstrap and recall are injected', async () => {
     const harness = await installPlugin(false);
     try {
-      const output = textOutput('请修改代码并完成部署配置');
+      const output = textOutput('请在两种数据库之间选型并决定生产架构');
       await hook(harness, 'chat.message')({ sessionID: 'session-parent', messageID: 'turn-parent' }, output);
       expect(output.parts[0]?.text).toContain('GBRAIN_PROJECT_BOOTSTRAP_REQUIRED');
       expect(output.parts[0]?.text).toContain('GBRAIN_PROJECT_BOOTSTRAP_CREATION_KEY=');
@@ -108,15 +108,41 @@ describe('OpenCode GBrain client guard', () => {
     }
   });
 
-  test('Given the recall-only plugin When hooks are registered Then tool, system, and idle hooks are absent', async () => {
+  test('Given OpenCode tool outcomes When only failure occurs Then one failure recall is injected', async () => {
     const harness = await installPlugin();
     try {
       const output = textOutput('please take care of it');
       await hook(harness, 'chat.message')({ sessionID: 'session-tools', messageID: 'turn-tools' }, output);
       expect(output.parts[0]?.text).not.toContain('GBRAIN_EXPERIENCE_CLOSEOUT_REQUIRED');
-      expect(harness.hooks['tool.execute.after']).toBeUndefined();
-      expect(harness.hooks['experimental.chat.system.transform']).toBeUndefined();
-      expect(harness.hooks.event).toBeUndefined();
+      await hook(harness, 'tool.execute.after')(
+        { tool: 'bash', sessionID: 'session-tools', callID: 'success', args: { command: 'check' } },
+        { output: 'ok', metadata: { exit: 0 } },
+      );
+      const afterSuccess = { system: [] as string[] };
+      await hook(harness, 'experimental.chat.system.transform')({ sessionID: 'session-tools' }, afterSuccess);
+      expect(afterSuccess.system).toHaveLength(0);
+
+      await hook(harness, 'tool.execute.after')(
+        { tool: 'bash', sessionID: 'session-tools', callID: 'failure', args: { command: 'apply-plan' } },
+        { output: 'secret failure', metadata: { exit: 2 } },
+      );
+      const afterFailure = { system: [] as string[] };
+      await hook(harness, 'experimental.chat.system.transform')({ sessionID: 'session-tools' }, afterFailure);
+      expect(afterFailure.system.join('')).toContain('当前方案出现非预期错误');
+      expect(afterFailure.system.join('')).toContain('GBRAIN_EXPERIENCE_RECALL_WORKER_TOKEN=gbr_');
+      expect(afterFailure.system.join('')).not.toContain('GBRAIN_EXPERIENCE_CLOSEOUT_REQUIRED');
+      const repeated = { system: [] as string[] };
+      await hook(harness, 'experimental.chat.system.transform')({ sessionID: 'session-tools' }, repeated);
+      expect(repeated.system).toHaveLength(0);
+
+      const eventOutput = textOutput('continue ordinary work', 'session-event', 'turn-event');
+      await hook(harness, 'chat.message')({ sessionID: 'session-event', messageID: 'turn-event' }, eventOutput);
+      await hook(harness, 'event')({ event: { type: 'message.part.updated', properties: { part: {
+        type: 'tool', sessionID: 'session-event', tool: 'bash', state: { status: 'error', input: { command: 'apply-plan' } },
+      } } } });
+      const afterEventFailure = { system: [] as string[] };
+      await hook(harness, 'experimental.chat.system.transform')({ sessionID: 'session-event' }, afterEventFailure);
+      expect(afterEventFailure.system.join('')).toContain('当前方案出现非预期错误');
     } finally {
       await hook(harness, 'dispose')({});
       rmSync(harness.root, { recursive: true, force: true });
@@ -128,7 +154,7 @@ describe('OpenCode GBrain client guard', () => {
     try {
       const output = textOutput('请修改代码');
       await hook(harness, 'chat.message')({ sessionID: 'session-idle', messageID: 'turn-idle' }, output);
-      expect(harness.hooks.event).toBeUndefined();
+      await hook(harness, 'event')({ event: { type: 'session.idle', properties: { sessionID: 'session-idle' } } });
       expect(harness.calls).toHaveLength(0);
     } finally {
       await hook(harness, 'dispose')({});

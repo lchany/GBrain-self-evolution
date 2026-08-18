@@ -34,8 +34,9 @@ export function mergeCodexHooksConfig(
   for (const eventName of ['UserPromptSubmit', 'PostToolUse', 'Stop']) {
     const groups = getHookGroups(hooks, eventName);
     const withoutExperience = groups.flatMap((group) => removeManagedExperienceHandlers(group));
-    if (experienceHook && eventName === 'UserPromptSubmit') {
+    if (experienceHook && (eventName === 'UserPromptSubmit' || eventName === 'PostToolUse')) {
       withoutExperience.push({
+        ...(eventName === 'PostToolUse' ? { matcher: '*' } : {}),
         hooks: [{
           type: 'command',
           command: `python3 ${shellQuote(experienceScriptPath)}`,
