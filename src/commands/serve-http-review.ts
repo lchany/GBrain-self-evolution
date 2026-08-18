@@ -58,6 +58,12 @@ import {
   type WriterSessionFactory,
   type WriterToolSession,
 } from './gbrain-capture-writer.ts';
+import {
+  executeBatchClassification,
+  parseBatchClassificationBody,
+  renderBatchReviewControls,
+  renderBatchReviewScript,
+} from './serve-http-review-batch.ts';
 import { renderReviewPreflight } from './review-preflight.ts';
 import {
   hasAttestedSource,
@@ -415,6 +421,27 @@ export function mountReviewRoutes(
     }
   });
 
+  // --- API: POST /admin/api/review/classify-batch ---
+
+  app.post('/admin/api/review/classify-batch', requireAdmin, requireSameOrigin, express.json(), reviewParserError, async (req: Request, res: Response) => {
+    const request = parseBatchClassificationBody(req.body);
+    if (request === null) {
+      res.status(400).json({ error: 'invalid_request', message: '请求只能包含 1 至 50 个 inbox 草稿和批量决定。' });
+      return;
+    }
+
+    res.json(await executeBatchClassification(request, {
+      readPage: (sourceSlug) => engine.getPage(sourceSlug, { sourceId: reviewSourceId }),
+      recommendationFor: (page) => parseReviewRecommendation(page.frontmatter.review_recommendation, page)
+        ?? recommendationCache.get(recommendationCacheKey(page)),
+      actionFor: (category, page) => buildClassificationAction(category, pageToReviewSource(page)),
+      plan: (action) => planReview(buildDeps(), { action, reviewDate: getReviewDate() }),
+      apply: (writerSession, plan) => applyReviewPlan(buildDeps(writerSession), plan),
+      createWriterSession: createAttestedWriterSession,
+      logFailure: logReviewFailure,
+    }));
+  });
+
   // --- API: POST /admin/api/review/plan ---
 
   app.post('/admin/api/review/plan', requireAdmin, requireSameOrigin, express.json(), reviewParserError, reviewUrlEncodedParser, reviewParserError, async (req: Request, res: Response) => {
@@ -521,10 +548,12 @@ export function mountReviewRoutes(
       const filterBar = renderFilterBar(typeFilter, verificationFilter, staleOnly, projectId);
       const bodyContent = drafts.length === 0
         ? renderEmptyState(typeFilter, verificationFilter, staleOnly, projectId)
-        : `<table class="review-table">
-          <thead><tr><th>标题</th><th>建议分类</th><th>验证</th><th>更新时间</th><th>操作</th></tr></thead>
+        : `${renderBatchReviewControls()}
+        <table class="review-table" id="review-inbox-table">
+          <thead><tr><th class="review-select-cell"><input id="review-select-all" type="checkbox" aria-label="全选当前页" /></th><th>标题</th><th>建议分类</th><th>验证</th><th>更新时间</th><th>操作</th></tr></thead>
           <tbody>${drafts.map((p) => renderDraftRow(p)).join('\n')}</tbody>
-        </table>`;
+        </table>
+        ${renderBatchReviewScript()}`;
 
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.send(renderShell('Inbox 草稿审核', `
@@ -1336,6 +1365,7 @@ function renderDraftRow(p: Page): string {
   const recommendation = parseReviewRecommendation(p.frontmatter.review_recommendation, p);
   const recommendationLabel = recommendation === null ? '待生成' : REVIEW_CATEGORY_LABELS[recommendation.category];
   return `<tr>
+  <td class="review-select-cell" data-label="选择"><input type="checkbox" name="sourceSlugs" value="${escapeHtml(p.slug)}" aria-label="选择 ${escapeHtml(p.title)}" /></td>
   <td data-label="草稿"><div>${escapeHtml(p.title)}</div><div class="slug-mono">${escapeHtml(p.slug)}</div>${projectIdLine}</td>
   <td data-label="建议分类">${escapeHtml(recommendationLabel)}</td>
   <td data-label="验证">${verificationBadge}</td>
@@ -1383,6 +1413,12 @@ function renderShell(title: string, body: string): string {
   .review-filters{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin:16px 0;padding:16px;background:#12121a;border:1px solid #1e1e2e;border-radius:8px}
   .review-filters label{display:flex;flex-direction:column;font-size:12px;color:#888888;gap:4px}
   .review-filters input,.review-filters select{background:#0f0f1a;border:1px solid #1e1e2e;color:#e0e0e0;padding:6px 10px;border-radius:8px;font-size:13px;min-width:120px}
+  .batch-review-controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:16px 0;padding:12px 16px;background:#12121a;border:1px solid #1e1e2e;border-radius:8px}
+  .batch-review-controls #batch-review-result{flex-basis:100%;margin:0}
+  .batch-reject-button{background:#6a2f38}
+  .batch-reject-button:hover{background:#7d3944}
+  .review-select-cell{width:44px;text-align:center!important;padding-left:8px!important;padding-right:8px!important}
+  .review-select-cell input{margin:0}
   .empty-state{text-align:center;color:#888888;padding:48px 0}
   .decision-card-section{margin-top:32px}
   .decision-card-section h2{margin-bottom:8px}

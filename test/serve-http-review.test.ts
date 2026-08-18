@@ -24,6 +24,7 @@ import {
   generateReviewTargetSlug,
   pageToReviewSource,
 } from '../src/commands/serve-http-review.ts';
+import { parseBatchClassificationBody } from '../src/commands/serve-http-review-batch.ts';
 import {
   COMMON_REVIEW_ACTIONS,
   RARE_REVIEW_ACTIONS,
@@ -1314,6 +1315,209 @@ describe('single classification review', () => {
     });
     expect(result.status).toBe(200);
     expect(calls).toEqual(['put_page', 'delete_page']);
+  });
+});
+
+describe('batch classification review', () => {
+  test('inbox exposes current-page selection and exactly two batch decisions', async () => {
+    const first = makePage('inbox/batch-ui-one', { title: '批量草稿一' });
+    const second = makePage('inbox/batch-ui-two', { title: '批量草稿二' });
+
+    const result = await fetchApp(createApp(mockEngine([first, second])), '/admin/review');
+
+    expect(result.status).toBe(200);
+    expect(result.text).toContain('id="review-select-all"');
+    expect(result.text.match(/<input type="checkbox" name="sourceSlugs"/g)?.length).toBe(2);
+    expect(result.text).toContain('id="batch-selected-count"');
+    expect(result.text.match(/data-batch-decision=/g)?.length).toBe(2);
+    expect(result.text).toMatch(/data-batch-decision="accept"[^>]*>同意<\/button>/);
+    expect(result.text).toMatch(/data-batch-decision="reject"[^>]*>拒绝并删除<\/button>/);
+    expect(result.text).not.toContain('name="batchCategory"');
+    expect(result.text).not.toContain('批量预检');
+  });
+
+  test('batch request parser is strict, bounded, and deduplicates in first-seen order', () => {
+    expect(parseBatchClassificationBody({
+      sourceSlugs: ['inbox/one', 'inbox/two', 'inbox/one'],
+      decision: 'accept',
+    })).toEqual({ sourceSlugs: ['inbox/one', 'inbox/two'], decision: 'accept' });
+    expect(parseBatchClassificationBody({ sourceSlugs: [], decision: 'accept' })).toBeNull();
+    expect(parseBatchClassificationBody({ sourceSlugs: Array.from({ length: 51 }, (_, index) => `inbox/item-${index}`), decision: 'reject' })).toBeNull();
+    expect(parseBatchClassificationBody({ sourceSlugs: ['inbox/one'], decision: 'accept', category: 'incident' })).toBeNull();
+    expect(parseBatchClassificationBody({ sourceSlugs: ['knowledge/not-inbox'], decision: 'accept' })).toBeNull();
+    expect(parseBatchClassificationBody({ sourceSlugs: ['inbox/../escape'], decision: 'reject' })).toBeNull();
+    expect(parseBatchClassificationBody({ sourceSlugs: ['inbox/中文_经验'], decision: 'accept' })).toEqual({
+      sourceSlugs: ['inbox/中文_经验'], decision: 'accept',
+    });
+  });
+
+  test('accept uses each current model recommendation, keeps missing recommendations, and shares one attested writer session', async () => {
+    const incident = makePage('inbox/batch-incident');
+    incident.frontmatter.review_recommendation = {
+      category: 'incident', scenario: '故障复盘。', reason: '包含根因。', generated_by: 'model',
+    };
+    const knowledge = makePage('inbox/batch-knowledge');
+    knowledge.frontmatter.review_recommendation = {
+      category: 'knowledge', scenario: '跨项目方法。', reason: '内容通用。', generated_by: 'model',
+    };
+    const missing = makePage('inbox/batch-missing');
+    const pages = new Map([incident, knowledge, missing].map((page) => [page.slug, page]));
+    const writerCalls: Array<{ readonly name: string; readonly slug: string }> = [];
+    let sessions = 0;
+    let closes = 0;
+    const engine = {
+      getPage: async (slug: string) => pages.get(slug) ?? null,
+      listPages: async (filters: { readonly slugPrefix?: string }) => [...pages.values()].filter((page) => !page.deleted_at && (filters.slugPrefix === undefined || page.slug.startsWith(filters.slugPrefix))),
+    } as unknown as BrainEngine;
+    const app = createApp(engine, undefined, {
+      writerSessionFactory: async () => {
+        sessions += 1;
+        return {
+          callTool: async (name, args) => {
+            if (name === 'whoami') return { source_id: 'default' };
+            const slug = String(args.slug ?? '');
+            writerCalls.push({ name, slug });
+            if (name === 'put_page' && !slug.startsWith('decisions/reviews/')) {
+              pages.set(slug, makePage(slug, { type: slug.startsWith('knowledge/') ? 'knowledge' : 'incident' }));
+            }
+            if (name === 'delete_page') {
+              const source = pages.get(slug);
+              if (source !== undefined) source.deleted_at = new Date();
+            }
+            return { ok: true };
+          },
+          close: async () => { closes += 1; },
+        };
+      },
+    });
+
+    const result = await fetchApp(app, '/admin/api/review/classify-batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sourceSlugs: [incident.slug, missing.slug, knowledge.slug], decision: 'accept' }),
+    });
+
+    expect(result.status).toBe(200);
+    expect(result.body).toMatchObject({ succeeded: 2, failed: 1 });
+    expect((result.body as { results: readonly Record<string, unknown>[] }).results).toEqual([
+      { sourceSlug: incident.slug, status: 'succeeded', category: 'incident' },
+      { sourceSlug: missing.slug, status: 'failed', code: 'recommendation_missing', message: '该草稿缺少有效的模型推荐，已保留在收件箱。' },
+      { sourceSlug: knowledge.slug, status: 'succeeded', category: 'knowledge' },
+    ]);
+    expect(sessions).toBe(1);
+    expect(closes).toBe(1);
+    expect(writerCalls.some((call) => call.slug === 'incidents/batch-incident')).toBe(true);
+    expect(writerCalls.some((call) => call.slug === 'knowledge/batch-knowledge')).toBe(true);
+    expect(missing.deleted_at).toBeUndefined();
+  });
+
+  test('reject does not require recommendations and preserves per-item audit-before-delete order', async () => {
+    const first = makePage('inbox/batch-reject-one');
+    const second = makePage('inbox/batch-reject-two');
+    const calls: Array<{ readonly name: string; readonly slug: string }> = [];
+    let sessions = 0;
+    const result = await fetchApp(createApp(mockEngine([first, second]), undefined, {
+      writerSessionFactory: async () => {
+        sessions += 1;
+        return {
+          callTool: async (name, args) => {
+            if (name === 'whoami') return { source_id: 'default' };
+            calls.push({ name, slug: String(args.slug ?? '') });
+            return { ok: true };
+          },
+          close: async () => {},
+        };
+      },
+    }), '/admin/api/review/classify-batch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sourceSlugs: [first.slug, second.slug], decision: 'reject' }),
+    });
+
+    expect(result.status).toBe(200);
+    expect(result.body).toMatchObject({ succeeded: 2, failed: 0 });
+    expect((result.body as { results: readonly Record<string, unknown>[] }).results).toEqual([
+      { sourceSlug: first.slug, status: 'succeeded', category: 'reject' },
+      { sourceSlug: second.slug, status: 'succeeded', category: 'reject' },
+    ]);
+    expect(sessions).toBe(1);
+    expect(calls.map((call) => call.name)).toEqual(['put_page', 'delete_page', 'put_page', 'delete_page']);
+    expect(calls[0]?.slug).toStartWith('decisions/reviews/');
+    expect(calls[1]?.slug).toBe(first.slug);
+    expect(calls[2]?.slug).toStartWith('decisions/reviews/');
+    expect(calls[3]?.slug).toBe(second.slug);
+  });
+
+  test('one failed item stays failed while a later item continues in the same batch', async () => {
+    const first = makePage('inbox/batch-partial-one');
+    const second = makePage('inbox/batch-partial-two');
+    let firstAuditFailed = false;
+    const calls: Array<{ readonly name: string; readonly slug: string }> = [];
+    const result = await fetchApp(createApp(mockEngine([first, second]), async (name, args) => {
+      const slug = String(args.slug ?? '');
+      calls.push({ name, slug });
+      if (name === 'put_page' && !firstAuditFailed) {
+        firstAuditFailed = true;
+        return { ok: false, error: 'SECRET_BATCH_WRITER_CANARY' };
+      }
+      return { ok: true };
+    }), '/admin/api/review/classify-batch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sourceSlugs: [first.slug, second.slug], decision: 'reject' }),
+    });
+
+    expect(result.status).toBe(200);
+    expect(result.body).toMatchObject({ succeeded: 1, failed: 1 });
+    expect((result.body as { results: readonly Record<string, unknown>[] }).results).toEqual([
+      { sourceSlug: first.slug, status: 'failed', code: 'review_write_failed', message: '审核写入失败，草稿已保留在收件箱。' },
+      { sourceSlug: second.slug, status: 'succeeded', category: 'reject' },
+    ]);
+    expect(result.text).not.toContain('SECRET_BATCH_WRITER_CANARY');
+    expect(calls.map((call) => call.name)).toEqual(['put_page', 'put_page', 'delete_page']);
+  });
+
+  test('writer attestation failure becomes fixed per-item failures without leaking the exception', async () => {
+    const first = makePage('inbox/batch-writer-one');
+    const second = makePage('inbox/batch-writer-two');
+    const result = await fetchApp(createApp(mockEngine([first, second]), undefined, {
+      writerSessionFactory: async () => ({
+        callTool: async () => { throw new Error('SECRET_BATCH_ATTESTATION_CANARY'); },
+        close: async () => {},
+      }),
+    }), '/admin/api/review/classify-batch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sourceSlugs: [first.slug, second.slug], decision: 'reject' }),
+    });
+
+    expect(result.status).toBe(200);
+    expect(result.body).toMatchObject({ succeeded: 0, failed: 2 });
+    for (const item of (result.body as { results: readonly Record<string, unknown>[] }).results) {
+      expect(item).toMatchObject({ status: 'failed', code: 'writer_unavailable', message: '审核写入服务暂时不可用，草稿已保留在收件箱。' });
+    }
+    expect(result.text).not.toContain('SECRET_BATCH_ATTESTATION_CANARY');
+  });
+
+  test('invalid batch input and wrong origin fail before opening the writer session', async () => {
+    const page = makePage('inbox/batch-security');
+    let sessions = 0;
+    const app = createApp(mockEngine([page]), undefined, {
+      writerSessionFactory: async () => {
+        sessions += 1;
+        throw new Error('writer must not open');
+      },
+    });
+
+    const invalid = await fetchApp(app, '/admin/api/review/classify-batch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sourceSlugs: [page.slug], decision: 'accept', category: 'incident' }),
+    });
+    const wrongOrigin = await fetchApp(app, '/admin/api/review/classify-batch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'http://evil.test' },
+      body: JSON.stringify({ sourceSlugs: [page.slug], decision: 'reject' }),
+    });
+
+    expect(invalid.status).toBe(400);
+    expect(wrongOrigin.status).toBe(403);
+    expect(sessions).toBe(0);
   });
 });
 
