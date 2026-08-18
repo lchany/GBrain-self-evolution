@@ -37,7 +37,7 @@ import {
   browserSafeReviewError,
   projectBrowserSafeText,
 } from '../src/core/review/browser-safe.ts';
-import { planReview, type ReviewCoreDeps, type ReviewSourcePage } from '../src/core/review/index.ts';
+import { planReview, type ReviewCoreDeps, type ReviewRecommendationProvider, type ReviewSourcePage } from '../src/core/review/index.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { Page } from '../src/core/types.ts';
 import {
@@ -152,6 +152,7 @@ type CreateAppOptions = {
   readonly adminOrigin?: URL;
   readonly writerSessionFactory?: WriterSessionFactory;
   readonly reviewSourceId?: string;
+  readonly recommendationProvider?: ReviewRecommendationProvider;
 };
 
 function createApp(
@@ -178,6 +179,7 @@ function createApp(
     issuerUrl: new URL('http://review.test'),
     reviewDate: () => REVIEW_DATE,
     reviewSourceId: options.reviewSourceId,
+    recommendationProvider: options.recommendationProvider,
   });
   return app;
 }
@@ -761,35 +763,7 @@ describe('review web routes', () => {
     expect(result.text).toContain('inbox/html-test');
   });
 
-  test('Given any review page When rendered Then it uses the larger Chinese reading type scale and light workbench palette', async () => {
-    const app = createApp(mockEngine([makePage('inbox/light-theme')]));
-    const result = await fetchApp(app, '/admin/review');
-
-    expect(result.status).toBe(200);
-    expect(result.text).toContain('color-scheme:light');
-    expect(result.text).toContain("--font-body:'MiSans','HarmonyOS Sans SC','Noto Sans SC'");
-    expect(result.text).toContain('--page:#f7f8fc');
-    expect(result.text).toContain('font-size:16px');
-    expect(result.text).not.toContain('background:#0a0a0f');
-    expect(result.text).not.toContain("'JetBrains Mono'");
-  });
-
-  test('Given a draft with content When the inbox list renders Then it stays compact and links to the full review page', async () => {
-    const page = makePage('inbox/content-summary', {
-      title: '机器标题',
-      compiled_truth: '# 这是一条项目决策\n\n保留旧资产，不设置自动删除日期。',
-    });
-    const app = createApp(mockEngine([page]));
-    const result = await fetchApp(app, '/admin/review');
-
-    expect(result.status).toBe(200);
-    expect(result.text).toContain('机器标题');
-    expect(result.text).toContain('打开并分类');
-    expect(result.text).not.toContain('展开查看内容摘要');
-    expect(result.text).not.toContain('保留旧资产');
-  });
-
-  test('GET /admin/review renders a compact classification queue with only essential information', async () => {
+  test('GET /admin/review renders a simple classification queue', async () => {
     // given
     const engine = mockEngine([makePage('inbox/triage-test', { title: '分诊测试草稿' })]);
     const app = createApp(engine);
@@ -797,17 +771,14 @@ describe('review web routes', () => {
     // when
     const result = await fetchApp(app, '/admin/review');
 
-    // then: title, system-suggested type, updated time, and detail link
+    // then
     expect(result.status).toBe(200);
     expect(result.text).toContain('分诊测试草稿');
-    expect(result.text).toContain('AI 初判');
-    expect(result.text).toContain('打开并分类');
-    expect(result.text).toContain('class="review-queue-item"');
+    expect(result.text).toContain('开始审核');
     expect(result.text).toContain('/admin/review/detail/' + encodeURIComponent('inbox/triage-test'));
-    expect(result.text).not.toContain('<th>风险</th>');
-    expect(result.text).not.toContain('<th>重复</th>');
-    expect(result.text).not.toContain('<th>过期</th>');
-    expect(result.text).not.toContain('<th>验证</th>');
+    expect(result.text).toContain('建议分类');
+    expect(result.text).toContain('待生成');
+    expect(result.text).not.toContain('预检');
     // updated date present
     expect(result.text).toContain('2026-07-26');
     // only the four API-backed filters are offered; no risk filter
@@ -862,7 +833,7 @@ describe('review web routes', () => {
 
     // then
     expect(result.status).toBe(200);
-    expect(result.text).toContain('草稿详情');
+    expect(result.text).toContain('确认经验分类');
     expect(result.text).toContain('inbox/html-detail');
   });
 
@@ -878,32 +849,6 @@ describe('review web routes', () => {
     expect(result.status).toBe(200);
     expect(result.text).toContain('审核计划');
     expect(result.text).toContain('incidents/html-plan');
-  });
-
-  test('Given an already reviewed draft When a stale plan page is submitted Then it reports completion instead of a gate failure', async () => {
-    const sourceSlug = 'inbox/already-reviewed';
-    const review = makePage('decisions/reviews/already-reviewed-20260730', {
-      type: 'decision',
-      title: 'Review already reviewed',
-    });
-    review.frontmatter = {
-      ...review.frontmatter,
-      review_action: 'reject',
-      source_refs: [sourceSlug],
-      status: 'reviewed',
-    };
-    const app = createApp(mockEngine([review]));
-
-    const result = await fetchApp(
-      app,
-      `/admin/review/plan/${encodeURIComponent(sourceSlug)}?action=reject&reason=${encodeURIComponent('无保留价值')}`,
-    );
-
-    expect(result.status).toBe(200);
-    expect(result.text).toContain('这条经验已经完成审核');
-    expect(result.text).toContain('丢弃这条草稿');
-    expect(result.text).toContain('查看审核历史');
-    expect(result.text).not.toContain('门禁未通过，提交按钮已禁用');
   });
 
   test('Given a merge action with a PROMOTE-prefixed phrase When confirm is called Then the adapter rejects it', async () => {
@@ -1012,8 +957,7 @@ describe('review inbox triage console', () => {
     // then
     expect(result.status).toBe(200);
     expect(result.text).toContain('未验证');
-    expect(result.text).toContain('inbox/ver-no');
-    expect(result.text).not.toContain('inbox/ver-yes');
+    expect(result.text).not.toContain('已验证');
   });
 
   test('Given an inbox with no drafts When the list is requested Then Chinese empty state renders', async () => {
@@ -1055,8 +999,9 @@ describe('review inbox triage console', () => {
     // then
     expect(result.status).toBe(200);
     expect(result.text).toContain('稀疏草稿');
-    expect(result.text).toContain('draft');
-    expect(result.text).toContain('打开并分类');
+    expect(result.text).toContain('unverified');
+    expect(result.text).toContain('待生成');
+    expect(result.text).not.toContain('预检');
   });
 
   test('Given an engine that throws on listPages When the list is requested Then 503 with fixed Chinese and no exception leak', async () => {
@@ -1095,7 +1040,7 @@ describe('review inbox triage console', () => {
     expect(result.text).toContain('method="get"');
   });
 
-  test('Given the classification queue When inspected Then each experience card links to its detail page', async () => {
+  test('Given the triage list HTML When inspected Then each draft row links to detail via 开始审核', async () => {
     // given
     const engine = mockEngine([makePage('inbox/link-test', { title: '链接测试' })]);
     const app = createApp(engine);
@@ -1105,48 +1050,71 @@ describe('review inbox triage console', () => {
 
     // then
     expect(result.status).toBe(200);
-    expect(result.text).toContain('打开并分类');
+    expect(result.text).toContain('开始审核');
     expect(result.text).toContain('href="/admin/review/detail/' + encodeURIComponent('inbox/link-test') + '"');
   });
 });
 
-describe('simple review detail', () => {
-  test('Given a long experience When its detail renders Then full content and retrieval scenarios are listed', async () => {
-    const longTail = 'x'.repeat(2400);
-    const page = makePage('inbox/detail-content', {
-      title: '完整经验',
-      compiled_truth: `## 场景\n\n旧系统迁移。\n\n## 适用场景\n\n- 需要保留历史资产\n\n## 结论\n\n保留旧资产。\n\n${longTail}`,
+describe('detail summary', () => {
+  test('Given a verified draft When its detail renders Then the summary precedes expandable evidence without a preflight', async () => {
+    // given
+    const page = makePage('inbox/detail-summary', {
+      type: 'unrecognized-source-type',
+      title: '摘要优先草稿',
     });
     page.frontmatter = {
       ...page.frontmatter,
-      applicability: ['遗留系统迁移', '历史资产保留'],
-      non_applicable: ['全新项目'],
+      applicability: ['当前项目', '复盘'],
+      project_id: 'project-summary',
     };
-    const app = createApp(mockEngine([page]));
+    const getPageCalls: string[] = [];
+    let listPagesCalls = 0;
+    const app = createApp(mockEngine([page], {
+      onGetPage: (slug) => getPageCalls.push(slug),
+      onListPages: () => { listPagesCalls += 1; },
+    }));
 
+    // when
     const result = await fetchApp(app, `/admin/review/detail/${encodeURIComponent(page.slug)}`);
 
+    // then
     expect(result.status).toBe(200);
-    expect(result.text).toContain('经验内容');
-    expect(result.text).toContain(longTail);
-    expect(result.text).toContain('什么场景下会被召回');
-    expect(result.text).toContain('遗留系统迁移');
-    expect(result.text).toContain('需要保留历史资产');
-    expect(result.text).toContain('不应召回的场景');
-    expect(result.text).toContain('全新项目');
+    const summaryIndex = result.text.indexOf('class="detail-summary"');
+    const metadataIndex = result.text.indexOf('<details');
+    expect(summaryIndex).toBeGreaterThan(-1);
+    expect(metadataIndex).toBeGreaterThan(summaryIndex);
+    expect(result.text).toContain('草稿类型');
+    expect(result.text).toContain('用途');
+    expect(result.text).toContain('验证状态');
+    expect(result.text).toContain('模型建议');
+    expect(result.text).toContain('正在生成模型建议');
+    expect(result.text).not.toContain('预检');
+    expect(result.text).toContain('unrecognized-source-type');
+    expect(result.text).not.toContain('name="target_type"');
+    expect(result.text).not.toContain('name="target"');
+    expect(getPageCalls).toEqual([page.slug]);
+    expect(listPagesCalls).toBe(0);
   });
 
-  test('Given missing retrieval scenarios or migration placeholders When detail renders Then it reports missing fields without inventing content', async () => {
-    const page = makePage('inbox/detail-sparse', { compiled_truth: '## 结论\n\n只有结论。' });
-    page.frontmatter = { applicability: ['pending-human-review'], non_applicable: [] };
+  test('Given an unverified long draft with missing metadata When its detail renders Then fixed fallbacks and a bounded preview render', async () => {
+    // given
+    const longBody = `长草稿 ${'x'.repeat(2400)}`;
+    const page = makePage('inbox/detail-sparse', { compiled_truth: longBody, timeline: '' });
+    page.frontmatter = {};
     const app = createApp(mockEngine([page]));
 
+    // when
     const result = await fetchApp(app, `/admin/review/detail/${encodeURIComponent(page.slug)}`);
 
+    // then
     expect(result.status).toBe(200);
-    expect(result.text).toContain('尚未提供具体召回场景');
-    expect(result.text).toContain('尚未提供不应召回的场景');
-    expect(result.text).not.toContain('pending-human-review');
+    expect(result.text).toContain('先补证据');
+    expect(result.text).toContain('未提供');
+    expect(result.text).toContain('长草稿');
+    expect(result.text).not.toContain('x'.repeat(2100));
+    expect(result.text).toContain('<details');
+    expect(result.text).toContain('草稿元数据');
+    expect(result.text).toContain('内容预览');
   });
 });
 
@@ -1208,60 +1176,144 @@ describe('detail summary canary', () => {
   });
 });
 
-describe('review action dropdown and similar experience recall', () => {
-  test('Given a draft detail When rendered Then every action is available in one dropdown without decision cards', async () => {
-    const page = makePage('inbox/action-select', { title: '下拉审核草稿' });
-    const app = createApp(mockEngine([page]));
-
-    const result = await fetchApp(app, `/admin/review/detail/${encodeURIComponent(page.slug)}`);
+describe('single classification review', () => {
+  test('Given a draft detail When rendered Then only category and one confirmation are editable', async () => {
+    const page = makePage('inbox/single-review', { title: '单一审核草稿' });
+    page.frontmatter.review_recommendation = {
+      category: 'incident',
+      scenario: '定位可复用的故障处理经验。',
+      reason: '正文包含故障现象、根因和验证结果。',
+      generated_by: 'model',
+    };
+    const result = await fetchApp(createApp(mockEngine([page])), `/admin/review/detail/${encodeURIComponent(page.slug)}`);
 
     expect(result.status).toBe(200);
-    expect(result.text).toContain('<select id="review-action" name="action" required>');
-    for (const entry of Object.values(REVIEW_ACTION_CATALOG)) {
-      expect(result.text).toContain(`<option value="${entry.value}">${entry.label}</option>`);
-      expect(result.text).not.toContain(entry.explanation);
-      expect(result.text).not.toContain(entry.riskText);
+    expect(result.text).toContain('大模型建议');
+    expect(result.text).toContain('定位可复用的故障处理经验');
+    expect(result.text.match(/<select/g)?.length).toBe(1);
+    expect(result.text.match(/type="submit"/g)?.length).toBe(1);
+    expect(result.text).toContain('拒绝并删除');
+    for (const hidden of ['预检', '门禁', '确认短语', 'name="target"', 'name="reviewNotes"', '更多处理方式']) {
+      expect(result.text).not.toContain(hidden);
     }
-    expect(result.text).not.toContain('decision-card');
   });
 
-  test('Given keyword matches When detail renders Then MCP-style recall excludes the current draft and inbox pages', async () => {
-    const source = makePage('inbox/recall-source', {
-      title: '迁移保留策略',
-      compiled_truth: '## 适用场景\n\n迁移旧系统。',
-    });
-    const existing = makePage('knowledge/retention-policy', {
-      title: '历史资产保留策略',
-      type: 'knowledge',
-      compiled_truth: '## 场景\n\n旧系统迁移时保留审计资产。\n\n## 结论\n\n设置长期保留。',
-    });
-    const otherDraft = makePage('inbox/other-draft', { title: '其他草稿' });
-    const engine = mockEngine([source, existing, otherDraft]);
-    engine.searchKeyword = async () => [
-      {
-        slug: source.slug, page_id: source.id, title: source.title, type: source.type,
-        chunk_text: '当前草稿', chunk_source: 'compiled_truth', chunk_id: 1, chunk_index: 0, score: 1, stale: false,
-      },
-      {
-        slug: otherDraft.slug, page_id: otherDraft.id, title: otherDraft.title, type: otherDraft.type,
-        chunk_text: '未审核内容', chunk_source: 'compiled_truth', chunk_id: 2, chunk_index: 0, score: 0.9, stale: false,
-      },
-      {
-        slug: existing.slug, page_id: existing.id, title: existing.title, type: existing.type,
-        chunk_text: '旧系统迁移时保留审计资产', chunk_source: 'compiled_truth', chunk_id: 3, chunk_index: 0, score: 0.8123, stale: false,
-      },
-    ];
-    const app = createApp(engine);
+  test('old drafts request a real recommendation once and reuse the bounded cache', async () => {
+    const page = makePage('inbox/model-fallback');
+    let calls = 0;
+    const recommendationProvider: ReviewRecommendationProvider = async () => {
+      calls += 1;
+      return { category: 'knowledge', scenario: '跨项目复用。', reason: '内容是通用方法。', generated_by: 'model' };
+    };
+    const app = createApp(mockEngine([page]), undefined, { recommendationProvider });
 
-    const result = await fetchApp(app, `/admin/review/detail/${encodeURIComponent(source.slug)}`);
+    const detail = await fetchApp(app, `/admin/review/detail/${encodeURIComponent(page.slug)}`);
+    expect(detail.status).toBe(200);
+    expect(calls).toBe(0);
+    expect(detail.text).toContain('正在生成模型建议');
+    expect(detail.text).toContain('id="review-category" name="category" disabled');
+    expect(detail.text).toContain('id="classification-submit" type="submit" disabled');
 
+    const request = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sourceSlug: page.slug }),
+    } as const;
+    const first = await fetchApp(app, '/admin/api/review/recommendation', request);
+    const second = await fetchApp(app, '/admin/api/review/recommendation', request);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(calls).toBe(1);
+    expect(first.body).toMatchObject({ recommendation: { category: 'knowledge', generated_by: 'model' } });
+  });
+
+  test('model failures return fixed Chinese guidance and never invent a recommendation', async () => {
+    const page = makePage('inbox/model-failure');
+    const app = createApp(mockEngine([page]), undefined, {
+      recommendationProvider: async () => { throw new Error('SECRET_PROVIDER_FAILURE'); },
+    });
+    const result = await fetchApp(app, '/admin/api/review/recommendation', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sourceSlug: page.slug }),
+    });
+    expect(result.status).toBe(503);
+    expect(result.body).toEqual({
+      error: 'recommendation_unavailable',
+      message: '暂时无法生成模型建议，请稍后刷新。',
+    });
+    expect(result.text).not.toContain('SECRET_PROVIDER_FAILURE');
+  });
+
+  test('captured recommendations bypass the provider and extra request fields fail closed', async () => {
+    const page = makePage('inbox/captured-recommendation');
+    page.frontmatter.review_recommendation = {
+      category: 'incident', scenario: '故障复盘。', reason: '包含根因。', generated_by: 'model',
+    };
+    let calls = 0;
+    const app = createApp(mockEngine([page]), undefined, {
+      recommendationProvider: async () => {
+        calls += 1;
+        throw new Error('must not run');
+      },
+    });
+    const result = await fetchApp(app, '/admin/api/review/recommendation', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sourceSlug: page.slug }),
+    });
+    const rejected = await fetchApp(app, '/admin/api/review/recommendation', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sourceSlug: page.slug, target: 'incidents/evil' }),
+    });
     expect(result.status).toBe(200);
-    expect(result.text).toContain('相似经验召回');
-    expect(result.text).toContain('0.8123');
-    expect(result.text).toContain('knowledge/retention-policy');
-    expect(result.text).toContain('旧系统迁移时保留审计资产');
-    expect(result.text).toContain('设置长期保留');
-    expect(result.text).not.toContain('未审核内容');
+    expect(rejected.status).toBe(400);
+    expect(calls).toBe(0);
+  });
+
+  test('classification cannot bypass the required model recommendation', async () => {
+    const page = makePage('inbox/recommendation-required');
+    const result = await fetchApp(createApp(mockEngine([page])), '/admin/api/review/classify', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sourceSlug: page.slug, category: 'incident' }),
+    });
+    expect(result.status).toBe(409);
+    expect(result.body).toMatchObject({ error: 'model_recommendation_required' });
+  });
+
+  test('classification accepts only source and category, then writes and deletes through the attested writer', async () => {
+    const page = makePage('inbox/classify-incident');
+    page.frontmatter.review_recommendation = {
+      category: 'incident', scenario: '故障复盘。', reason: '包含根因。', generated_by: 'model',
+    };
+    const backed = writerBackedEngine(page, 'incidents/classify-incident');
+    const writes: Array<{ readonly name: string; readonly args: Record<string, unknown> }> = [];
+    const app = createApp(backed.engine, async (name, args) => {
+      writes.push({ name, args });
+      if (name === 'put_page' && args.slug === 'incidents/classify-incident') backed.markTargetWritten();
+      return { ok: true };
+    });
+    const result = await fetchApp(app, '/admin/api/review/classify', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sourceSlug: page.slug, category: 'incident' }),
+    });
+    const rejected = await fetchApp(app, '/admin/api/review/classify', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sourceSlug: page.slug, category: 'incident', targetSlug: 'incidents/evil' }),
+    });
+    expect(result.status).toBe(200);
+    expect(rejected.status).toBe(400);
+    expect(writes.map((write) => write.name)).toEqual(['put_page', 'put_page', 'delete_page']);
+    expect(writes[0]?.args.slug).toBe('incidents/classify-incident');
+    expect(String(writes[0]?.args.content)).not.toContain('review_recommendation');
+  });
+
+  test('reject is a category and writes the audit record before soft deletion', async () => {
+    const page = makePage('inbox/classify-reject');
+    page.frontmatter.review_recommendation = {
+      category: 'reject', scenario: '不应归档。', reason: '没有可复用经验。', generated_by: 'model',
+    };
+    const calls: string[] = [];
+    const result = await fetchApp(createApp(mockEngine([page]), async (name) => {
+      calls.push(name);
+      return { ok: true };
+    }), '/admin/api/review/classify', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sourceSlug: page.slug, category: 'reject' }),
+    });
+    expect(result.status).toBe(200);
+    expect(calls).toEqual(['put_page', 'delete_page']);
   });
 });
 

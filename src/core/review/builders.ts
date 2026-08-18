@@ -9,6 +9,7 @@ export function buildTargetPage(action: ReviewAction, source: ParsedReviewPage, 
       const projectId = typeof source.frontmatter.project_id === 'string' ? source.frontmatter.project_id : undefined;
       const promotesGlobally = projectId !== undefined && action.targetType !== 'project';
       const nextFrontmatter = { ...source.frontmatter };
+      delete nextFrontmatter.review_recommendation;
       if (promotesGlobally) {
         delete nextFrontmatter.project_id;
         delete nextFrontmatter.project_binding;
@@ -93,8 +94,24 @@ export function buildReviewApprovalPage(action: ReviewAction, source: ParsedRevi
       source_refs: [source.slug],
       migrated_from: null,
       review_action: action.kind,
+      review_category: reviewCategory(action),
     },
   });
+}
+
+function reviewCategory(action: ReviewAction): string {
+  switch (action.kind) {
+    case 'keep':
+    case 'promote':
+    case 'merge':
+      return action.targetType;
+    case 'reject':
+      return 'reject';
+    case 'needs_evidence':
+    case 'repair':
+    case 'cleanup':
+      return action.kind;
+  }
 }
 
 function materializePage(page: {

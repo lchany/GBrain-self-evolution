@@ -20,7 +20,8 @@
 import express from 'express';
 import type { Express, NextFunction, Request, Response } from 'express';
 import type { BrainEngine } from '../core/engine.ts';
-import type { Page, SearchResult } from '../core/types.ts';
+import type { Page } from '../core/types.ts';
+import { chat, getChatModel, isAvailable } from '../core/ai/gateway.ts';
 import { browserSafeHtml as escapeHtml, browserSafeReviewError, projectBrowserSafeText, REVIEW_ERROR_TEXT, REVIEW_ERROR_CODE } from '../core/review/browser-safe.ts';
 import {
   REVIEW_ACTION_CATALOG,
@@ -39,6 +40,18 @@ import {
   type ReviewTargetType,
   REVIEW_TARGET_PREFIXES,
   REVIEW_TARGET_TYPES,
+  REVIEW_CATEGORY_LABELS,
+  REVIEW_CATEGORIES,
+  ReviewRecommendationCache,
+  buildClassificationAction,
+  parseModelRecommendationJson,
+  parseReviewCategory,
+  parseReviewRecommendation,
+  recommendationCacheKey,
+  type ReviewCategory,
+  type ReviewRecommendation,
+  type ReviewRecommendationInput,
+  type ReviewRecommendationProvider,
 } from '../core/review/index.ts';
 import {
   createLocalWriterSessionFactory,
@@ -73,6 +86,8 @@ export interface MountReviewRoutesOptions {
   /** Inject reviewDate for tests. Defaults to today's YYYY-MM-DD. */
   reviewDate?: () => string;
   reviewSourceId?: string;
+  /** Injected for hermetic tests. Production uses the configured chat model. */
+  recommendationProvider?: ReviewRecommendationProvider;
 }
 
 /**
@@ -94,6 +109,9 @@ export function mountReviewRoutes(
   const expectedAdminOrigin = options.adminOrigin?.origin ?? options.issuerUrl?.origin ?? null;
   const getReviewDate = options.reviewDate ?? (() => new Date().toISOString().slice(0, 10));
   const reviewSourceId = options.reviewSourceId ?? 'default';
+  const recommendationProvider = options.recommendationProvider ?? defaultReviewRecommendationProvider;
+  const recommendationCache = new ReviewRecommendationCache(256);
+  const recommendationInFlight = new Map<string, Promise<ReviewRecommendation>>();
 
   // --- Helpers: build ReviewCoreDeps from engine + writer caller ---
 
@@ -302,6 +320,101 @@ export function mountReviewRoutes(
     }
   });
 
+  // --- API: POST /admin/api/review/recommendation ---
+
+  app.post('/admin/api/review/recommendation', requireAdmin, requireSameOrigin, express.json(), reviewParserError, async (req: Request, res: Response) => {
+    const sourceSlug = parseExactSourceBody(req.body);
+    if (sourceSlug === null) {
+      res.status(400).json({ error: 'invalid_request', message: '请求只能包含 sourceSlug。' });
+      return;
+    }
+    try {
+      const page = await engine.getPage(sourceSlug, { sourceId: reviewSourceId });
+      if (page === null || page.deleted_at || !page.slug.startsWith('inbox/')) {
+        res.status(404).json({ error: 'not_found', message: '找不到该 inbox 草稿。' });
+        return;
+      }
+      const captured = parseReviewRecommendation(page.frontmatter.review_recommendation, page);
+      if (captured !== null) {
+        res.json({ recommendation: projectRecommendation(captured) });
+        return;
+      }
+
+      const key = recommendationCacheKey(page);
+      const cached = recommendationCache.get(key);
+      if (cached !== undefined) {
+        res.json({ recommendation: projectRecommendation(cached) });
+        return;
+      }
+      if (recommendationInFlight.size >= 32 && !recommendationInFlight.has(key)) {
+        res.status(503).json({ error: 'recommendation_busy', message: '模型建议服务繁忙，请稍后刷新。' });
+        return;
+      }
+      let pending = recommendationInFlight.get(key);
+      if (pending === undefined) {
+        pending = recommendationProvider(recommendationInput(page));
+        recommendationInFlight.set(key, pending);
+      }
+      try {
+        const recommendation = parseReviewRecommendation(await pending, page);
+        if (recommendation === null) throw new Error('invalid recommendation');
+        recommendationCache.set(key, recommendation);
+        res.json({ recommendation: projectRecommendation(recommendation) });
+      } finally {
+        recommendationInFlight.delete(key);
+      }
+    } catch (error) {
+      logReviewFailure('recommendation', error);
+      res.status(503).json({ error: 'recommendation_unavailable', message: '暂时无法生成模型建议，请稍后刷新。' });
+    }
+  });
+
+  // --- API: POST /admin/api/review/classify ---
+
+  app.post('/admin/api/review/classify', requireAdmin, requireSameOrigin, express.json(), reviewParserError, reviewUrlEncodedParser, reviewParserError, async (req: Request, res: Response) => {
+    const request = parseClassificationBody(req.body);
+    if (request === null) {
+      respondSimpleError(req, res, 400, { error: 'invalid_request', message: '请求只能包含 sourceSlug 和 category。' });
+      return;
+    }
+    try {
+      const page = await engine.getPage(request.sourceSlug, { sourceId: reviewSourceId });
+      if (page === null || page.deleted_at || !page.slug.startsWith('inbox/')) {
+        respondSimpleError(req, res, 404, { error: 'not_found', message: '找不到该 inbox 草稿。' });
+        return;
+      }
+      const availableRecommendation = parseReviewRecommendation(page.frontmatter.review_recommendation, page)
+        ?? recommendationCache.get(recommendationCacheKey(page));
+      if (availableRecommendation === undefined || availableRecommendation === null) {
+        respondSimpleError(req, res, 409, {
+          error: 'model_recommendation_required',
+          message: '请等待大模型给出分类建议后再确认。',
+        });
+        return;
+      }
+      const action = buildClassificationAction(request.category, pageToReviewSource(page));
+      if (action === null) {
+        respondSimpleError(req, res, 400, { error: 'invalid_category_target', message: '该草稿未绑定项目，无法归为项目经验。' });
+        return;
+      }
+      const writerSession = await createAttestedWriterSession();
+      try {
+        const planResult = await planReview(buildDeps(), { action, reviewDate: getReviewDate() });
+        if (!planResult.ok || planResult.plan === undefined) {
+          respondSummary(req, res, 409, buildGateFailureSummary(planResult, action));
+          return;
+        }
+        const applyResult = await applyReviewPlan(buildDeps(writerSession), planResult.plan);
+        respondSummary(req, res, applyResult.ok ? 200 : 503, buildExecutionSummary(planResult, applyResult));
+      } finally {
+        await writerSession.close();
+      }
+    } catch (error) {
+      logReviewFailure('classify', error);
+      respondSimpleError(req, res, 503, { error: REVIEW_ERROR_CODE, message: REVIEW_ERROR_TEXT });
+    }
+  });
+
   // --- API: POST /admin/api/review/plan ---
 
   app.post('/admin/api/review/plan', requireAdmin, requireSameOrigin, express.json(), reviewParserError, reviewUrlEncodedParser, reviewParserError, async (req: Request, res: Response) => {
@@ -408,24 +521,18 @@ export function mountReviewRoutes(
       const filterBar = renderFilterBar(typeFilter, verificationFilter, staleOnly, projectId);
       const bodyContent = drafts.length === 0
         ? renderEmptyState(typeFilter, verificationFilter, staleOnly, projectId)
-        : `<section class="review-queue" aria-label="待人工分类的经验">
-          ${drafts.map((p, index) => renderDraftRow(p, index + 1)).join('\n')}
-        </section>`;
+        : `<table class="review-table">
+          <thead><tr><th>标题</th><th>建议分类</th><th>验证</th><th>更新时间</th><th>操作</th></tr></thead>
+          <tbody>${drafts.map((p) => renderDraftRow(p)).join('\n')}</tbody>
+        </table>`;
 
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.send(renderShell('Inbox 草稿审核', `
-        <main class="review-workbench">
-          <header class="workbench-header">
-            <div>
-              <p class="eyebrow">经验分类</p>
-              <h1>待人工分类 <span class="heading-count">${drafts.length}</span></h1>
-              <p class="workbench-intro">先读清这条经验，再决定它应该保留在项目内、成为通用经验，还是不进入经验库。</p>
-            </div>
-          </header>
-          ${filterBar}
-          ${bodyContent}
-          <p class="history-link"><a href="/admin/review/history">查看审核历史</a></p>
-        </main>
+        <h1>Inbox 草稿审核</h1>
+        <p class="muted">选择一条草稿，只需确认经验分类；“拒绝并删除”也是一个分类。</p>
+        ${filterBar}
+        ${bodyContent}
+        <p><a href="/admin/review/history">查看审核历史</a></p>
       `));
     } catch (error) {
       logReviewFailure('render_inbox', error);
@@ -441,14 +548,23 @@ export function mountReviewRoutes(
         res.status(404).send(renderShell('未找到', `<p>找不到 ${escapeHtml(slug)}。</p>`));
         return;
       }
-      const recallItems = await loadReviewRecall(engine, page, reviewSourceId);
+      const summaryHtml = renderDetailSummary(page);
+      const recommendation = parseReviewRecommendation(page.frontmatter.review_recommendation, page);
+      const classificationHtml = renderClassificationReview(page, recommendation);
+      const expandableHtml = renderDetailExpandable(page);
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.send(renderShell(`草稿详情：${escapeHtml(slug)}`, `
-        <main class="review-sheet">
-          ${renderReviewDetail(page, recallItems)}
-          ${renderReviewActionSelect(page.slug)}
-          <p><a href="/admin/review">返回列表</a></p>
-        </main>
+        <div class="review-container">
+          <div class="review-sidebar">
+            ${summaryHtml}
+          </div>
+          <div class="review-main">
+            <h1>确认经验分类</h1>
+            ${classificationHtml}
+            ${expandableHtml}
+            <p><a href="/admin/review">返回列表</a></p>
+          </div>
+        </div>
       `));
     } catch (error) {
       logReviewFailure('render_detail', error);
@@ -496,23 +612,6 @@ export function mountReviewRoutes(
       const result = hasPendingConfirmation
         ? await planReview(buildDeps(), { action: withHumanConfirmation(action), reviewDate: getReviewDate() })
         : confirmationPlan;
-      if (!result.ok && result.code === 'source_not_found') {
-        const completedReview = await findCompletedReview(engine, reviewSourceId, slug);
-        if (completedReview !== null) {
-          res.setHeader('Content-Type', 'text/html; charset=utf-8');
-          res.send(renderShell('审核已完成', `
-            <main class="review-sheet">
-              <section class="review-section completed-review" aria-labelledby="completed-review-title">
-                <h1 id="completed-review-title">这条经验已经完成审核</h1>
-                <p>处理结果：${escapeHtml(completedReview.actionLabel)}</p>
-                <p class="slug-mono">${escapeHtml(slug)}</p>
-                <p><a class="action-link" href="/admin/review">返回待审核列表</a> · <a href="/admin/review/history">查看审核历史</a></p>
-              </section>
-            </main>
-          `));
-          return;
-        }
-      }
       const pendingConfirmation = hasPendingConfirmation && confirmationGate !== undefined
         ? { gateIndex: confirmationPlan.gates.length - 1, gate: confirmationGate }
         : undefined;
@@ -571,6 +670,67 @@ export function pageToReviewSource(page: Page): ReviewSourcePage {
     compiledTruth: page.compiled_truth,
     timeline: page.timeline,
     frontmatter: page.frontmatter,
+  };
+}
+
+export function parseClassificationBody(body: unknown): { readonly sourceSlug: string; readonly category: ReviewCategory } | null {
+  if (!isPlainRecord(body)) return null;
+  if (Object.keys(body).some((key) => key !== 'sourceSlug' && key !== 'category')) return null;
+  if (typeof body.sourceSlug !== 'string' || !body.sourceSlug.startsWith('inbox/')) return null;
+  const category = parseReviewCategory(body.category);
+  return category === null ? null : { sourceSlug: body.sourceSlug, category };
+}
+
+function parseExactSourceBody(body: unknown): string | null {
+  if (!isPlainRecord(body) || Object.keys(body).some((key) => key !== 'sourceSlug')) return null;
+  return typeof body.sourceSlug === 'string' && body.sourceSlug.startsWith('inbox/') ? body.sourceSlug : null;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+async function defaultReviewRecommendationProvider(input: ReviewRecommendationInput): Promise<ReviewRecommendation> {
+  if (!isAvailable('chat')) throw new Error('chat model unavailable');
+  const result = await chat({
+    model: getChatModel(),
+    system: [
+      '你是 GBrain 经验审核分类助手。根据脱敏后的草稿摘要给出真实的分类建议。',
+      '只输出单行 JSON，不要 Markdown。字段必须且只能是 category、scenario、reason、generated_by。',
+      'category 只能是 project、knowledge、runbook、incident、reject。',
+      'scenario 和 reason 使用清晰中文，各不超过 500 字。generated_by 固定为 model。',
+      '只有存在 projectId 时才能选择 project。信息明显不可复用或不应归档时选择 reject。',
+    ].join('\n'),
+    messages: [{ role: 'user', content: JSON.stringify(input) }],
+    maxTokens: 320,
+    abortSignal: AbortSignal.timeout(20_000),
+    cacheSystem: true,
+  });
+  const recommendation = parseModelRecommendationJson(result.text);
+  if (recommendation === null) throw new Error('invalid model recommendation');
+  return recommendation;
+}
+
+function recommendationInput(page: Page): ReviewRecommendationInput {
+  return {
+    title: projectBrowserSafeText(page.title),
+    type: projectBrowserSafeText(page.type),
+    projectId: typeof page.frontmatter.project_id === 'string'
+      ? projectBrowserSafeText(page.frontmatter.project_id)
+      : null,
+    verification: projectBrowserSafeText(page.frontmatter.verification ?? 'unverified'),
+    applicability: projectBrowserSafeText(page.frontmatter.applicability),
+    nonApplicable: projectBrowserSafeText(page.frontmatter.non_applicable),
+    contentPreview: projectBrowserSafeText(page.compiled_truth, 'preview'),
+  };
+}
+
+function projectRecommendation(recommendation: ReviewRecommendation): ReviewRecommendation {
+  return {
+    category: recommendation.category,
+    scenario: projectBrowserSafeText(recommendation.scenario, 'preview').slice(0, 500),
+    reason: projectBrowserSafeText(recommendation.reason, 'preview').slice(0, 500),
+    generated_by: 'model',
   };
 }
 
@@ -781,27 +941,6 @@ function historyTargetSlug(page: Page): string | null {
   return projectBrowserSafeText(value);
 }
 
-async function findCompletedReview(
-  engine: BrainEngine,
-  sourceId: string,
-  sourceSlug: string,
-): Promise<{ readonly actionLabel: string } | null> {
-  const pages = await engine.listPages({
-    slugPrefix: 'decisions/reviews/',
-    limit: 100,
-    sort: 'updated_desc',
-    sourceId,
-  });
-  for (const page of pages) {
-    if (page.deleted_at) continue;
-    const sourceRefs = Array.isArray(page.frontmatter.source_refs) ? page.frontmatter.source_refs : [];
-    if (!sourceRefs.some((ref) => projectBrowserSafeText(ref) === sourceSlug)) continue;
-    const review = historyReviewJson(page);
-    return { actionLabel: String(review.action_label ?? '已处理') };
-  }
-  return null;
-}
-
 export function historyReviewJson(page: Page): Record<string, unknown> {
   const rawAction = typeof page.frontmatter.review_action === 'string' ? page.frontmatter.review_action : 'unknown';
   const catalogEntry = (REVIEW_ACTION_CATALOG as Record<string, ReviewActionCatalogEntry | undefined>)[rawAction];
@@ -985,17 +1124,8 @@ type DetailReviewData = {
   readonly nonApplicable: string;
   readonly reviewAction: string;
   readonly sourceReferenceCount: number;
-  readonly content: string;
+  readonly contentPreview: string;
   readonly eventPreview: string;
-};
-
-type ReviewRecallItem = {
-  readonly score: number;
-  readonly slug: string;
-  readonly title: string;
-  readonly type: string;
-  readonly chunkText: string;
-  readonly content: string;
 };
 
 function detailMetadataValue(value: unknown): string {
@@ -1005,11 +1135,6 @@ function detailMetadataValue(value: unknown): string {
 
 function detailPreviewValue(value: unknown): string {
   const projected = projectBrowserSafeText(value, 'preview');
-  return projected.length > 0 ? projected : '未提供';
-}
-
-function detailContentValue(value: unknown): string {
-  const projected = projectBrowserSafeText(value);
   return projected.length > 0 ? projected : '未提供';
 }
 
@@ -1028,7 +1153,7 @@ function detailReviewData(page: Page): DetailReviewData {
     nonApplicable: detailMetadataValue(frontmatter.non_applicable),
     reviewAction: detailMetadataValue(frontmatter.review_action),
     sourceReferenceCount: Array.isArray(frontmatter.source_refs) ? frontmatter.source_refs.length : 0,
-    content: detailContentValue(page.compiled_truth),
+    contentPreview: detailPreviewValue(page.compiled_truth),
     eventPreview: detailPreviewValue(page.timeline),
   };
 }
@@ -1038,190 +1163,116 @@ function detailEvidenceStatus(page: Page): string {
 }
 
 function detailSuggestedNext(page: Page): string {
-  return page.frontmatter.verification === 'verified'
-    ? '选择处理方式后查看完整预检'
-    : REVIEW_ACTION_CATALOG.needs_evidence.label;
+  const recommendation = parseReviewRecommendation(page.frontmatter.review_recommendation, page);
+  return recommendation === null ? '正在生成模型建议' : REVIEW_CATEGORY_LABELS[recommendation.category];
 }
 
-function buildReviewRecallQuery(page: Page): string {
-  const applicability = projectBrowserSafeText(page.frontmatter.applicability);
-  const content = projectBrowserSafeText(page.compiled_truth, 'preview');
-  return [projectBrowserSafeText(page.title), applicability, content.slice(0, 600)]
-    .filter((part) => part.length > 0 && part !== '未提供')
-    .join(' ');
-}
-
-async function loadReviewRecall(engine: BrainEngine, page: Page, sourceId: string): Promise<readonly ReviewRecallItem[]> {
-  const query = buildReviewRecallQuery(page);
-  if (query.length === 0 || typeof engine.searchKeyword !== 'function') return [];
-  try {
-    const results = await engine.searchKeyword(query, { limit: 12, sourceId });
-    const candidates = results
-      .filter((result) => result.slug !== page.slug)
-      .filter((result) => !result.slug.startsWith('inbox/'))
-      .slice(0, 5);
-    return await Promise.all(candidates.map(async (result) => projectRecallItem(engine, result, sourceId)));
-  } catch {
-    return [];
-  }
-}
-
-async function projectRecallItem(engine: BrainEngine, result: SearchResult, sourceId: string): Promise<ReviewRecallItem> {
-  let content = result.chunk_text;
-  try {
-    const page = await engine.getPage(result.slug, { sourceId });
-    if (page !== null) content = page.compiled_truth;
-  } catch {
-    // The matched chunk is still useful when full-page hydration fails.
-  }
-  return {
-    score: Number.isFinite(result.score) ? result.score : 0,
-    slug: detailMetadataValue(result.slug),
-    title: detailMetadataValue(result.title),
-    type: detailMetadataValue(result.type),
-    chunkText: detailPreviewValue(result.chunk_text),
-    content: detailContentValue(content),
-  };
-}
-
-function extractMarkdownSections(markdown: string, headings: readonly string[]): readonly string[] {
-  const wanted = new Set(headings.map(normalizeReviewHeading));
-  const lines = markdown.replace(/\r\n/g, '\n').split('\n');
-  const sections: string[] = [];
-  let current: string[] | null = null;
-  for (const line of lines) {
-    const match = /^#{1,6}\s+(.+?)\s*$/.exec(line);
-    if (match !== null) {
-      if (current !== null) {
-        const value = current.join('\n').trim();
-        if (value.length > 0) sections.push(value);
-      }
-      current = wanted.has(normalizeReviewHeading(match[1] ?? '')) ? [] : null;
-      continue;
-    }
-    if (current !== null) current.push(line);
-  }
-  if (current !== null) {
-    const value = current.join('\n').trim();
-    if (value.length > 0) sections.push(value);
-  }
-  return sections;
-}
-
-function normalizeReviewHeading(value: string): string {
-  return value.trim().toLowerCase().replace(/[：:]/g, '').replace(/\s+/g, '');
-}
-
-function projectScenarioValues(value: unknown): readonly string[] {
-  const values = Array.isArray(value) ? value : [value];
-  return values
-    .map((item) => projectBrowserSafeText(item))
-    .filter((item) => item.length > 0 && item !== '未提供' && !isReviewScenarioPlaceholder(item));
-}
-
-function isReviewScenarioPlaceholder(value: string): boolean {
-  return new Set([
-    'pending-human-review',
-    'pending review',
-    'not provided',
-    'n/a',
-    'none',
-  ]).has(value.trim().toLowerCase());
-}
-
-function reviewRecallScenarios(page: Page): readonly string[] {
-  const structured = projectScenarioValues(page.frontmatter.applicability);
-  const sections = extractMarkdownSections(page.compiled_truth, [
-    '召回场景', '适用场景', '使用场景', '问题场景', '触发条件', '什么时候使用', '何时使用',
-  ]).map((section) => projectBrowserSafeText(section));
-  const values = [
-    ...structured,
-    ...sections,
-  ].filter((value) => value.length > 0);
-  return [...new Set(values)];
-}
-
-function reviewNonApplicableScenarios(page: Page): readonly string[] {
-  const structured = projectScenarioValues(page.frontmatter.non_applicable);
-  const sections = extractMarkdownSections(page.compiled_truth, [
-    '不适用场景', '不应召回', '不要使用', '何时不使用',
-  ]).map((section) => projectBrowserSafeText(section));
-  const values = [
-    ...structured,
-    ...sections,
-  ].filter((value) => value.length > 0);
-  return [...new Set(values)];
-}
-
-function renderReviewDetail(
-  page: Page,
-  recallItems: readonly ReviewRecallItem[],
-): string {
+function renderDetailSummary(page: Page): string {
   const detail = detailReviewData(page);
-  const recallScenarios = reviewRecallScenarios(page);
-  const nonApplicable = reviewNonApplicableScenarios(page);
-  return `<header class="review-detail-header">
-    <p class="eyebrow">经验审核</p>
-    <h1>${escapeHtml(detail.title)}</h1>
-    <div class="detail-meta">
-      <span class="badge badge-draft">${escapeHtml(detail.type)}</span>
-      <span class="badge badge-draft">${escapeHtml(detail.status)}</span>
-      <span class="badge ${page.frontmatter.verification === 'verified' ? 'badge-verified' : 'badge-unverified'}">${escapeHtml(detail.verification)}</span>
-    </div>
-    <div class="slug-mono">${escapeHtml(detail.slug)}</div>
-  </header>
-  <section class="review-section" aria-labelledby="experience-content-title">
-    <h2 id="experience-content-title">经验内容</h2>
-    <pre class="experience-content">${escapeHtml(detail.content)}</pre>
-  </section>
-  ${renderReviewRecallSection(recallScenarios, nonApplicable)}
-  <section class="review-section" aria-labelledby="similar-experience-title">
-    <h2 id="similar-experience-title">相似经验召回</h2>
-    ${renderRecallItems(recallItems)}
+  return `<section class="detail-summary" aria-labelledby="detail-summary-title">
+    <h2 id="detail-summary-title">审核摘要</h2>
+    <table class="review-table"><tbody>
+      <tr><th>草稿类型</th><td>${escapeHtml(detail.type)}</td></tr>
+      <tr><th>用途</th><td>${escapeHtml(detail.applicability)}</td></tr>
+      <tr><th>验证状态</th><td>${detailEvidenceStatus(page)}</td></tr>
+      <tr><th>模型建议</th><td>${detailSuggestedNext(page)}</td></tr>
+    </tbody></table>
   </section>`;
 }
 
-function renderReviewRecallSection(recallScenarios: readonly string[], nonApplicable: readonly string[]): string {
-  return `<section class="review-section" aria-labelledby="recall-scenario-title">
-    <h2 id="recall-scenario-title">什么场景下会被召回</h2>
-    ${renderScenarioList(recallScenarios, '尚未提供具体召回场景')}
-    <h3>不应召回的场景</h3>
-    ${renderScenarioList(nonApplicable, '尚未提供不应召回的场景')}
-  </section>`;
-}
-
-function renderScenarioList(values: readonly string[], emptyText: string): string {
-  if (values.length === 0) return `<p class="missing-field">${escapeHtml(emptyText)}</p>`;
-  return `<ul class="scenario-list">${values.map((value) => `<li>${escapeHtml(value)}</li>`).join('')}</ul>`;
-}
-
-function renderRecallItems(items: readonly ReviewRecallItem[]): string {
-  if (items.length === 0) return '<p class="muted">暂无相似经验。</p>';
-  return `<div class="recall-list">${items.map((item) => `<article class="recall-item">
-    <div class="recall-item-head">
-      <strong>${escapeHtml(item.title)}</strong>
-      <span class="recall-score">${escapeHtml(item.score.toFixed(4))}</span>
+function renderClassificationReview(page: Page, recommendation: ReviewRecommendation | null): string {
+  const safeRecommendation = recommendation === null ? null : projectRecommendation(recommendation);
+  const selected = safeRecommendation?.category;
+  const options = REVIEW_CATEGORIES.map((category) => {
+    const selectedAttribute = category === selected ? ' selected' : '';
+    return `<option value="${category}"${selectedAttribute}>${escapeHtml(REVIEW_CATEGORY_LABELS[category])}</option>`;
+  }).join('');
+  const sourceSlug = projectBrowserSafeText(page.slug);
+  const disabled = safeRecommendation === null ? ' disabled' : '';
+  const recommendationStatus = safeRecommendation === null ? '正在生成模型建议…' : '大模型建议';
+  const scenario = safeRecommendation?.scenario ?? '';
+  const reason = safeRecommendation?.reason ?? '';
+  const script = safeRecommendation === null ? renderRecommendationLoader(page.slug) : '';
+  return `<section class="classification-review" aria-labelledby="classification-title">
+    <div class="recommendation-panel">
+      <div class="recommendation-kicker" id="recommendation-status">${recommendationStatus}</div>
+      <h2 id="classification-title">建议归为：<span id="recommendation-label">${selected === undefined ? '加载中' : escapeHtml(REVIEW_CATEGORY_LABELS[selected])}</span></h2>
+      <p><strong>使用场景：</strong><span id="recommendation-scenario">${escapeHtml(scenario, 'preview')}</span></p>
+      <p><strong>推荐理由：</strong><span id="recommendation-reason">${escapeHtml(reason, 'preview')}</span></p>
+      <p class="recommendation-error" id="recommendation-error" role="alert"></p>
     </div>
-    <div class="recall-meta"><span>${escapeHtml(item.type)}</span><code>${escapeHtml(item.slug)}</code></div>
-    <div class="recall-chunk">${escapeHtml(item.chunkText)}</div>
-    <details><summary>查看完整经验内容</summary><pre>${escapeHtml(item.content)}</pre></details>
-  </article>`).join('')}</div>`;
-}
-
-function renderReviewActionSelect(sourceSlug: string): string {
-  const options = Object.values(REVIEW_ACTION_CATALOG)
-    .map((entry) => `<option value="${escapeHtml(entry.value)}">${escapeHtml(entry.label)}</option>`)
-    .join('');
-  return `<section class="review-section review-action-section" aria-labelledby="review-action-title">
-    <h2 id="review-action-title">审核操作</h2>
-    <form class="review-action-form" method="get" action="/admin/review/plan/${encodeURIComponent(sourceSlug)}">
-      <label for="review-action">选择操作</label>
-      <select id="review-action" name="action" required>
-        <option value="" selected disabled>请选择</option>
-        ${options}
-      </select>
-      <button type="submit">下一步</button>
+    <form method="post" action="/admin/api/review/classify" class="classification-form">
+      <input type="hidden" name="sourceSlug" value="${escapeHtml(sourceSlug)}" />
+      <label for="review-category">经验分类</label>
+      <select id="review-category" name="category"${disabled}>${options}</select>
+      <button id="classification-submit" type="submit"${disabled}>${selected === 'reject' ? '确认并删除' : '确认分类'}</button>
     </form>
+  </section>${script}`;
+}
+
+function renderRecommendationLoader(sourceSlug: string): string {
+  const encodedSlug = encodeURIComponent(sourceSlug);
+  return `<script>
+  (() => {
+    const sourceSlug = decodeURIComponent(${JSON.stringify(encodedSlug)});
+    const select = document.getElementById('review-category');
+    const submit = document.getElementById('classification-submit');
+    const error = document.getElementById('recommendation-error');
+    fetch('/admin/api/review/recommendation', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sourceSlug })
+    }).then(async (response) => {
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.message || '暂时无法生成模型建议');
+      const recommendation = payload.recommendation;
+      document.getElementById('recommendation-status').textContent = '大模型建议';
+      document.getElementById('recommendation-label').textContent = select.querySelector('option[value="' + recommendation.category + '"]').textContent;
+      document.getElementById('recommendation-scenario').textContent = recommendation.scenario;
+      document.getElementById('recommendation-reason').textContent = recommendation.reason;
+      select.value = recommendation.category;
+      select.disabled = false;
+      submit.disabled = false;
+      submit.textContent = recommendation.category === 'reject' ? '确认并删除' : '确认分类';
+    }).catch(() => {
+      document.getElementById('recommendation-status').textContent = '模型建议不可用';
+      error.textContent = '暂时无法生成模型建议，请稍后刷新。';
+    });
+    select.addEventListener('change', () => {
+      submit.textContent = select.value === 'reject' ? '确认并删除' : '确认分类';
+    });
+  })();
+  </script>`;
+}
+
+function renderDetailExpandable(page: Page): string {
+  const detail = detailReviewData(page);
+  return `<section class="detail-evidence" aria-label="草稿审核详情">
+    <details>
+      <summary>草稿元数据</summary>
+      <table class="review-table"><tbody>
+        <tr><th>标题</th><td>${escapeHtml(detail.title)}</td></tr>
+        <tr><th>Slug</th><td>${escapeHtml(detail.slug)}</td></tr>
+        <tr><th>项目 ID</th><td>${escapeHtml(detail.projectId)}</td></tr>
+        <tr><th>日期</th><td>${escapeHtml(detail.date)}</td></tr>
+        <tr><th>状态</th><td>${escapeHtml(detail.status)}</td></tr>
+        <tr><th>敏感性标记</th><td>${escapeHtml(detail.sensitivity)}</td></tr>
+        <tr><th>验证状态</th><td>${escapeHtml(detail.verification)}</td></tr>
+        <tr><th>适用范围</th><td>${escapeHtml(detail.applicability)}</td></tr>
+        <tr><th>不适用范围</th><td>${escapeHtml(detail.nonApplicable)}</td></tr>
+        <tr><th>已有审核动作</th><td>${escapeHtml(detail.reviewAction)}</td></tr>
+        <tr><th>证据引用数量</th><td>${detail.sourceReferenceCount}</td></tr>
+      </tbody></table>
+    </details>
+    <details>
+      <summary>内容预览</summary>
+      <pre>${escapeHtml(detail.contentPreview, 'preview')}</pre>
+    </details>
+    <details>
+      <summary>时间线预览</summary>
+      <pre>${escapeHtml(detail.eventPreview, 'preview')}</pre>
+    </details>
   </section>`;
 }
 
@@ -1248,24 +1299,21 @@ function projectDetailJson(page: Page): Record<string, unknown> {
       duplicate_status: '未预检',
       suggested_next_step: detailSuggestedNext(page),
     },
-    content_preview: detailPreviewValue(page.compiled_truth),
+    content_preview: detail.contentPreview,
     event_preview: detail.eventPreview,
   };
 }
 
 function renderFilterBar(typeFilter: string | undefined, verificationFilter: string | undefined, staleOnly: boolean, projectId: string | undefined): string {
   const staleVal = staleOnly ? 'true' : '';
-  return `<details class="review-filter-panel">
-    <summary>筛选待审核经验</summary>
-    <form class="review-filters" method="get" action="/admin/review">
-      <label>类型<input name="type" type="text" value="${escapeHtml(typeFilter ?? '')}" placeholder="如 incident" /></label>
-      <label>验证<input name="verification" type="text" value="${escapeHtml(verificationFilter ?? '')}" placeholder="如 verified" /></label>
-      <label>过期<select name="stale"><option value="">全部</option><option value="true"${staleOnly ? ' selected' : ''}>仅过期</option></select></label>
-      <label>项目 ID<input name="project_id" type="text" value="${escapeHtml(projectId ?? '')}" placeholder="可选" /></label>
-      <button type="submit">应用筛选</button>
-      <a class="action-link" href="/admin/review">重置</a>
-    </form>
-  </details>`;
+  return `<form class="review-filters" method="get" action="/admin/review">
+    <label>类型<input name="type" type="text" value="${escapeHtml(typeFilter ?? '')}" placeholder="如 incident" /></label>
+    <label>验证<input name="verification" type="text" value="${escapeHtml(verificationFilter ?? '')}" placeholder="如 verified" /></label>
+    <label>过期<select name="stale"><option value="">全部</option><option value="true"${staleOnly ? ' selected' : ''}>仅过期</option></select></label>
+    <label>项目 ID<input name="project_id" type="text" value="${escapeHtml(projectId ?? '')}" placeholder="可选" /></label>
+    <button type="submit">筛选</button>
+    <a class="action-link" href="/admin/review">重置</a>
+  </form>`;
 }
 
 function renderEmptyState(typeFilter: string | undefined, verificationFilter: string | undefined, staleOnly: boolean, projectId: string | undefined): string {
@@ -1276,41 +1324,24 @@ function renderEmptyState(typeFilter: string | undefined, verificationFilter: st
   return `<div class="empty-state"><p>暂无 inbox 草稿。</p><p>新草稿捕获后会出现在这里。</p></div>`;
 }
 
-function renderDraftRow(p: Page, reviewOrder: number): string {
+function renderDraftRow(p: Page): string {
+  const verification = String(p.frontmatter.verification ?? 'unverified');
   const updatedDate = p.updated_at.toISOString().slice(0, 10);
   const detailHref = `/admin/review/detail/${encodeURIComponent(p.slug)}`;
   const projectIdRaw = typeof p.frontmatter.project_id === 'string' ? p.frontmatter.project_id : '';
-  const projectIdLine = projectIdRaw.length > 0 ? `<span>项目：${escapeHtml(projectIdRaw)}</span>` : '';
-  return `<article class="review-queue-item">
-    <div class="queue-order" aria-label="审核顺序">${String(reviewOrder).padStart(2, '0')}</div>
-    <div class="queue-item-copy">
-      <p class="queue-kicker">待人工分类</p>
-      <h2><a href="${detailHref}">${escapeHtml(p.title)}</a></h2>
-      <div class="queue-provenance"><code>${escapeHtml(p.slug)}</code>${projectIdLine}</div>
-    </div>
-    <div class="classification-rail">
-      <span>AI 初判</span>
-      <strong>${escapeHtml(reviewSuggestedTypeLabel(p.type))}</strong>
-      <code>${escapeHtml(p.type)}</code>
-    </div>
-    <div class="queue-item-action">
-      <time datetime="${escapeHtml(p.updated_at.toISOString())}">更新于 ${escapeHtml(updatedDate)}</time>
-      <a class="review-button" href="${detailHref}">打开并分类 <span aria-hidden="true">→</span></a>
-    </div>
-  </article>`;
-}
-
-function reviewSuggestedTypeLabel(type: string): string {
-  const labels: Record<string, string> = {
-    knowledge: '通用知识',
-    runbook: '通用操作经验',
-    incident: '故障经验',
-    decision: '决策经验',
-    project: '项目经验',
-    environment: '环境经验',
-    'agent-skill': 'Agent 技能',
-  };
-  return labels[type] ?? type;
+  const projectIdLine = projectIdRaw.length > 0 ? `<div class="slug-mono">项目：${escapeHtml(projectIdRaw)}</div>` : '';
+  const verificationBadge = verification === 'verified'
+    ? `<span class="badge badge-verified">${escapeHtml(verification)}</span>`
+    : `<span class="badge badge-unverified">${escapeHtml(verification)}</span>`;
+  const recommendation = parseReviewRecommendation(p.frontmatter.review_recommendation, p);
+  const recommendationLabel = recommendation === null ? '待生成' : REVIEW_CATEGORY_LABELS[recommendation.category];
+  return `<tr>
+  <td data-label="草稿"><div>${escapeHtml(p.title)}</div><div class="slug-mono">${escapeHtml(p.slug)}</div>${projectIdLine}</td>
+  <td data-label="建议分类">${escapeHtml(recommendationLabel)}</td>
+  <td data-label="验证">${verificationBadge}</td>
+  <td class="slug-mono" data-label="更新时间">${escapeHtml(updatedDate)}</td>
+  <td data-label="操作"><a class="action-link" href="${detailHref}">开始审核</a></td>
+</tr>`;
 }
 
 function renderShell(title: string, body: string): string {
@@ -1318,148 +1349,91 @@ function renderShell(title: string, body: string): string {
 <html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${escapeHtml(title)} - GBrain 审核</title>
 <style>
-  :root{
-    color-scheme:light;
-    --page:#f7f8fc;
-    --surface:#ffffff;
-    --surface-subtle:#f2f5fb;
-    --text:#18243a;
-    --muted:#67758d;
-    --faint:#8b96a8;
-    --border:#dbe1ec;
-    --border-strong:#c4cedf;
-    --accent:#3658cf;
-    --accent-hover:#2845af;
-    --accent-soft:#e7ecff;
-    --success:#2d7a65;
-    --success-soft:#e7f4ef;
-    --warning:#986227;
-    --warning-soft:#fcf3e4;
-    --danger:#a34f4a;
-    --danger-soft:#faeceb;
-    --radius:6px;
-    --font-display:'MiSans','HarmonyOS Sans SC','Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
-    --font-body:'MiSans','HarmonyOS Sans SC','Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
-    --font-mono:'IBM Plex Mono','SFMono-Regular',Consolas,'Liberation Mono',monospace;
-  }
-  *{box-sizing:border-box}
-  body{max-width:1240px;margin:0 auto;font-family:var(--font-body);background:var(--page);color:var(--text);padding:48px 32px 64px;font-size:16px;line-height:1.72;overflow-wrap:anywhere}
-  h1{font-family:var(--font-display);font-size:38px;line-height:1.18;font-weight:800;margin:0;color:var(--text);letter-spacing:-.035em}
-  h2{font-family:var(--font-display);font-size:23px;line-height:1.35;font-weight:750;margin-top:28px;margin-bottom:12px;color:var(--text);text-align:left;letter-spacing:-.02em}
-  table.review-table{border-collapse:separate;border-spacing:0;width:100%;margin:20px 0;table-layout:fixed;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
-  table.review-table th,table.review-table td{border:0;border-bottom:1px solid var(--border);padding:14px 16px;text-align:left;font-size:15px;overflow-wrap:anywhere;word-break:normal;white-space:normal}
-  table.review-table tr:last-child td{border-bottom:0}
-  table.review-table th{background:#e8efec;color:var(--muted);font-size:13px;font-weight:700;letter-spacing:.06em}
-  table.review-table td{background:var(--surface)}
-  table.review-table tr:hover td{background:#f7faf8}
-  pre{background:var(--surface-subtle);padding:18px;border:1px solid var(--border);border-radius:10px;overflow-x:auto;white-space:pre-wrap;font-size:15px;font-family:var(--font-mono);line-height:1.78}
-  form{margin:16px 0;padding:18px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)}
-  label{display:inline-block;margin-right:12px;font-size:14px;text-align:left}
-  input,select,textarea{background:var(--surface);border:1px solid var(--border-strong);color:var(--text);padding:10px 12px;border-radius:8px;font:inherit;font-size:15px;transition:border-color 150ms,box-shadow 150ms}
+  body{font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0a0a0f;color:#e0e0e0;padding:24px;line-height:1.6;overflow-wrap:anywhere}
+  h1{font-size:22px;border-bottom:1px solid #1e1e2e;padding-bottom:8px;margin-top:0;margin-bottom:16px;text-align:left}
+  h2{font-size:17px;margin-top:24px;margin-bottom:12px;color:#88aaff;text-align:left}
+  table.review-table{border-collapse:collapse;width:100%;margin:12px 0;table-layout:fixed}
+  table.review-table th,table.review-table td{border:1px solid #1e1e2e;padding:10px 16px;text-align:left;font-size:13px;font-family:'JetBrains Mono',monospace;overflow-wrap:anywhere;word-break:normal;white-space:normal}
+  table.review-table th{background:#12121a;color:#888888;font-family:Inter,sans-serif;font-weight:500;text-transform:uppercase;letter-spacing:1px}
+  table.review-table tr:hover td{background:#1a1a2a}
+  pre{background:#0f0f1a;padding:12px;border:1px solid #1e1e2e;border-radius:8px;overflow-x:auto;white-space:pre-wrap;font-size:13px;font-family:'JetBrains Mono',monospace}
+  form{margin:16px 0;padding:16px;background:#12121a;border:1px solid #1e1e2e;border-radius:8px}
+  label{display:inline-block;margin-right:12px;font-size:13px;text-align:left}
+  input,select,textarea{background:#0f0f1a;border:1px solid #1e1e2e;color:#e0e0e0;padding:6px 10px;border-radius:8px;font-size:13px;transition:border-color 150ms}
   textarea{display:block;inline-size:100%;min-block-size:96px;resize:vertical;box-sizing:border-box}
-  input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
-  button{background:var(--accent);color:#fff;border:1px solid var(--accent);padding:10px 16px;border-radius:8px;cursor:pointer;font:inherit;font-size:15px;font-weight:700;transition:background 150ms,border-color 150ms}
-  button:hover{background:var(--accent-hover);border-color:var(--accent-hover)}
-  a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:3px solid #8bb4d8;outline-offset:3px}
-  button:disabled{background:#e6e6e3;border-color:#e6e6e3;color:var(--faint);cursor:not-allowed}
-  .stale{color:var(--danger);font-weight:650}
-  .warn{background:var(--warning-soft);border:1px solid #ead49b;border-radius:var(--radius);padding:11px 14px;font-size:13px}
-  code{background:#e9efec;color:#31514a;padding:2px 6px;border-radius:4px;font-size:12px;font-family:var(--font-mono)}
-  a{color:var(--accent);text-decoration:none}
+  button{background:#3a3a5a;color:#fff;border:none;padding:6px 14px;border-radius:8px;cursor:pointer;font-size:13px;transition:background 150ms}
+  button:hover{background:#4a4a6a}
+  a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,.decision-card:focus-visible,summary:focus-visible{outline:3px solid #88aaff;outline-offset:3px}
+  button:disabled{background:#1e1e2e;color:#555555;cursor:not-allowed}
+  .stale{color:#ff6b6b;font-weight:bold}
+  .warn{background:rgba(245,166,35,0.1);border:1px solid rgba(245,166,35,0.3);border-radius:8px;padding:10px 14px;font-size:13px}
+  code{background:#0f0f1a;padding:2px 6px;border-radius:3px;font-size:12px;font-family:'JetBrains Mono',monospace}
+  a{color:#88aaff;text-decoration:none}
   a:hover{text-decoration:underline}
-  .muted{color:var(--muted);font-size:15px;text-align:left}
-  .slug-mono{font-family:var(--font-mono);font-size:13px;color:var(--muted)}
-  .action-link{color:var(--accent);font-size:15px;font-weight:700;text-decoration:none}
+  .muted{color:#888888;font-size:13px;text-align:left}
+  .slug-mono{font-family:'JetBrains Mono',monospace;font-size:12px;color:#555555}
+  .action-link{color:#88aaff;font-size:13px;text-decoration:none}
   .action-link:hover{text-decoration:underline}
-  .badge{display:inline-block;padding:3px 9px;border-radius:9999px;font-size:12px;font-family:var(--font-mono);border:1px solid transparent}
-  .badge-verified{background:var(--success-soft);color:var(--success);border-color:#b9dfc8}
-  .badge-unverified{background:var(--warning-soft);color:var(--warning);border-color:#ead49b}
-  .badge-draft{background:#f0f0ed;color:var(--muted);border-color:var(--border)}
-  .badge-stale{background:var(--danger-soft);color:var(--danger);border-color:#edbcbc}
-  .badge-na{background:#f0f0ed;color:var(--muted);border-color:var(--border)}
-  .review-workbench{max-width:1120px;margin:0 auto}
-  .workbench-header{display:block;padding:18px 0 29px;border-bottom:2px solid var(--text)}
-  .eyebrow{margin:0 0 10px;color:var(--accent);font-size:12px;font-weight:800;letter-spacing:.14em}
-  .heading-count{display:inline-flex;vertical-align:middle;align-items:center;justify-content:center;min-width:32px;height:32px;margin-left:12px;border-radius:50%;background:var(--accent);color:#fff;font-family:var(--font-mono);font-size:14px;font-weight:700;letter-spacing:0}
-  .workbench-intro{max-width:680px;margin:12px 0 0;color:var(--muted);font-size:17px}
-  .review-filter-panel{margin:18px 0 8px;border:0;border-bottom:1px solid var(--border);border-radius:0;background:transparent}
-  .review-filter-panel summary{padding:10px 0 13px;color:var(--muted);font-size:14px;font-weight:700;cursor:pointer}
-  .review-filter-panel[open] summary{border-bottom:1px solid var(--border)}
-  .review-filters{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin:0;padding:8px 0 18px;background:transparent;border:0;border-radius:0}
-  .review-filters label{display:flex;flex-direction:column;font-size:13px;color:var(--muted);font-weight:700;gap:5px}
-  .review-filters input,.review-filters select{background:var(--surface);border:1px solid var(--border-strong);color:var(--text);padding:9px 10px;border-radius:8px;font-size:14px;min-width:140px}
-  .review-queue{margin-top:0;border-bottom:1px solid var(--border)}
-  .review-queue-item{position:relative;display:grid;grid-template-columns:54px minmax(0,1fr) 190px 154px;align-items:center;gap:22px;padding:23px 0;border-top:1px solid var(--border);background:transparent;transition:background 150ms ease,padding 150ms ease}
-  .review-queue-item:hover{margin:0 -18px;padding-right:18px;padding-left:18px;background:var(--surface-subtle)}
-  .queue-order{align-self:start;padding-top:3px;color:#9ba7ba;font-family:var(--font-mono);font-size:14px;font-weight:700}
-  .queue-kicker{margin:0 0 6px;color:var(--muted);font-size:12px;font-weight:800;letter-spacing:.08em}
-  .queue-item-copy h2{margin:0;font-family:var(--font-body);font-size:20px;font-weight:800;line-height:1.36;letter-spacing:-.02em}
-  .queue-item-copy h2 a{color:var(--text);text-decoration:none}
-  .queue-item-copy h2 a:hover{color:var(--accent)}
-  .queue-provenance{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;margin-top:9px;color:var(--muted);font-size:13px}
-  .classification-rail{display:flex;flex-direction:column;align-items:flex-start;gap:3px;padding:9px 13px;border-left:3px solid var(--accent);background:var(--accent-soft)}
-  .classification-rail span{color:var(--muted);font-size:11px;font-weight:800;letter-spacing:.07em}
-  .classification-rail strong{color:var(--text);font-size:15px;line-height:1.4}
-  .classification-rail code{padding:0;background:transparent;color:var(--muted);font-size:11px}
-  .queue-item-action{display:flex;flex-direction:column;align-items:flex-end;gap:10px}
-  .queue-item-action time{color:var(--muted);font-size:13px;white-space:nowrap}
-  .review-button{display:inline-flex;align-items:center;gap:7px;padding:0;border-radius:0;background:transparent;color:var(--accent);font-size:14px;font-weight:800;line-height:1.3;text-decoration:none;white-space:nowrap;transition:color 150ms}
-  .review-button:hover{background:transparent;color:var(--accent-hover);text-decoration:none}
-  .review-button span{font-size:18px;line-height:.8;transition:transform 150ms}
-  .review-button:hover span{transform:translateX(3px)}
-  .history-link{margin:22px 0 0;text-align:right}
-  .empty-state{text-align:center;color:var(--muted);padding:72px 0;font-size:16px}
-  .review-sheet{max-width:920px;margin:0 auto}
-  .review-detail-header{margin-bottom:28px;padding-bottom:24px;border-bottom:1px solid var(--border)}
-  .review-detail-header h1{margin-bottom:14px;font-size:32px}
-  .detail-meta{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
-  .review-section{margin-top:18px;padding:26px 28px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)}
-  .review-section h2{margin-top:0}
-  .review-section h3{margin:24px 0 8px;font-size:16px}
-  .experience-content{margin:0;background:var(--surface-subtle);line-height:1.75}
-  .scenario-list{margin:8px 0;padding-left:22px}
-  .scenario-list li{margin:5px 0;white-space:pre-wrap}
-  .missing-field{margin:8px 0;color:var(--warning);font-size:15px}
-  .recall-list{display:grid;gap:12px}
-  .recall-item{padding:18px;background:var(--surface-subtle);border:1px solid var(--border);border-radius:10px}
-  .recall-item-head{display:flex;justify-content:space-between;align-items:flex-start;gap:14px}
-  .recall-score{flex:none;color:var(--success);font-family:var(--font-mono);font-size:13px}
-  .recall-meta{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:5px 0 10px;color:var(--muted);font-size:13px}
-  .recall-chunk{padding:12px 14px;background:var(--surface);border-left:3px solid #9fcdbf;white-space:pre-wrap;font-size:15px}
-  .recall-item details{margin-top:10px}
-  .recall-item summary{color:var(--accent);cursor:pointer;font-size:14px;font-weight:800}
-  .review-action-form{display:flex;align-items:flex-end;gap:10px;margin:0;padding:0;border:0}
-  .review-action-form label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:12px}
-  .review-action-form select{min-width:220px}
+  .badge{display:inline-block;padding:2px 8px;border-radius:9999px;font-size:12px;font-family:'JetBrains Mono',monospace;border:1px solid transparent}
+  .badge-verified{background:rgba(52,168,83,0.15);color:#34a853;border-color:rgba(52,168,83,0.3)}
+  .badge-unverified{background:rgba(245,166,35,0.15);color:#f5a623;border-color:rgba(245,166,35,0.3)}
+  .badge-draft{background:rgba(136,136,136,0.15);color:#888888;border-color:rgba(136,136,136,0.3)}
+  .badge-stale{background:rgba(255,107,107,0.15);color:#ff6b6b;border-color:rgba(255,107,107,0.3)}
+  .badge-na{background:rgba(85,85,85,0.15);color:#555555;border-color:rgba(85,85,85,0.3)}
+  .review-filters{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin:16px 0;padding:16px;background:#12121a;border:1px solid #1e1e2e;border-radius:8px}
+  .review-filters label{display:flex;flex-direction:column;font-size:12px;color:#888888;gap:4px}
+  .review-filters input,.review-filters select{background:#0f0f1a;border:1px solid #1e1e2e;color:#e0e0e0;padding:6px 10px;border-radius:8px;font-size:13px;min-width:120px}
+  .empty-state{text-align:center;color:#888888;padding:48px 0}
+  .decision-card-section{margin-top:32px}
+  .decision-card-section h2{margin-bottom:8px}
+  .decision-card-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(260px,100%),1fr));gap:12px}
+  .decision-card{display:block;background:#12121a;border:1px solid #1e1e2e;border-radius:16px;color:#e0e0e0;padding:24px;text-decoration:none;transition:background 150ms,border-color 150ms;text-align:left}
+  .decision-card:hover{background:#1a1a2a;border-color:#3a3a5a;text-decoration:none}
+  .decision-card:focus-visible{outline:2px solid #88aaff;outline-offset:2px}
+  .decision-card-primary{border-color:#3a3a5a}
+  .decision-card h3{font-size:14px;margin:0 0 16px;text-align:left}
+  .decision-card-details{display:grid;gap:12px;margin:0}
+  .decision-card-details div{display:grid;gap:4px}
+  .decision-card-details dt{color:#888888;font-size:12px;text-align:left}
+  .decision-card-details dd{margin:0;font-size:13px;overflow-wrap:anywhere;text-align:left}
+  .decision-card-risk{border-left:3px solid #f5a623;padding-left:8px}
+  .decision-card-rare .decision-card-risk{border-left-color:#ff6b6b}
 
+  /* Desktop two-column layout and mobile single-column layout */
+  @media (min-width: 769px) {
+    .review-container {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 24px;
+      align-items: start;
+    }
+    .review-sidebar {
+      grid-column: 1;
+      position: sticky;
+      top: 24px;
+    }
+    .review-main {
+      grid-column: 2;
+    }
+  }
   @media (max-width: 768px) {
-    body{padding:28px 16px 44px;font-size:16px;overflow-wrap:anywhere}
-    h1{font-size:30px}
-    h2{font-size:21px}
-    .workbench-header{padding-top:6px;padding-bottom:24px}
-    .workbench-intro{font-size:16px}
-    .heading-count{min-width:28px;height:28px;margin-left:8px;font-size:12px}
-    .review-queue-item{grid-template-columns:36px minmax(0,1fr);gap:12px;padding:21px 0}
-    .review-queue-item:hover{margin:0 -10px;padding-right:10px;padding-left:10px}
-    .queue-order{grid-column:1;grid-row:1;color:var(--accent)}
-    .queue-item-copy{grid-column:2;grid-row:1}
-    .classification-rail{grid-column:2;grid-row:2;padding:9px 12px;border-left:3px solid var(--accent);border-top:0}
-    .queue-item-action{grid-column:2;grid-row:3;align-items:flex-start;gap:8px}
-    .queue-item-action{align-items:stretch;gap:10px}
-    .queue-item-action time{text-align:left}
-    .review-button{justify-content:center}
-    .history-link{text-align:left}
-    .review-section{padding:20px}
-    .review-action-form{align-items:stretch;flex-direction:column}
-    .review-action-form label,.review-action-form select,.review-action-form button{width:100%}
-    .muted,p{font-size:16px;line-height:1.72}
+    body{padding:16px;overflow-wrap:anywhere}
+    .review-container {
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+    .decision-card-details dd, .muted, p {
+      font-size: 14px;
+      line-height: 1.7;
+    }
     table.review-table{table-layout:auto}
     table.review-table thead{display:none}
     table.review-table tbody,table.review-table tr,table.review-table th,table.review-table td{display:block;width:100%;box-sizing:border-box}
-    table.review-table tr{margin:8px 0;border:1px solid var(--border)}
+    table.review-table tr{margin:8px 0;border:1px solid #1e1e2e}
     table.review-table th,table.review-table td{border:0;padding:8px 10px}
-    table.review-table th{background:var(--surface-subtle)}
-    table.review-table td[data-label]::before{content:attr(data-label);display:block;margin-bottom:4px;color:var(--muted);font-size:12px;font-weight:600;letter-spacing:.02em}
+    table.review-table th{background:#12121a}
+    table.review-table td[data-label]::before{content:attr(data-label);display:block;margin-bottom:4px;color:#888888;font-family:Inter,sans-serif;font-size:12px;font-weight:500;letter-spacing:.04em}
   }
 </style></head><body>
 ${body}
