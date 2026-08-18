@@ -43,22 +43,18 @@ bun src/cli.ts install-client --json
 - `~/.codex/skills/gbrain-review/SKILL.md`
 - `~/.codex/hooks/gbrain-project-check.py`
 - `~/.codex/hooks/gbrain-experience-guard.py`
-- `~/.codex/hooks.json` 中由 GBrain 管理的 `SessionStart`、`UserPromptSubmit`、`PostToolUse` 和 `Stop` handler
+- `~/.codex/hooks.json` 中由 GBrain 管理的 `SessionStart` 和 `UserPromptSubmit` handler
 
-## OpenCode 与 Codex 经验 Worker 守卫
+## OpenCode 与 Codex 只读 Recall 守卫
 
-安装器默认启用经验 Worker 守卫。它在用户提交 prompt 和本地工具完成后只记录最小化元数据，
-并在 Agent 准备结束当前回合时检查是否已有结构化召回与收尾回执。它不会调用 MCP、不会写入
-GBrain、不会保存原始 prompt、命令、工具输出或 transcript，也不会中断正在运行的命令。
+安装器默认启用只读 Recall 守卫。非平凡回合只生成一次性 recall token；主 Agent 派发独立
+Recall Worker，并只接收受字段、条数和总字节限制的结构化 envelope。守卫不会调用 MCP、写入
+GBrain、保存原始 prompt、命令、工具输出或 transcript，也不会中断正在运行的命令。
 
-非平凡回合会预发互不混用的一次性召回 token 与收尾 token。主 Agent 先派发独立 Recall Worker，
-等待其完成只读召回后，只接收受字段、条数和总字节限制的结构化 envelope；正文、搜索结果和日志不返回
-主会话。最终答复前，主 Agent 再派发独立 Closeout Worker，只传递脱敏后的任务目标、变更、失败和验证证据。
-Closeout Worker 独占搜索去重、候选判断、`inbox/` 写入、服务端可修复拒绝的修改重试、`get_page`
-验证和结构化回执。首次 `Stop` 已有两个有效回执时直接放行。若 Agent 未履约，`Stop` 仍返回
-`decision: "block"` 作为兜底，最多续跑两次后
-fail-open。Codex 使用 `Stop` block；OpenCode 没有等价阻断 Hook，因此在 `session.idle` 后通过
-`promptAsync` 续跑同一 session。守卫本身不调用 MCP。
+自动 Closeout 已关闭。Codex 不再安装 GBrain 管理的 `PostToolUse` 或 `Stop` 经验处理器；OpenCode
+不再转发工具事件、注入 system transform 或在 `session.idle` 后发起内部续跑。安装或升级时会移除
+旧的 GBrain 管理处理器，并保留其他来源的 Hook。只有用户明确要求保存经验时，Agent 才使用
+`gbrain-capture` 完成搜索去重、脱敏、写入和回读验证。
 
 守卫不会创建倒计时、后台等待任务或恢复会话；长期任务仍应使用合适的作业管理器、日志和检查点机制。永久禁用经验守卫时运行：
 
@@ -66,7 +62,7 @@ fail-open。Codex 使用 `Stop` block；OpenCode 没有等价阻断 Hook，因�
 gbrain install-client --no-experience-hook --json
 ```
 
-此参数移除两端经验脚本、Codex 的三个经验 handler，并禁用 OpenCode 插件中的经验路径。
+此参数移除两端经验脚本、Codex 的 `UserPromptSubmit` 经验 handler，并禁用 OpenCode 插件中的经验路径。
 两端项目身份检查和用户已有的其他 Hook/插件不受影响。
 
 它不会读取或生成 `local-read.env`、`local-writer.env`、Bearer token 或
@@ -85,7 +81,7 @@ Codex 会对新增或变化的非托管 Hook 执行一次性信任检查。首�
 在 Codex 中运行 `/hooks`，确认来源和命令后信任该 Hook。此后每次启动或恢复
 会话都会自动执行。OpenCode 从用户配置的 `plugins/` 目录自动加载适配器，无需 `/hooks` 信任步骤。
 
-安装后的规则默认要求 Agent 使用中文说明经验召回、候选总结、预分类和
+安装后的规则默认要求 Agent 使用中文说明经验召回、手动采集结果、预分类和
 审核结论。命令、代码、路径、协议字段和错误原文可以保留英文。
 
 经验工作流区分只读召回和写入：
@@ -93,8 +89,8 @@ Codex 会对新增或变化的非托管 Hook 执行一次性信任检查。首�
 1. 非平凡任务开始时，Agent 先通过 MCP 只读召回已有经验。
 2. 关键失败只触发故障召回；同类故障第 2 次独立出现时，Agent 停止盲目
    重试并整理错误总结。
-3. 候选经验先完成搜索去重、自动脱敏、固定模板整理和预分类。
-4. Agent 简要说明预分类和目标 slug，并立即写入。
+3. 只有用户明确要求持久化时，候选经验才完成搜索去重、自动脱敏、固定模板整理和预分类。
+4. Agent 简要说明预分类和目标 slug，并写入。
 5. Agent 随即调用 `get_page` 验证写入；用户后续要求修改时更新或删除草稿。
 6. 所有草稿只写入 `inbox/`。写入后的正文锁定，后续人工审核只修改分类；
    正文有问题时退回并重新生成，不能在分类审核时静默修改。

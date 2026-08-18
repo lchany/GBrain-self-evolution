@@ -43,69 +43,17 @@ function hook(harness: Harness, name: string): Hook {
 }
 
 describe('OpenCode GBrain guard lifecycle ordering', () => {
-  test('continuation prompt re-entry does not deadlock the idle check', async () => {
-    let reenter: (() => Promise<void>) | undefined;
-    const harness = await installPlugin(async () => {
-      if (!reenter) throw new Error('re-entry handler is not ready');
-      await reenter();
-      return { data: true };
-    });
+  test('recall-only mode registers no continuation or tool lifecycle hooks', async () => {
+    const harness = await installPlugin(async () => ({ data: true }));
     try {
       const sessionID = 'session-reentrant';
       await hook(harness, 'chat.message')(
         { sessionID, messageID: 'turn-parent' },
         textOutput('请修改代码', sessionID, 'turn-parent'),
       );
-      reenter = () => hook(harness, 'chat.message')(
-        { sessionID, messageID: 'turn-continuation' },
-        textOutput('继续完成经验收尾', sessionID, 'turn-continuation'),
-      );
-
-      const idle = hook(harness, 'event')({ event: { type: 'session.idle', properties: { sessionID } } });
-      const completed = await Promise.race([idle.then(() => true), Bun.sleep(250).then(() => false)]);
-      expect(completed).toBe(true);
-    } finally {
-      await hook(harness, 'dispose')({});
-      rmSync(harness.root, { recursive: true, force: true });
-    }
-  });
-
-  test('fire-and-forget tool errors settle before the next system transform', async () => {
-    const harness = await installPlugin(async () => ({ data: true }));
-    try {
-      const sessionID = 'session-error-order';
-      await hook(harness, 'chat.message')(
-        { sessionID, messageID: 'turn-error-order' },
-        textOutput('please take care of it', sessionID, 'turn-error-order'),
-      );
-      const event = hook(harness, 'event')({ event: { type: 'message.part.updated', properties: {
-        part: { type: 'tool', sessionID, callID: 'task-error', tool: 'task',
-          state: { status: 'error', input: { prompt: 'work' } } },
-      } } });
-      const output = { system: [] as string[] };
-      const transform = hook(harness, 'experimental.chat.system.transform')({ sessionID }, output);
-      await Promise.all([event, transform]);
-      expect(output.system.join('')).toContain('GBRAIN_EXPERIENCE_CLOSEOUT_REQUIRED');
-    } finally {
-      await hook(harness, 'dispose')({});
-      rmSync(harness.root, { recursive: true, force: true });
-    }
-  });
-
-  test('a rejected continuation fails open for the next user message', async () => {
-    const harness = await installPlugin(async () => { throw new Error('unavailable'); });
-    try {
-      const sessionID = 'session-rejected-prompt';
-      await hook(harness, 'chat.message')(
-        { sessionID, messageID: 'turn-rejected' },
-        textOutput('请修改代码', sessionID, 'turn-rejected'),
-      );
-      await expect(hook(harness, 'event')({
-        event: { type: 'session.idle', properties: { sessionID } },
-      })).resolves.toBeUndefined();
-      const next = textOutput('请修改配置', sessionID, 'turn-after-rejection');
-      await hook(harness, 'chat.message')({ sessionID, messageID: 'turn-after-rejection' }, next);
-      expect(next.parts[0]?.text).toContain('GBRAIN_EXPERIENCE_CLOSEOUT_REQUIRED');
+      expect(harness.hooks.event).toBeUndefined();
+      expect(harness.hooks['tool.execute.after']).toBeUndefined();
+      expect(harness.hooks['experimental.chat.system.transform']).toBeUndefined();
     } finally {
       await hook(harness, 'dispose')({});
       rmSync(harness.root, { recursive: true, force: true });

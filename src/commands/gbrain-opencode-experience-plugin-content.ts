@@ -7,9 +7,7 @@ import { fileURLToPath } from 'node:url';
 type JsonRecord = Record<string, unknown>;
 type MessagePart = { id?: string; sessionID?: string; messageID?: string; type: string; text?: string; synthetic?: boolean };
 type MessageOutput = { message: { id: string; sessionID: string }; parts: MessagePart[] };
-type SystemOutput = { system: string[] };
-type PromptInput = { path: { id: string }; body: { parts: Array<{ type: 'text'; text: string }> }; query: { directory: string } };
-type PluginInput = { directory: string; client: { session: { promptAsync(input: PromptInput): Promise<unknown> } } };
+type PluginInput = { directory: string };
 
 const EXPERIENCE_ENABLED = __EXPERIENCE_ENABLED__;
 const pluginDir = dirname(fileURLToPath(import.meta.url));
@@ -94,63 +92,14 @@ const promptText = (output: MessageOutput): string => output.parts
   .map((part) => part.text ?? '')
   .join(String.fromCharCode(10));
 
-const normalizedTool = (tool: string): string => {
-  if (tool === 'bash') return 'Bash';
-  if (tool === 'edit') return 'Edit';
-  if (tool === 'write') return 'Write';
-  if (tool === 'task') return 'Agent';
-  if (tool === 'gbrain_put_page') return 'mcp__gbrain__put_page';
-  if (tool === 'gbrain_get_page') return 'mcp__gbrain__get_page';
-  return tool;
-};
-
-const normalizedResponse = (output: unknown): JsonRecord => {
-  if (!isRecord(output)) return { error: true };
-  const metadata = isRecord(output.metadata) ? output.metadata : {};
-  const exitCode = typeof metadata.exit === 'number' ? metadata.exit : metadata.exit_code;
-  return {
-    ...metadata,
-    ...(typeof exitCode === 'number' ? { exit_code: exitCode } : {}),
-    ...(output.isError === true ? { isError: true } : {}),
-    ...(output.error ? { error: true } : {}),
-    ...(typeof output.output === 'string' ? { output: output.output } : {}),
-  };
-};
-
-export const GBrainOpenCodeGuard = async ({ client, directory }: PluginInput) => {
+export const GBrainOpenCodeGuard = async ({ directory }: PluginInput) => {
   const projectChecked = new Set<string>();
-  const activeTurns = new Map<string, string>();
-  const blockedTurns = new Set<string>();
-  const pendingContexts = new Map<string, string>();
-  const pendingEvents = new Map<string, Promise<void>>();
-  const idleChecks = new Map<string, Promise<void>>();
-
-  const recordTool = async (sessionID: string, callID: string, tool: string,
-    args: JsonRecord, response: JsonRecord, turnID = activeTurns.get(sessionID) ?? callID): Promise<void> => {
-    activeTurns.set(sessionID, turnID);
-    const result = await runHook(experienceScript, {
-      session_id: sessionID, turn_id: turnID, cwd: directory, hook_event_name: 'PostToolUse',
-      tool_name: normalizedTool(tool), tool_use_id: callID, tool_input: args, tool_response: response,
-    }, true);
-    const context = contextFrom(result);
-    if (context) pendingContexts.set(sessionID, context);
-  };
-  const queueEvent = (sessionID: string, work: () => Promise<void>): Promise<void> => {
-    const previous = pendingEvents.get(sessionID) ?? Promise.resolve();
-    const pending = previous.then(work, work).catch(() => undefined);
-    pendingEvents.set(sessionID, pending);
-    void pending.then(() => { if (pendingEvents.get(sessionID) === pending) pendingEvents.delete(sessionID); });
-    return pending;
-  };
 
   return {
     'chat.message': async (
       input: { sessionID: string; messageID?: string },
       output: MessageOutput,
     ): Promise<void> => {
-      if (EXPERIENCE_ENABLED && blockedTurns.has(input.sessionID)) return;
-      const idleCheck = idleChecks.get(input.sessionID);
-      if (idleCheck) await idleCheck;
       const originalPrompt = promptText(output);
       if (!projectChecked.has(input.sessionID)) {
         projectChecked.add(input.sessionID);
@@ -164,7 +113,6 @@ export const GBrainOpenCodeGuard = async ({ client, directory }: PluginInput) =>
       }
       if (!EXPERIENCE_ENABLED) return;
       const turnID = input.messageID ?? crypto.randomUUID();
-      activeTurns.set(input.sessionID, turnID);
       const experience = await runHook(experienceScript, {
         session_id: input.sessionID,
         turn_id: turnID,
@@ -174,86 +122,8 @@ export const GBrainOpenCodeGuard = async ({ client, directory }: PluginInput) =>
       }, true);
       appendContext(output, contextFrom(experience));
     },
-    'tool.execute.after': async (
-      input: { tool: string; sessionID: string; callID: string; args: JsonRecord },
-      output: unknown,
-    ): Promise<void> => {
-      if (!EXPERIENCE_ENABLED) return;
-      await recordTool(input.sessionID, input.callID, input.tool, input.args, normalizedResponse(output));
-    },
-    'experimental.chat.system.transform': async (
-      input: { sessionID?: string },
-      output: SystemOutput,
-    ): Promise<void> => {
-      if (!input.sessionID) return;
-      const pending = pendingEvents.get(input.sessionID);
-      if (pending) await pending;
-      const context = pendingContexts.get(input.sessionID);
-      if (!context) return;
-      pendingContexts.delete(input.sessionID);
-      output.system.push(context);
-    },
-    event: async ({ event }: { event: { type: string; properties: JsonRecord } }): Promise<void> => {
-      if (!EXPERIENCE_ENABLED) return;
-      if (event.type === 'message.part.updated') {
-        const part = event.properties.part;
-        if (!isRecord(part) || part.type !== 'tool' || typeof part.sessionID !== 'string') return;
-        const state = part.state;
-        if (!isRecord(state) || state.status !== 'error') return;
-        const callID = typeof part.callID === 'string' ? part.callID : crypto.randomUUID();
-        const turnID = activeTurns.get(part.sessionID) ?? callID;
-        await queueEvent(part.sessionID, () => recordTool(part.sessionID, callID,
-          typeof part.tool === 'string' ? part.tool : 'unknown', isRecord(state.input) ? state.input : {},
-          { error: true }, turnID));
-        return;
-      }
-      if (event.type !== 'session.idle') return;
-      const sessionID = event.properties.sessionID;
-      if (typeof sessionID !== 'string') return;
-      const pending = pendingEvents.get(sessionID);
-      if (pending) await pending;
-      if (idleChecks.has(sessionID)) return;
-      const turnID = activeTurns.get(sessionID);
-      if (!turnID) return;
-      const check = (async (): Promise<void> => {
-        try {
-          const result = await runHook(experienceScript, {
-            session_id: sessionID,
-            turn_id: turnID,
-            cwd: directory,
-            hook_event_name: 'Stop',
-            stop_hook_active: blockedTurns.has(sessionID),
-          }, true);
-          if (result.decision === 'block' && typeof result.reason === 'string') {
-            blockedTurns.add(sessionID);
-            const resumed = await client.session.promptAsync({
-              path: { id: sessionID },
-              body: { parts: [{ type: 'text', text: result.reason }] },
-              query: { directory },
-            }).catch(() => ({ error: true }));
-            if (!isRecord(resumed) || resumed.error) {
-              blockedTurns.delete(sessionID);
-              activeTurns.delete(sessionID);
-            }
-            return;
-          }
-          blockedTurns.delete(sessionID);
-          activeTurns.delete(sessionID);
-          pendingContexts.delete(sessionID);
-        } finally {
-          idleChecks.delete(sessionID);
-        }
-      })();
-      idleChecks.set(sessionID, check);
-      await check;
-    },
     dispose: async (): Promise<void> => {
       projectChecked.clear();
-      activeTurns.clear();
-      blockedTurns.clear();
-      pendingContexts.clear();
-      pendingEvents.clear();
-      idleChecks.clear();
     },
   };
 };

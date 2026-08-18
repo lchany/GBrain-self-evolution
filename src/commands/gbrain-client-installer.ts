@@ -50,8 +50,8 @@ Usage:
   gbrain install-client [--json] [--no-experience-hook]
 
 Installs user-level OpenCode and Codex GBrain rules, skills, project guards, and,
-by default, isolated turn-close experience guards. Use --no-experience-hook to
-disable only the GBrain experience guards on both clients.
+by default, isolated read-only recall guards. Use --no-experience-hook to disable
+only the GBrain recall guards on both clients.
 Client credentials and network access are managed outside this installer.
 `;
 
@@ -83,7 +83,7 @@ export async function runInstallClient(args: readonly string[], deps: InstallCli
           experience_hook: flags.experienceHook ? {
             script: paths.opencodeExperienceHook,
             plugin: paths.opencodeExperiencePlugin,
-            mode: 'isolated_subagent_capture',
+            mode: 'isolated_recall',
           } : null,
         },
         {
@@ -97,14 +97,14 @@ export async function runInstallClient(args: readonly string[], deps: InstallCli
           },
           experience_hook: flags.experienceHook ? {
             script: paths.codexExperienceHook,
-            mode: 'isolated_subagent_capture',
+            mode: 'isolated_recall',
           } : null,
         },
       ],
     };
     const text = flags.json
       ? `${JSON.stringify(summary, null, 2)}\n`
-      : `GBrain rules, skills, and project guards installed for OpenCode and Codex; experience guards ${flags.experienceHook ? 'enabled' : 'disabled'}. In Codex, trust the hooks once with /hooks.\n`;
+      : `GBrain rules, skills, and project guards installed for OpenCode and Codex; read-only recall guards ${flags.experienceHook ? 'enabled' : 'disabled'}. In Codex, trust the hooks once with /hooks.\n`;
     stdout(text);
     return 0;
   } catch (error) {

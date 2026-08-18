@@ -34,15 +34,14 @@ export function mergeCodexHooksConfig(
   for (const eventName of ['UserPromptSubmit', 'PostToolUse', 'Stop']) {
     const groups = getHookGroups(hooks, eventName);
     const withoutExperience = groups.flatMap((group) => removeManagedExperienceHandlers(group));
-    if (experienceHook) {
+    if (experienceHook && eventName === 'UserPromptSubmit') {
       withoutExperience.push({
-        ...(eventName === 'PostToolUse' ? { matcher: '*' } : {}),
         hooks: [{
           type: 'command',
           command: `python3 ${shellQuote(experienceScriptPath)}`,
           statusMessage: GBRAIN_CODEX_EXPERIENCE_HOOK_STATUS,
           timeout: 5,
-          ...(eventName === 'Stop' ? {} : { additionalContextLimit: 2048 }),
+          additionalContextLimit: 2048,
         }],
       });
     }

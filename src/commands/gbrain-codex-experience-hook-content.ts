@@ -2,7 +2,7 @@ export const GBRAIN_CODEX_EXPERIENCE_HOOK_FILENAME = 'gbrain-experience-guard.py
 export const GBRAIN_CODEX_EXPERIENCE_HOOK_STATUS = 'GBrain 经验 Worker 守卫';
 
 export const GBRAIN_CODEX_EXPERIENCE_HOOK = String.raw`#!/usr/bin/env python3
-"""Codex worker guard for GBrain experience recall and closeout.
+"""Codex worker guard for read-only GBrain experience recall.
 
 The hook never calls MCP and never stores raw prompts, commands, responses, or
 transcripts. It records only bounded turn metadata and structured receipts.
@@ -519,13 +519,9 @@ def _handle_hook(root: Path, payload: dict[str, Any]) -> None:
     if event_name == "UserPromptSubmit":
         prompt = payload.get("prompt") if isinstance(payload.get("prompt"), str) else ""
         recall_worker_match = RECALL_WORKER_RE.search(prompt)
-        closeout_worker_match = CLOSEOUT_WORKER_RE.search(prompt)
-        if recall_worker_match is not None or closeout_worker_match is not None:
-            phase = "recall" if recall_worker_match is not None else "closeout"
-            match = recall_worker_match if recall_worker_match is not None else closeout_worker_match
-            if match is None:
-                raise RuntimeError("worker token match disappeared")
-            token = match.group(1)
+        if recall_worker_match is not None:
+            phase = "recall"
+            token = recall_worker_match.group(1)
             found = _find_turn_for_token(root, token)
             if found is None or found[2] != phase:
                 _remove_turn(root, key)
@@ -544,14 +540,6 @@ def _handle_hook(root: Path, payload: dict[str, Any]) -> None:
                     "--constraints-json '<JSON array>'。只返回 receipt 输出的最小 envelope，不要返回正文、"
                     "搜索列表或日志。不要再派生 Recall Worker。"
                 )
-            else:
-                worker_context = (
-                    "GBRAIN_EXPERIENCE_CLOSEOUT_WORKER：独占召回、去重、脱敏、写入、可修复拒绝重试与回读验证。"
-                    f"完成后执行：{receipt_command} "
-                    "--outcome <no_candidate|captured|blocked>；captured/no_candidate 追加 --verified，"
-                    "captured 再追加 --slug inbox/<slug>，blocked 追加 --blocker-code <code>。"
-                    "只返回 receipt 输出的最小 envelope，不要返回正文、搜索列表、模板或日志。不要再派生 Closeout Worker。"
-                )
             _json_out({
                 "hookSpecificOutput": {
                     "hookEventName": "UserPromptSubmit",
@@ -562,64 +550,18 @@ def _handle_hook(root: Path, payload: dict[str, Any]) -> None:
         state["intent_nontrivial"] = bool(NONTRIVIAL_RE.search(prompt))
         needs_experience = state["intent_nontrivial"] or state.get("prior_pending")
         recall_token = _arm_phase(state, "recall") if needs_experience and not state.get("recall_notified") else None
-        closeout_token = _arm_phase(state, "closeout") if needs_experience and not state.get("closeout_notified") else None
         _save_turn(root, key, state)
-        if recall_token is not None or closeout_token is not None:
-            _json_out(_parent_context(recall_token, closeout_token, "UserPromptSubmit"))
-        else:
-            _json_out({})
-        return
-    if event_name == "PostToolUse":
-        tool_id = _safe_identifier(payload.get("tool_use_id"), secrets.token_hex(12))
-        event_path = root / "events" / key / f"{_hash(tool_id)}.json"
-        if not event_path.exists():
-            _atomic_write(event_path, _tool_event(payload))
-        if not _turn_path(root, key).exists():
-            _save_turn(root, key, state)
-        events = _events(root, key)
-        if not state.get("worker_phase") and not state.get("closeout_notified") and _requires_closeout(state, events):
-            token = _arm_phase(state, "closeout")
-            _save_turn(root, key, state)
-            _json_out(_parent_context(None, token, "PostToolUse"))
+        if recall_token is not None:
+            _json_out(_parent_context(recall_token, None, "UserPromptSubmit"))
         else:
             _json_out({})
         return
     if event_name != "Stop":
         _json_out({})
         return
-    if state.get("worker_phase"):
-        _json_out({})
-        return
-    events = _events(root, key)
-    if not _requires_closeout(state, events):
-        _remove_turn_family(root, key, state)
-        _json_out({})
-        return
-    invalid_phases: set[str] = set()
-    reasons: list[str] = []
-    if state.get("intent_nontrivial") or state.get("prior_pending"):
-        recall_receipt = state.get("recall_receipt")
-        if not isinstance(recall_receipt, dict):
-            invalid_phases.add("recall")
-            reasons.append("missing recall receipt")
-        else:
-            valid, reason = _recall_receipt_valid(recall_receipt)
-            if not valid:
-                invalid_phases.add("recall")
-                reasons.append(reason)
-    closeout_receipt = state.get("closeout_receipt")
-    if not isinstance(closeout_receipt, dict):
-        invalid_phases.add("closeout")
-        reasons.append("missing closeout receipt")
-    else:
-        valid, reason = _closeout_receipt_valid(closeout_receipt)
-        if not valid:
-            invalid_phases.add("closeout")
-            reasons.append(reason)
-    if invalid_phases:
-        _block(root, key, state, invalid_phases, "; ".join(reasons))
-        return
-    _unlink_state_file(_pending_path(root, str(state.get("session_key") or "")))
+    # Older installations may still invoke this script from a managed Stop
+    # handler. Fail open and clear the turn so upgrading the generated script
+    # disables automatic closeout before hooks.json is rewritten.
     _remove_turn_family(root, key, state)
     _json_out({})
 
