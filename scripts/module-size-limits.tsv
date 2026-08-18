@@ -10,9 +10,9 @@ src/core/pglite-engine.ts	5744	ratchet	peel target: containment sprint C15; grow
 src/core/migrate.ts	668	region-exempt	append-only MIGRATIONS array grows freely; runner logic is ratcheted
 src/commands/sync.ts	4300	ratchet	peel target: containment sprint C13-C14; grown v0.46.11.0 five-issue wave
 src/core/ai/gateway.ts	4277	ratchet	watchlist
-src/cli.ts	3482	ratchet	watchlist; merged unions: cathedral-5 compile-context wiring + gap-closure thin-client routing + cathedral-6 register guards + sources self-help
+src/cli.ts	3483	ratchet	watchlist; merged unions plus explicit firewall-gated anonymous MCP serve help
 src/core/cycle.ts	3030	ratchet
-src/commands/serve-http.ts	3032	ratchet	v0.46.18 review integration: fail-closed Basic auth/origin config, loopback writer URL attestation, and pre-SPA route mounting
+src/commands/serve-http.ts	3069	ratchet	v0.46.18 review integration plus explicit firewall-gated anonymous MCP read/write with privileged and local-only operations excluded
 src/commands/jobs.ts	2950	ratchet	grown v0.46.11.0 five-issue wave
 src/core/search/hybrid.ts	2500	ratchet
 src/core/engine.ts	2345	ratchet

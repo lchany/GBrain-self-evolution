@@ -241,9 +241,10 @@ export async function runServe(
     // TTY (never into container log storage). --print-admin-token forces the
     // raw value even on a non-TTY start.
     const printAdminToken = args.includes('--print-admin-token');
+    const allowAnonymousMcp = args.includes('--allow-anonymous-mcp');
 
     const { runServeHttp } = await import('./serve-http.ts');
-    await runServeHttp(engine, { port, tokenTtl, enableDcr, enableDcrInsecure, publicUrl, logFullParams, bind, suppressBootstrapToken, printAdminToken, surface });
+    await runServeHttp(engine, { port, tokenTtl, enableDcr, enableDcrInsecure, publicUrl, logFullParams, bind, suppressBootstrapToken, printAdminToken, surface, allowAnonymousMcp });
 
     await finishHttpServe(engine, opts);
     return;

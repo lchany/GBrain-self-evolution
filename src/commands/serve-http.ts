@@ -4,7 +4,7 @@
  * Combines:
  * - MCP SDK's mcpAuthRouter (OAuth endpoints: /authorize, /token, /register, /revoke)
  * - Custom client_credentials handler (SDK doesn't support CC grant)
- * - MCP tool calls at /mcp with bearer auth + scope enforcement
+ * - MCP tool calls at /mcp with bearer auth or firewall-allowlisted anonymous read/write + scope enforcement
  * - Admin dashboard at /admin with cookie auth
  * - SSE live activity feed at /admin/events
  * - Health check at /health
@@ -88,6 +88,12 @@ import { registerCleanup } from '../core/process-cleanup.ts';
  * 3s leaves 2s of headroom for TCP, response framing, and clock skew.
  */
 export const HEALTH_TIMEOUT_MS = 3000;
+
+export function selectMcpOperations(allowAnonymousMcp: boolean): typeof operations {
+  const remoteOperations = operations.filter(op => !op.localOnly);
+  if (!allowAnonymousMcp) return remoteOperations;
+  return remoteOperations.filter(op => op.scope === 'read' || op.scope === 'write');
+}
 
 export function resolveReviewWriterMcpUrl(raw: string | undefined, port: number): URL {
   const value = raw?.trim() || `http://127.0.0.1:${port}/mcp`;
@@ -477,6 +483,13 @@ interface ServeHttpOptions {
   tokenTtl: number;
   enableDcr: boolean;
   /**
+   * Explicit deployment mode for networks whose outer cloud firewall is the
+   * client allowlist. Only the remote read/write operation set is exposed;
+   * admin, agent, source-admin, user-admin, and local-only operations remain
+   * unavailable through this path.
+   */
+  allowAnonymousMcp?: boolean;
+  /**
    * #1353: allow the consent-bypassing client_credentials grant on the DCR path.
    * Off by default; DCR clients default to authorization_code. Implies enableDcr.
    */
@@ -670,6 +683,7 @@ export async function embeddingWidthStartupWarning(engine: BrainEngine): Promise
 
 export async function runServeHttp(engine: BrainEngine, options: ServeHttpOptions) {
   const { port, tokenTtl, enableDcr, enableDcrInsecure, publicUrl, logFullParams } = options;
+  const allowAnonymousMcp = options.allowAnonymousMcp === true;
   // v0.34.1 (#864, D11): default bind flipped from 0.0.0.0 to 127.0.0.1.
   // gbrain's primary use case is a personal-knowledge brain on a laptop;
   // the pre-v0.34 default exposed brains on every interface. Server
@@ -683,6 +697,12 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   if (logFullParams) {
     console.error(
       '[serve-http] WARNING: --log-full-params writes raw request payloads to mcp_request_log + SSE feed. Disable for shared dashboards or production.',
+    );
+  }
+
+  if (allowAnonymousMcp) {
+    console.error(
+      '[serve-http] WARNING: anonymous MCP read/write is enabled. Restrict the listener with the cloud firewall; admin operations still require admin authentication.',
     );
   }
 
@@ -2159,7 +2179,18 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // the same set feeds dispatch as allowedOps so hidden ops are uncallable,
   // not just unlisted [c2].
   const serverSurfaceCeiling: McpSurface = options.surface ?? 'full';
-  const mcpOperationsBase = operations.filter(op => !op.localOnly);
+  const mcpOperationsBase = selectMcpOperations(allowAnonymousMcp);
+  const anonymousMcpAuthInfo: AuthInfo = {
+    token: '',
+    clientId: 'cloud-firewall-allowlist',
+    clientName: 'cloud-firewall-allowlist',
+    scopes: ['read', 'write'],
+    sourceId: 'default',
+  };
+  const allowAnonymousMcpRequest: express.RequestHandler = (req, _res, next) => {
+    req.auth = anonymousMcpAuthInfo;
+    next();
+  };
 
   /**
    * WP4 (D2): resolve this request's effective surface from the caller's
@@ -2201,8 +2232,13 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed' }, id: null });
   });
 
-  app.post('/mcp', requireBearerAuth({ verifier: oauthProvider, resourceMetadataUrl }), async (req: Request, res: Response) => {
-    const startTime = Date.now();
+  app.post(
+    '/mcp',
+    allowAnonymousMcp
+      ? allowAnonymousMcpRequest
+      : requireBearerAuth({ verifier: oauthProvider, resourceMetadataUrl }),
+    async (req: Request, res: Response) => {
+      const startTime = Date.now();
     const authInfo = (req as any).auth as AuthInfo;
 
     // Human-readable agent name is now threaded through AuthInfo by
@@ -2569,7 +2605,8 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         });
       }
     }
-  });
+    },
+  );
 
   // ---------------------------------------------------------------------------
   // v0.38 ingestion substrate — POST /ingest (webhook source)
