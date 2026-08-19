@@ -1,0 +1,43 @@
+# GBrain Web UI 服务模板。
+# 安装步骤：
+#   sudo install -m 0644 gbrain-webui.service.example /etc/systemd/system/gbrain-webui.service
+#   sudo install -m 0600 -o root -g gbrain ../env/webui.env.example /etc/gbrain/webui.env
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now gbrain-webui.service
+# 环境文件必须是 root 可读、0600；不要把真实 token、secret、DATABASE_URL 写进 unit 或证据。
+
+[Unit]
+Description=GBrain read-only Web UI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 默认使用专用低权限账号；如需变更，先创建并验证该账号拥有 /opt/gbrain 的只读执行权限。
+User=gbrain
+Group=gbrain
+WorkingDirectory=/opt/gbrain
+EnvironmentFile=/etc/gbrain/webui.env
+
+# OPERATOR-SET：启用前必须用 `gbrain --help` 和 docs/OPERATIONS.md 验证准确 Web UI 命令。
+# 不在归档模板中臆造 webui 子命令；下面占位只用于提醒操作员替换。
+ExecStart=/usr/local/bin/gbrain OPERATOR-SET-WEBUI-COMMAND --port ${GBRAIN_WEBUI_PORT}
+
+Restart=on-failure
+RestartSec=10s
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gbrain-webui
+
+# 加固建议：上线前逐项验证；若阻断 Bun、Postgres socket 或工作目录访问，再按最小例外放开。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/gbrain /var/lib/gbrain /run/gbrain
+
+[Install]
+WantedBy=multi-user.target

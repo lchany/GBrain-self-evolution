@@ -1,0 +1,38 @@
+# GBrain doctor 巡检 oneshot 服务模板。
+# 安装步骤：
+#   sudo install -m 0644 gbrain-doctor.service.example /etc/systemd/system/gbrain-doctor.service
+#   sudo install -m 0600 -o root -g gbrain ../env/gbrain-maintenance.env.example /etc/gbrain/gbrain-maintenance.env
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now gbrain-doctor.timer
+# 环境文件必须是 root 可读、0600；不要把真实 token、secret、DATABASE_URL 写进 unit 或证据。
+
+[Unit]
+Description=GBrain scheduled doctor check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# 默认使用专用低权限账号；该账号需能读取维护配置并调用 /usr/local/bin/gbrain。
+User=gbrain
+Group=gbrain
+WorkingDirectory=/opt/gbrain
+EnvironmentFile=/etc/gbrain/gbrain-maintenance.env
+
+# 默认只做巡检并写入 journald；修复类动作必须由操作员单独执行。
+ExecStart=/usr/local/bin/gbrain doctor --json
+
+# oneshot 失败交给 timer 和 journald 暴露，不自动重启，避免重复执行维护动作。
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gbrain-doctor
+
+# 加固建议：上线前逐项验证；doctor 如需写健康报告，只放开必要路径。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/gbrain /var/lib/gbrain /run/gbrain
+
+[Install]
+WantedBy=multi-user.target

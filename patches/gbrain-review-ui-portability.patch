@@ -1,0 +1,1397 @@
+diff --git a/deploy/env/gbrain-serve.env.example b/deploy/env/gbrain-serve.env.example
+index 35d27e8..ec0f823 100644
+--- a/deploy/env/gbrain-serve.env.example
++++ b/deploy/env/gbrain-serve.env.example
+@@ -8,3 +8,11 @@ GBRAIN_PUBLIC_URL=https://<PUBLIC_GBRAIN_HOST>
+ GBRAIN_ADMIN_BASIC_USER=<ADMIN_USER>
+ GBRAIN_ADMIN_BASIC_PASSWORD=<HIGH_ENTROPY_ADMIN_PASSWORD>
+ GBRAIN_ADMIN_ORIGIN=https://<PUBLIC_GBRAIN_HOST>
++
++# Server-side review writes use the local listener and never infer their
++# destination from the public OAuth issuer or browser Host header.
++GBRAIN_REVIEW_WRITER_MCP_URL=http://127.0.0.1:3131/mcp
++
++# Optional outside systemd. Under systemd, LoadCredential supplies
++# gbrain-local-writer.env without making the root-owned source file readable.
++# GBRAIN_REVIEW_WRITER_ENV_PATH=/secure/path/local-writer.env
+diff --git a/deploy/systemd/gbrain-serve-http.service.example b/deploy/systemd/gbrain-serve-http.service.example
+index c81af43..6d8e343 100644
+--- a/deploy/systemd/gbrain-serve-http.service.example
++++ b/deploy/systemd/gbrain-serve-http.service.example
+@@ -12,6 +12,9 @@ User=gbrain
+ Group=gbrain
+ WorkingDirectory=/opt/gbrain
+ EnvironmentFile=/etc/gbrain/gbrain-serve.env
++# The writer credential remains root-owned on disk. systemd exposes a
++# read-only copy to the service through $CREDENTIALS_DIRECTORY.
++LoadCredential=gbrain-local-writer.env:/etc/gbrain/clients/local-writer.env
+ ExecStart=/bin/bash /opt/gbrain/deploy/scripts/run-server.sh
+ Restart=on-failure
+ RestartSec=5s
+diff --git a/src/commands/gbrain-capture-writer.ts b/src/commands/gbrain-capture-writer.ts
+index 54f6ab5..a03df70 100644
+--- a/src/commands/gbrain-capture-writer.ts
++++ b/src/commands/gbrain-capture-writer.ts
+@@ -31,8 +31,22 @@ export class WriterAttestationError extends Error {
+   }
+ }
+ 
+-export function localWriterEnvPath(): string {
+-  return join(homedir(), '.config', 'gbrain', 'local-writer.env');
++const SYSTEMD_WRITER_CREDENTIAL = 'gbrain-local-writer.env';
++
++export function localWriterEnvPath(
++  env: NodeJS.ProcessEnv = process.env,
++  home = homedir(),
++): string {
++  const explicitPath = env.GBRAIN_REVIEW_WRITER_ENV_PATH?.trim();
++  if (explicitPath) return explicitPath;
++
++  const credentialsDirectory = env.CREDENTIALS_DIRECTORY?.trim();
++  if (credentialsDirectory) {
++    const credentialPath = join(credentialsDirectory, SYSTEMD_WRITER_CREDENTIAL);
++    if (existsSync(credentialPath)) return credentialPath;
++  }
++
++  return join(home, '.config', 'gbrain', 'local-writer.env');
+ }
+ 
+ export function createLocalWriterToolCaller(envPath = localWriterEnvPath()): WriterToolCaller {
+@@ -81,7 +95,7 @@ export function createLocalWriterSessionFactory(
+ ): WriterSessionFactory {
+   return async (expectedMcpUrl) => {
+     const env = readWriterEnv(envPath);
+-    const mcpUrl = normalizeMcpUrl(firstEnv(env, ['GBRAIN_MCP_URL', 'GBRAIN_REMOTE_MCP_URL', 'GBRAIN_WRITER_MCP_URL', 'MCP_URL']));
++    const mcpUrl = normalizeMcpUrl(firstEnv(env, ['GBRAIN_LOOPBACK_MCP_URL', 'GBRAIN_MCP_URL', 'GBRAIN_REMOTE_MCP_URL', 'GBRAIN_WRITER_MCP_URL', 'MCP_URL']));
+     if (mcpUrl === null || mcpUrl !== normalizeMcpUrl(expectedMcpUrl)) throw new WriterAttestationError();
+ 
+     const bearer = firstEnv(env, ['GBRAIN_REMOTE_TOKEN', 'GBRAIN_WRITER_TOKEN', 'GBRAIN_BEARER_TOKEN', 'BEARER_TOKEN']);
+diff --git a/src/commands/serve-http-review.ts b/src/commands/serve-http-review.ts
+index 4fc65aa..78fdb0c 100644
+--- a/src/commands/serve-http-review.ts
++++ b/src/commands/serve-http-review.ts
+@@ -20,11 +20,9 @@
+ import express from 'express';
+ import type { Express, NextFunction, Request, Response } from 'express';
+ import type { BrainEngine } from '../core/engine.ts';
+-import type { Page } from '../core/types.ts';
++import type { Page, SearchResult } from '../core/types.ts';
+ import { browserSafeHtml as escapeHtml, browserSafeReviewError, projectBrowserSafeText, REVIEW_ERROR_TEXT, REVIEW_ERROR_CODE } from '../core/review/browser-safe.ts';
+ import {
+-  COMMON_REVIEW_ACTIONS,
+-  RARE_REVIEW_ACTIONS,
+   REVIEW_ACTION_CATALOG,
+   type ReviewActionCatalogEntry,
+ } from '../core/review/action-catalog.ts';
+@@ -61,6 +59,8 @@ const STALE_DAYS = 14;
+ export interface MountReviewRoutesOptions {
+   adminOrigin?: URL;
+   writerSessionFactory?: WriterSessionFactory;
++  writerEnvPath?: string;
++  writerMcpUrl?: URL;
+   issuerUrl?: URL;
+   /** Inject reviewDate for tests. Defaults to today's YYYY-MM-DD. */
+   reviewDate?: () => string;
+@@ -78,8 +78,9 @@ export function mountReviewRoutes(
+   requireAdmin: (req: Request, res: Response, next: (err?: unknown) => void) => void,
+   options: MountReviewRoutesOptions = {},
+ ): void {
+-  const writerSessionFactory = options.writerSessionFactory ?? createLocalWriterSessionFactory();
+-  const expectedWriterMcpUrl = options.issuerUrl === undefined ? null : new URL('/mcp', options.issuerUrl).toString();
++  const writerSessionFactory = options.writerSessionFactory ?? createLocalWriterSessionFactory(options.writerEnvPath);
++  const expectedWriterMcpUrl = options.writerMcpUrl?.toString()
++    ?? (options.issuerUrl === undefined ? null : new URL('/mcp', options.issuerUrl).toString());
+   // CSRF gate: the only trusted origin is derived from the server-configured
+   // issuerUrl. It is NEVER derived from Host / X-Forwarded-* request headers.
+   const expectedAdminOrigin = options.adminOrigin?.origin ?? options.issuerUrl?.origin ?? null;
+@@ -393,18 +394,24 @@ export function mountReviewRoutes(
+       const filterBar = renderFilterBar(typeFilter, verificationFilter, staleOnly, projectId);
+       const bodyContent = drafts.length === 0
+         ? renderEmptyState(typeFilter, verificationFilter, staleOnly, projectId)
+-        : `<table class="review-table">
+-          <thead><tr><th>标题</th><th>类型</th><th>验证</th><th>状态</th><th>过期</th><th>风险</th><th>重复</th><th>更新时间</th><th>操作</th></tr></thead>
+-          <tbody>${drafts.map((p) => renderDraftRow(p, now)).join('\n')}</tbody>
+-        </table>`;
++        : `<section class="review-queue" aria-label="待人工分类的经验">
++          ${drafts.map((p, index) => renderDraftRow(p, index + 1)).join('\n')}
++        </section>`;
+ 
+       res.setHeader('Content-Type', 'text/html; charset=utf-8');
+       res.send(renderShell('Inbox 草稿审核', `
+-        <h1>Inbox 草稿审核</h1>
+-        <p class="muted">导航式分诊台。选择草稿开始审核；风险与重复状态需在预检后才会显示，当前一律显示「未预检」。</p>
+-        ${filterBar}
+-        ${bodyContent}
+-        <p><a href="/admin/review/history">查看审核历史</a></p>
++        <main class="review-workbench">
++          <header class="workbench-header">
++            <div>
++              <p class="eyebrow">经验分类</p>
++              <h1>待人工分类 <span class="heading-count">${drafts.length}</span></h1>
++              <p class="workbench-intro">先读清这条经验，再决定它应该保留在项目内、成为通用经验，还是不进入经验库。</p>
++            </div>
++          </header>
++          ${filterBar}
++          ${bodyContent}
++          <p class="history-link"><a href="/admin/review/history">查看审核历史</a></p>
++        </main>
+       `));
+     } catch {
+       res.status(503).send(renderShell('审核列表不可用', `<p>${REVIEW_ERROR_TEXT}</p>`));
+@@ -419,22 +426,14 @@ export function mountReviewRoutes(
+         res.status(404).send(renderShell('未找到', `<p>找不到 ${escapeHtml(slug)}。</p>`));
+         return;
+       }
+-      const summaryHtml = renderDetailSummary(page);
+-      const decisionCardsHtml = renderDecisionCards(page);
+-      const expandableHtml = renderDetailExpandable(page);
++      const recallItems = await loadReviewRecall(engine, page, reviewSourceId);
+       res.setHeader('Content-Type', 'text/html; charset=utf-8');
+       res.send(renderShell(`草稿详情：${escapeHtml(slug)}`, `
+-        <div class="review-container">
+-          <div class="review-sidebar">
+-            ${summaryHtml}
+-          </div>
+-          <div class="review-main">
+-            <h1>草稿详情</h1>
+-            ${decisionCardsHtml}
+-            ${expandableHtml}
+-            <p><a href="/admin/review">返回列表</a></p>
+-          </div>
+-        </div>
++        <main class="review-sheet">
++          ${renderReviewDetail(page, recallItems)}
++          ${renderReviewActionSelect(page.slug)}
++          <p><a href="/admin/review">返回列表</a></p>
++        </main>
+       `));
+     } catch {
+       res.status(503).send(renderShell('错误', `<p>${REVIEW_ERROR_TEXT}</p>`));
+@@ -481,6 +480,23 @@ export function mountReviewRoutes(
+       const result = hasPendingConfirmation
+         ? await planReview(buildDeps(), { action: withHumanConfirmation(action), reviewDate: getReviewDate() })
+         : confirmationPlan;
++      if (!result.ok && result.code === 'source_not_found') {
++        const completedReview = await findCompletedReview(engine, reviewSourceId, slug);
++        if (completedReview !== null) {
++          res.setHeader('Content-Type', 'text/html; charset=utf-8');
++          res.send(renderShell('审核已完成', `
++            <main class="review-sheet">
++              <section class="review-section completed-review" aria-labelledby="completed-review-title">
++                <h1 id="completed-review-title">这条经验已经完成审核</h1>
++                <p>处理结果：${escapeHtml(completedReview.actionLabel)}</p>
++                <p class="slug-mono">${escapeHtml(slug)}</p>
++                <p><a class="action-link" href="/admin/review">返回待审核列表</a> · <a href="/admin/review/history">查看审核历史</a></p>
++              </section>
++            </main>
++          `));
++          return;
++        }
++      }
+       const pendingConfirmation = hasPendingConfirmation && confirmationGate !== undefined
+         ? { gateIndex: confirmationPlan.gates.length - 1, gate: confirmationGate }
+         : undefined;
+@@ -745,6 +761,27 @@ function historyTargetSlug(page: Page): string | null {
+   return projectBrowserSafeText(value);
+ }
+ 
++async function findCompletedReview(
++  engine: BrainEngine,
++  sourceId: string,
++  sourceSlug: string,
++): Promise<{ readonly actionLabel: string } | null> {
++  const pages = await engine.listPages({
++    slugPrefix: 'decisions/reviews/',
++    limit: 100,
++    sort: 'updated_desc',
++    sourceId,
++  });
++  for (const page of pages) {
++    if (page.deleted_at) continue;
++    const sourceRefs = Array.isArray(page.frontmatter.source_refs) ? page.frontmatter.source_refs : [];
++    if (!sourceRefs.some((ref) => projectBrowserSafeText(ref) === sourceSlug)) continue;
++    const review = historyReviewJson(page);
++    return { actionLabel: String(review.action_label ?? '已处理') };
++  }
++  return null;
++}
++
+ export function historyReviewJson(page: Page): Record<string, unknown> {
+   const rawAction = typeof page.frontmatter.review_action === 'string' ? page.frontmatter.review_action : 'unknown';
+   const catalogEntry = (REVIEW_ACTION_CATALOG as Record<string, ReviewActionCatalogEntry | undefined>)[rawAction];
+@@ -921,10 +958,19 @@ type DetailReviewData = {
+   readonly nonApplicable: string;
+   readonly reviewAction: string;
+   readonly sourceReferenceCount: number;
+-  readonly contentPreview: string;
++  readonly content: string;
+   readonly eventPreview: string;
+ };
+ 
++type ReviewRecallItem = {
++  readonly score: number;
++  readonly slug: string;
++  readonly title: string;
++  readonly type: string;
++  readonly chunkText: string;
++  readonly content: string;
++};
++
+ function detailMetadataValue(value: unknown): string {
+   const projected = projectBrowserSafeText(value);
+   return projected.length > 0 ? projected : '未提供';
+@@ -935,6 +981,11 @@ function detailPreviewValue(value: unknown): string {
+   return projected.length > 0 ? projected : '未提供';
+ }
+ 
++function detailContentValue(value: unknown): string {
++  const projected = projectBrowserSafeText(value);
++  return projected.length > 0 ? projected : '未提供';
++}
++
+ function detailReviewData(page: Page): DetailReviewData {
+   const frontmatter = page.frontmatter;
+   return {
+@@ -950,7 +1001,7 @@ function detailReviewData(page: Page): DetailReviewData {
+     nonApplicable: detailMetadataValue(frontmatter.non_applicable),
+     reviewAction: detailMetadataValue(frontmatter.review_action),
+     sourceReferenceCount: Array.isArray(frontmatter.source_refs) ? frontmatter.source_refs.length : 0,
+-    contentPreview: detailPreviewValue(page.compiled_truth),
++    content: detailContentValue(page.compiled_truth),
+     eventPreview: detailPreviewValue(page.timeline),
+   };
+ }
+@@ -965,92 +1016,186 @@ function detailSuggestedNext(page: Page): string {
+     : REVIEW_ACTION_CATALOG.needs_evidence.label;
+ }
+ 
+-function renderDetailSummary(page: Page): string {
+-  const detail = detailReviewData(page);
+-  return `<section class="detail-summary" aria-labelledby="detail-summary-title">
+-    <h2 id="detail-summary-title">审核摘要</h2>
+-    <table class="review-table"><tbody>
+-      <tr><th>草稿类型</th><td>${escapeHtml(detail.type)}</td></tr>
+-      <tr><th>用途</th><td>${escapeHtml(detail.applicability)}</td></tr>
+-      <tr><th>证据充分性</th><td>${detailEvidenceStatus(page)}</td></tr>
+-      <tr><th>敏感内容状态</th><td><span class="badge badge-na">未预检</span></td></tr>
+-      <tr><th>重复状态</th><td><span class="badge badge-na">未预检</span></td></tr>
+-      <tr><th>建议下一步</th><td>${detailSuggestedNext(page)}</td></tr>
+-    </tbody></table>
+-  </section>`;
++function buildReviewRecallQuery(page: Page): string {
++  const applicability = projectBrowserSafeText(page.frontmatter.applicability);
++  const content = projectBrowserSafeText(page.compiled_truth, 'preview');
++  return [projectBrowserSafeText(page.title), applicability, content.slice(0, 600)]
++    .filter((part) => part.length > 0 && part !== '未提供')
++    .join(' ');
++}
++
++async function loadReviewRecall(engine: BrainEngine, page: Page, sourceId: string): Promise<readonly ReviewRecallItem[]> {
++  const query = buildReviewRecallQuery(page);
++  if (query.length === 0 || typeof engine.searchKeyword !== 'function') return [];
++  try {
++    const results = await engine.searchKeyword(query, { limit: 12, sourceId });
++    const candidates = results
++      .filter((result) => result.slug !== page.slug)
++      .filter((result) => !result.slug.startsWith('inbox/'))
++      .slice(0, 5);
++    return await Promise.all(candidates.map(async (result) => projectRecallItem(engine, result, sourceId)));
++  } catch {
++    return [];
++  }
+ }
+ 
+-function renderDetailExpandable(page: Page): string {
++async function projectRecallItem(engine: BrainEngine, result: SearchResult, sourceId: string): Promise<ReviewRecallItem> {
++  let content = result.chunk_text;
++  try {
++    const page = await engine.getPage(result.slug, { sourceId });
++    if (page !== null) content = page.compiled_truth;
++  } catch {
++    // The matched chunk is still useful when full-page hydration fails.
++  }
++  return {
++    score: Number.isFinite(result.score) ? result.score : 0,
++    slug: detailMetadataValue(result.slug),
++    title: detailMetadataValue(result.title),
++    type: detailMetadataValue(result.type),
++    chunkText: detailPreviewValue(result.chunk_text),
++    content: detailContentValue(content),
++  };
++}
++
++function extractMarkdownSections(markdown: string, headings: readonly string[]): readonly string[] {
++  const wanted = new Set(headings.map(normalizeReviewHeading));
++  const lines = markdown.replace(/\r\n/g, '\n').split('\n');
++  const sections: string[] = [];
++  let current: string[] | null = null;
++  for (const line of lines) {
++    const match = /^#{1,6}\s+(.+?)\s*$/.exec(line);
++    if (match !== null) {
++      if (current !== null) {
++        const value = current.join('\n').trim();
++        if (value.length > 0) sections.push(value);
++      }
++      current = wanted.has(normalizeReviewHeading(match[1] ?? '')) ? [] : null;
++      continue;
++    }
++    if (current !== null) current.push(line);
++  }
++  if (current !== null) {
++    const value = current.join('\n').trim();
++    if (value.length > 0) sections.push(value);
++  }
++  return sections;
++}
++
++function normalizeReviewHeading(value: string): string {
++  return value.trim().toLowerCase().replace(/[：:]/g, '').replace(/\s+/g, '');
++}
++
++function projectScenarioValues(value: unknown): readonly string[] {
++  const values = Array.isArray(value) ? value : [value];
++  return values
++    .map((item) => projectBrowserSafeText(item))
++    .filter((item) => item.length > 0 && item !== '未提供' && !isReviewScenarioPlaceholder(item));
++}
++
++function isReviewScenarioPlaceholder(value: string): boolean {
++  return new Set([
++    'pending-human-review',
++    'pending review',
++    'not provided',
++    'n/a',
++    'none',
++  ]).has(value.trim().toLowerCase());
++}
++
++function reviewRecallScenarios(page: Page): readonly string[] {
++  const structured = projectScenarioValues(page.frontmatter.applicability);
++  const sections = extractMarkdownSections(page.compiled_truth, [
++    '召回场景', '适用场景', '使用场景', '问题场景', '触发条件', '什么时候使用', '何时使用',
++  ]).map((section) => projectBrowserSafeText(section));
++  const values = [
++    ...structured,
++    ...sections,
++  ].filter((value) => value.length > 0);
++  return [...new Set(values)];
++}
++
++function reviewNonApplicableScenarios(page: Page): readonly string[] {
++  const structured = projectScenarioValues(page.frontmatter.non_applicable);
++  const sections = extractMarkdownSections(page.compiled_truth, [
++    '不适用场景', '不应召回', '不要使用', '何时不使用',
++  ]).map((section) => projectBrowserSafeText(section));
++  const values = [
++    ...structured,
++    ...sections,
++  ].filter((value) => value.length > 0);
++  return [...new Set(values)];
++}
++
++function renderReviewDetail(
++  page: Page,
++  recallItems: readonly ReviewRecallItem[],
++): string {
+   const detail = detailReviewData(page);
+-  return `<section class="detail-evidence" aria-label="草稿审核详情">
+-    <details>
+-      <summary>草稿元数据</summary>
+-      <table class="review-table"><tbody>
+-        <tr><th>标题</th><td>${escapeHtml(detail.title)}</td></tr>
+-        <tr><th>Slug</th><td>${escapeHtml(detail.slug)}</td></tr>
+-        <tr><th>项目 ID</th><td>${escapeHtml(detail.projectId)}</td></tr>
+-        <tr><th>日期</th><td>${escapeHtml(detail.date)}</td></tr>
+-        <tr><th>状态</th><td>${escapeHtml(detail.status)}</td></tr>
+-        <tr><th>敏感性标记</th><td>${escapeHtml(detail.sensitivity)}</td></tr>
+-        <tr><th>验证状态</th><td>${escapeHtml(detail.verification)}</td></tr>
+-        <tr><th>适用范围</th><td>${escapeHtml(detail.applicability)}</td></tr>
+-        <tr><th>不适用范围</th><td>${escapeHtml(detail.nonApplicable)}</td></tr>
+-        <tr><th>已有审核动作</th><td>${escapeHtml(detail.reviewAction)}</td></tr>
+-        <tr><th>证据引用数量</th><td>${detail.sourceReferenceCount}</td></tr>
+-      </tbody></table>
+-    </details>
+-    <details>
+-      <summary>内容预览</summary>
+-      <pre>${escapeHtml(detail.contentPreview, 'preview')}</pre>
+-    </details>
+-    <details>
+-      <summary>时间线预览</summary>
+-      <pre>${escapeHtml(detail.eventPreview, 'preview')}</pre>
+-    </details>
++  const recallScenarios = reviewRecallScenarios(page);
++  const nonApplicable = reviewNonApplicableScenarios(page);
++  return `<header class="review-detail-header">
++    <p class="eyebrow">经验审核</p>
++    <h1>${escapeHtml(detail.title)}</h1>
++    <div class="detail-meta">
++      <span class="badge badge-draft">${escapeHtml(detail.type)}</span>
++      <span class="badge badge-draft">${escapeHtml(detail.status)}</span>
++      <span class="badge ${page.frontmatter.verification === 'verified' ? 'badge-verified' : 'badge-unverified'}">${escapeHtml(detail.verification)}</span>
++    </div>
++    <div class="slug-mono">${escapeHtml(detail.slug)}</div>
++  </header>
++  <section class="review-section" aria-labelledby="experience-content-title">
++    <h2 id="experience-content-title">经验内容</h2>
++    <pre class="experience-content">${escapeHtml(detail.content)}</pre>
++  </section>
++  ${renderReviewRecallSection(recallScenarios, nonApplicable)}
++  <section class="review-section" aria-labelledby="similar-experience-title">
++    <h2 id="similar-experience-title">相似经验召回</h2>
++    ${renderRecallItems(recallItems)}
+   </section>`;
+ }
+ 
+-function renderDecisionCards(page: Page): string {
+-  const sourceSlug = projectBrowserSafeText(page.slug);
+-  const commonCards = COMMON_REVIEW_ACTIONS
+-    .map((action) => renderDecisionCard(sourceSlug, REVIEW_ACTION_CATALOG[action]))
+-    .join('\n');
+-  const rareCards = RARE_REVIEW_ACTIONS
+-    .map((action) => renderDecisionCard(sourceSlug, REVIEW_ACTION_CATALOG[action]))
+-    .join('\n');
+-  return `<section class="decision-card-section decision-card-section-primary" aria-labelledby="common-actions-title">
+-    <h2 id="common-actions-title">常用处理</h2>
+-    <p class="muted">选择后进入后续目标与预检流程；本页不会执行写入。</p>
+-    <div class="decision-card-grid decision-card-grid-primary">${commonCards}</div>
+-  </section>
+-  <section class="decision-card-section decision-card-section-rare" aria-labelledby="rare-actions-title">
+-    <h2 id="rare-actions-title">更多处理方式</h2>
+-    <p class="muted">仅在常用处理不适用时选择，仍需通过后续预检。</p>
+-    <div class="decision-card-grid decision-card-grid-rare">${rareCards}</div>
++function renderReviewRecallSection(recallScenarios: readonly string[], nonApplicable: readonly string[]): string {
++  return `<section class="review-section" aria-labelledby="recall-scenario-title">
++    <h2 id="recall-scenario-title">什么场景下会被召回</h2>
++    ${renderScenarioList(recallScenarios, '尚未提供具体召回场景')}
++    <h3>不应召回的场景</h3>
++    ${renderScenarioList(nonApplicable, '尚未提供不应召回的场景')}
+   </section>`;
+ }
+ 
+-function renderDecisionCard(sourceSlug: string, entry: ReviewActionCatalogEntry): string {
+-  const cardClass = entry.group === 'common' ? 'primary' : 'rare';
+-  const actionHref = `/admin/review/plan/${encodeURIComponent(sourceSlug)}?action=${encodeURIComponent(entry.value)}`;
+-  const confirmationHint = entry.confirmationRequirement === 'none'
+-    ? '无需输入确认短语'
+-    : '需要人工输入确认短语';
+-  return `<a class="decision-card decision-card-${cardClass}" data-action="${escapeHtml(entry.value)}" data-group="${escapeHtml(entry.group)}" data-confirmation="${escapeHtml(entry.confirmationRequirement)}" href="${escapeHtml(actionHref)}">
+-    <h3>${escapeHtml(entry.label)}</h3>
+-    <dl class="decision-card-details">
+-      <div><dt>处理结果</dt><dd>${escapeHtml(entry.explanation)}</dd></div>
+-      <div><dt>何时使用</dt><dd>${escapeHtml(entry.example)}</dd></div>
+-      <div><dt>需要提供</dt><dd>${renderRequiredFields(entry.requiredFields)}</dd></div>
+-      <div class="decision-card-risk"><dt>风险提示</dt><dd>${escapeHtml(entry.riskText)}</dd></div>
+-      <div><dt>确认要求</dt><dd>${confirmationHint}</dd></div>
+-    </dl>
+-  </a>`;
++function renderScenarioList(values: readonly string[], emptyText: string): string {
++  if (values.length === 0) return `<p class="missing-field">${escapeHtml(emptyText)}</p>`;
++  return `<ul class="scenario-list">${values.map((value) => `<li>${escapeHtml(value)}</li>`).join('')}</ul>`;
+ }
+ 
+-function renderRequiredFields(fields: readonly string[]): string {
+-  if (fields.length === 0) return '无需补充字段';
+-  return fields.map((field) => `<code data-required-field="${escapeHtml(field)}">${escapeHtml(field)}</code>`).join('、');
++function renderRecallItems(items: readonly ReviewRecallItem[]): string {
++  if (items.length === 0) return '<p class="muted">暂无相似经验。</p>';
++  return `<div class="recall-list">${items.map((item) => `<article class="recall-item">
++    <div class="recall-item-head">
++      <strong>${escapeHtml(item.title)}</strong>
++      <span class="recall-score">${escapeHtml(item.score.toFixed(4))}</span>
++    </div>
++    <div class="recall-meta"><span>${escapeHtml(item.type)}</span><code>${escapeHtml(item.slug)}</code></div>
++    <div class="recall-chunk">${escapeHtml(item.chunkText)}</div>
++    <details><summary>查看完整经验内容</summary><pre>${escapeHtml(item.content)}</pre></details>
++  </article>`).join('')}</div>`;
++}
++
++function renderReviewActionSelect(sourceSlug: string): string {
++  const options = Object.values(REVIEW_ACTION_CATALOG)
++    .map((entry) => `<option value="${escapeHtml(entry.value)}">${escapeHtml(entry.label)}</option>`)
++    .join('');
++  return `<section class="review-section review-action-section" aria-labelledby="review-action-title">
++    <h2 id="review-action-title">审核操作</h2>
++    <form class="review-action-form" method="get" action="/admin/review/plan/${encodeURIComponent(sourceSlug)}">
++      <label for="review-action">选择操作</label>
++      <select id="review-action" name="action" required>
++        <option value="" selected disabled>请选择</option>
++        ${options}
++      </select>
++      <button type="submit">下一步</button>
++    </form>
++  </section>`;
+ }
+ 
+ function projectDetailJson(page: Page): Record<string, unknown> {
+@@ -1076,21 +1221,24 @@ function projectDetailJson(page: Page): Record<string, unknown> {
+       duplicate_status: '未预检',
+       suggested_next_step: detailSuggestedNext(page),
+     },
+-    content_preview: detail.contentPreview,
++    content_preview: detailPreviewValue(page.compiled_truth),
+     event_preview: detail.eventPreview,
+   };
+ }
+ 
+ function renderFilterBar(typeFilter: string | undefined, verificationFilter: string | undefined, staleOnly: boolean, projectId: string | undefined): string {
+   const staleVal = staleOnly ? 'true' : '';
+-  return `<form class="review-filters" method="get" action="/admin/review">
+-    <label>类型<input name="type" type="text" value="${escapeHtml(typeFilter ?? '')}" placeholder="如 incident" /></label>
+-    <label>验证<input name="verification" type="text" value="${escapeHtml(verificationFilter ?? '')}" placeholder="如 verified" /></label>
+-    <label>过期<select name="stale"><option value="">全部</option><option value="true"${staleOnly ? ' selected' : ''}>仅过期</option></select></label>
+-    <label>项目 ID<input name="project_id" type="text" value="${escapeHtml(projectId ?? '')}" placeholder="可选" /></label>
+-    <button type="submit">筛选</button>
+-    <a class="action-link" href="/admin/review">重置</a>
+-  </form>`;
++  return `<details class="review-filter-panel">
++    <summary>筛选待审核经验</summary>
++    <form class="review-filters" method="get" action="/admin/review">
++      <label>类型<input name="type" type="text" value="${escapeHtml(typeFilter ?? '')}" placeholder="如 incident" /></label>
++      <label>验证<input name="verification" type="text" value="${escapeHtml(verificationFilter ?? '')}" placeholder="如 verified" /></label>
++      <label>过期<select name="stale"><option value="">全部</option><option value="true"${staleOnly ? ' selected' : ''}>仅过期</option></select></label>
++      <label>项目 ID<input name="project_id" type="text" value="${escapeHtml(projectId ?? '')}" placeholder="可选" /></label>
++      <button type="submit">应用筛选</button>
++      <a class="action-link" href="/admin/review">重置</a>
++    </form>
++  </details>`;
+ }
+ 
+ function renderEmptyState(typeFilter: string | undefined, verificationFilter: string | undefined, staleOnly: boolean, projectId: string | undefined): string {
+@@ -1101,30 +1249,41 @@ function renderEmptyState(typeFilter: string | undefined, verificationFilter: st
+   return `<div class="empty-state"><p>暂无 inbox 草稿。</p><p>新草稿捕获后会出现在这里。</p></div>`;
+ }
+ 
+-function renderDraftRow(p: Page, now: number): string {
+-  const stale = (now - p.updated_at.getTime()) > STALE_DAYS * 24 * 60 * 60 * 1000;
+-  const verification = String(p.frontmatter.verification ?? 'unverified');
+-  const status = String(p.frontmatter.status ?? 'draft');
++function renderDraftRow(p: Page, reviewOrder: number): string {
+   const updatedDate = p.updated_at.toISOString().slice(0, 10);
+   const detailHref = `/admin/review/detail/${encodeURIComponent(p.slug)}`;
+   const projectIdRaw = typeof p.frontmatter.project_id === 'string' ? p.frontmatter.project_id : '';
+-  const projectIdLine = projectIdRaw.length > 0 ? `<div class="slug-mono">项目：${escapeHtml(projectIdRaw)}</div>` : '';
+-  const verificationBadge = verification === 'verified'
+-    ? `<span class="badge badge-verified">${escapeHtml(verification)}</span>`
+-    : `<span class="badge badge-unverified">${escapeHtml(verification)}</span>`;
+-  const statusBadge = `<span class="badge badge-draft">${escapeHtml(status)}</span>`;
+-  const staleBadge = stale ? `<span class="badge badge-stale">是</span>` : `<span>否</span>`;
+-  return `<tr>
+-  <td data-label="草稿"><div>${escapeHtml(p.title)}</div><div class="slug-mono">${escapeHtml(p.slug)}</div>${projectIdLine}</td>
+-  <td data-label="类型">${escapeHtml(p.type)}</td>
+-  <td data-label="验证">${verificationBadge}</td>
+-  <td data-label="状态">${statusBadge}</td>
+-  <td data-label="过期">${staleBadge}</td>
+-  <td data-label="风险"><span class="badge badge-na">未预检</span></td>
+-  <td data-label="重复"><span class="badge badge-na">未预检</span></td>
+-  <td class="slug-mono" data-label="更新时间">${escapeHtml(updatedDate)}</td>
+-  <td data-label="操作"><a class="action-link" href="${detailHref}">开始审核</a></td>
+-</tr>`;
++  const projectIdLine = projectIdRaw.length > 0 ? `<span>项目：${escapeHtml(projectIdRaw)}</span>` : '';
++  return `<article class="review-queue-item">
++    <div class="queue-order" aria-label="审核顺序">${String(reviewOrder).padStart(2, '0')}</div>
++    <div class="queue-item-copy">
++      <p class="queue-kicker">待人工分类</p>
++      <h2><a href="${detailHref}">${escapeHtml(p.title)}</a></h2>
++      <div class="queue-provenance"><code>${escapeHtml(p.slug)}</code>${projectIdLine}</div>
++    </div>
++    <div class="classification-rail">
++      <span>AI 初判</span>
++      <strong>${escapeHtml(reviewSuggestedTypeLabel(p.type))}</strong>
++      <code>${escapeHtml(p.type)}</code>
++    </div>
++    <div class="queue-item-action">
++      <time datetime="${escapeHtml(p.updated_at.toISOString())}">更新于 ${escapeHtml(updatedDate)}</time>
++      <a class="review-button" href="${detailHref}">打开并分类 <span aria-hidden="true">→</span></a>
++    </div>
++  </article>`;
++}
++
++function reviewSuggestedTypeLabel(type: string): string {
++  const labels: Record<string, string> = {
++    knowledge: '通用知识',
++    runbook: '通用操作经验',
++    incident: '故障经验',
++    decision: '决策经验',
++    project: '项目经验',
++    environment: '环境经验',
++    'agent-skill': 'Agent 技能',
++  };
++  return labels[type] ?? type;
+ }
+ 
+ function renderShell(title: string, body: string): string {
+@@ -1132,91 +1291,148 @@ function renderShell(title: string, body: string): string {
+ <html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+ <title>${escapeHtml(title)} - GBrain 审核</title>
+ <style>
+-  body{font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0a0a0f;color:#e0e0e0;padding:24px;line-height:1.6;overflow-wrap:anywhere}
+-  h1{font-size:22px;border-bottom:1px solid #1e1e2e;padding-bottom:8px;margin-top:0;margin-bottom:16px;text-align:left}
+-  h2{font-size:17px;margin-top:24px;margin-bottom:12px;color:#88aaff;text-align:left}
+-  table.review-table{border-collapse:collapse;width:100%;margin:12px 0;table-layout:fixed}
+-  table.review-table th,table.review-table td{border:1px solid #1e1e2e;padding:10px 16px;text-align:left;font-size:13px;font-family:'JetBrains Mono',monospace;overflow-wrap:anywhere;word-break:normal;white-space:normal}
+-  table.review-table th{background:#12121a;color:#888888;font-family:Inter,sans-serif;font-weight:500;text-transform:uppercase;letter-spacing:1px}
+-  table.review-table tr:hover td{background:#1a1a2a}
+-  pre{background:#0f0f1a;padding:12px;border:1px solid #1e1e2e;border-radius:8px;overflow-x:auto;white-space:pre-wrap;font-size:13px;font-family:'JetBrains Mono',monospace}
+-  form{margin:16px 0;padding:16px;background:#12121a;border:1px solid #1e1e2e;border-radius:8px}
+-  label{display:inline-block;margin-right:12px;font-size:13px;text-align:left}
+-  input,select,textarea{background:#0f0f1a;border:1px solid #1e1e2e;color:#e0e0e0;padding:6px 10px;border-radius:8px;font-size:13px;transition:border-color 150ms}
++  :root{
++    color-scheme:light;
++    --page:#f7f8fc;
++    --surface:#ffffff;
++    --surface-subtle:#f2f5fb;
++    --text:#18243a;
++    --muted:#67758d;
++    --faint:#8b96a8;
++    --border:#dbe1ec;
++    --border-strong:#c4cedf;
++    --accent:#3658cf;
++    --accent-hover:#2845af;
++    --accent-soft:#e7ecff;
++    --success:#2d7a65;
++    --success-soft:#e7f4ef;
++    --warning:#986227;
++    --warning-soft:#fcf3e4;
++    --danger:#a34f4a;
++    --danger-soft:#faeceb;
++    --radius:6px;
++    --font-display:'MiSans','HarmonyOS Sans SC','Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
++    --font-body:'MiSans','HarmonyOS Sans SC','Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
++    --font-mono:'IBM Plex Mono','SFMono-Regular',Consolas,'Liberation Mono',monospace;
++  }
++  *{box-sizing:border-box}
++  body{max-width:1240px;margin:0 auto;font-family:var(--font-body);background:var(--page);color:var(--text);padding:48px 32px 64px;font-size:16px;line-height:1.72;overflow-wrap:anywhere}
++  h1{font-family:var(--font-display);font-size:38px;line-height:1.18;font-weight:800;margin:0;color:var(--text);letter-spacing:-.035em}
++  h2{font-family:var(--font-display);font-size:23px;line-height:1.35;font-weight:750;margin-top:28px;margin-bottom:12px;color:var(--text);text-align:left;letter-spacing:-.02em}
++  table.review-table{border-collapse:separate;border-spacing:0;width:100%;margin:20px 0;table-layout:fixed;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
++  table.review-table th,table.review-table td{border:0;border-bottom:1px solid var(--border);padding:14px 16px;text-align:left;font-size:15px;overflow-wrap:anywhere;word-break:normal;white-space:normal}
++  table.review-table tr:last-child td{border-bottom:0}
++  table.review-table th{background:#e8efec;color:var(--muted);font-size:13px;font-weight:700;letter-spacing:.06em}
++  table.review-table td{background:var(--surface)}
++  table.review-table tr:hover td{background:#f7faf8}
++  pre{background:var(--surface-subtle);padding:18px;border:1px solid var(--border);border-radius:10px;overflow-x:auto;white-space:pre-wrap;font-size:15px;font-family:var(--font-mono);line-height:1.78}
++  form{margin:16px 0;padding:18px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)}
++  label{display:inline-block;margin-right:12px;font-size:14px;text-align:left}
++  input,select,textarea{background:var(--surface);border:1px solid var(--border-strong);color:var(--text);padding:10px 12px;border-radius:8px;font:inherit;font-size:15px;transition:border-color 150ms,box-shadow 150ms}
+   textarea{display:block;inline-size:100%;min-block-size:96px;resize:vertical;box-sizing:border-box}
+-  button{background:#3a3a5a;color:#fff;border:none;padding:6px 14px;border-radius:8px;cursor:pointer;font-size:13px;transition:background 150ms}
+-  button:hover{background:#4a4a6a}
+-  a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,.decision-card:focus-visible,summary:focus-visible{outline:3px solid #88aaff;outline-offset:3px}
+-  button:disabled{background:#1e1e2e;color:#555555;cursor:not-allowed}
+-  .stale{color:#ff6b6b;font-weight:bold}
+-  .warn{background:rgba(245,166,35,0.1);border:1px solid rgba(245,166,35,0.3);border-radius:8px;padding:10px 14px;font-size:13px}
+-  code{background:#0f0f1a;padding:2px 6px;border-radius:3px;font-size:12px;font-family:'JetBrains Mono',monospace}
+-  a{color:#88aaff;text-decoration:none}
++  input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
++  button{background:var(--accent);color:#fff;border:1px solid var(--accent);padding:10px 16px;border-radius:8px;cursor:pointer;font:inherit;font-size:15px;font-weight:700;transition:background 150ms,border-color 150ms}
++  button:hover{background:var(--accent-hover);border-color:var(--accent-hover)}
++  a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:3px solid #8bb4d8;outline-offset:3px}
++  button:disabled{background:#e6e6e3;border-color:#e6e6e3;color:var(--faint);cursor:not-allowed}
++  .stale{color:var(--danger);font-weight:650}
++  .warn{background:var(--warning-soft);border:1px solid #ead49b;border-radius:var(--radius);padding:11px 14px;font-size:13px}
++  code{background:#e9efec;color:#31514a;padding:2px 6px;border-radius:4px;font-size:12px;font-family:var(--font-mono)}
++  a{color:var(--accent);text-decoration:none}
+   a:hover{text-decoration:underline}
+-  .muted{color:#888888;font-size:13px;text-align:left}
+-  .slug-mono{font-family:'JetBrains Mono',monospace;font-size:12px;color:#555555}
+-  .action-link{color:#88aaff;font-size:13px;text-decoration:none}
++  .muted{color:var(--muted);font-size:15px;text-align:left}
++  .slug-mono{font-family:var(--font-mono);font-size:13px;color:var(--muted)}
++  .action-link{color:var(--accent);font-size:15px;font-weight:700;text-decoration:none}
+   .action-link:hover{text-decoration:underline}
+-  .badge{display:inline-block;padding:2px 8px;border-radius:9999px;font-size:12px;font-family:'JetBrains Mono',monospace;border:1px solid transparent}
+-  .badge-verified{background:rgba(52,168,83,0.15);color:#34a853;border-color:rgba(52,168,83,0.3)}
+-  .badge-unverified{background:rgba(245,166,35,0.15);color:#f5a623;border-color:rgba(245,166,35,0.3)}
+-  .badge-draft{background:rgba(136,136,136,0.15);color:#888888;border-color:rgba(136,136,136,0.3)}
+-  .badge-stale{background:rgba(255,107,107,0.15);color:#ff6b6b;border-color:rgba(255,107,107,0.3)}
+-  .badge-na{background:rgba(85,85,85,0.15);color:#555555;border-color:rgba(85,85,85,0.3)}
+-  .review-filters{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin:16px 0;padding:16px;background:#12121a;border:1px solid #1e1e2e;border-radius:8px}
+-  .review-filters label{display:flex;flex-direction:column;font-size:12px;color:#888888;gap:4px}
+-  .review-filters input,.review-filters select{background:#0f0f1a;border:1px solid #1e1e2e;color:#e0e0e0;padding:6px 10px;border-radius:8px;font-size:13px;min-width:120px}
+-  .empty-state{text-align:center;color:#888888;padding:48px 0}
+-  .decision-card-section{margin-top:32px}
+-  .decision-card-section h2{margin-bottom:8px}
+-  .decision-card-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(260px,100%),1fr));gap:12px}
+-  .decision-card{display:block;background:#12121a;border:1px solid #1e1e2e;border-radius:16px;color:#e0e0e0;padding:24px;text-decoration:none;transition:background 150ms,border-color 150ms;text-align:left}
+-  .decision-card:hover{background:#1a1a2a;border-color:#3a3a5a;text-decoration:none}
+-  .decision-card:focus-visible{outline:2px solid #88aaff;outline-offset:2px}
+-  .decision-card-primary{border-color:#3a3a5a}
+-  .decision-card h3{font-size:14px;margin:0 0 16px;text-align:left}
+-  .decision-card-details{display:grid;gap:12px;margin:0}
+-  .decision-card-details div{display:grid;gap:4px}
+-  .decision-card-details dt{color:#888888;font-size:12px;text-align:left}
+-  .decision-card-details dd{margin:0;font-size:13px;overflow-wrap:anywhere;text-align:left}
+-  .decision-card-risk{border-left:3px solid #f5a623;padding-left:8px}
+-  .decision-card-rare .decision-card-risk{border-left-color:#ff6b6b}
+-
+-  /* Desktop two-column layout and mobile single-column layout */
+-  @media (min-width: 769px) {
+-    .review-container {
+-      display: grid;
+-      grid-template-columns: 320px 1fr;
+-      gap: 24px;
+-      align-items: start;
+-    }
+-    .review-sidebar {
+-      grid-column: 1;
+-      position: sticky;
+-      top: 24px;
+-    }
+-    .review-main {
+-      grid-column: 2;
+-    }
+-  }
++  .badge{display:inline-block;padding:3px 9px;border-radius:9999px;font-size:12px;font-family:var(--font-mono);border:1px solid transparent}
++  .badge-verified{background:var(--success-soft);color:var(--success);border-color:#b9dfc8}
++  .badge-unverified{background:var(--warning-soft);color:var(--warning);border-color:#ead49b}
++  .badge-draft{background:#f0f0ed;color:var(--muted);border-color:var(--border)}
++  .badge-stale{background:var(--danger-soft);color:var(--danger);border-color:#edbcbc}
++  .badge-na{background:#f0f0ed;color:var(--muted);border-color:var(--border)}
++  .review-workbench{max-width:1120px;margin:0 auto}
++  .workbench-header{display:block;padding:18px 0 29px;border-bottom:2px solid var(--text)}
++  .eyebrow{margin:0 0 10px;color:var(--accent);font-size:12px;font-weight:800;letter-spacing:.14em}
++  .heading-count{display:inline-flex;vertical-align:middle;align-items:center;justify-content:center;min-width:32px;height:32px;margin-left:12px;border-radius:50%;background:var(--accent);color:#fff;font-family:var(--font-mono);font-size:14px;font-weight:700;letter-spacing:0}
++  .workbench-intro{max-width:680px;margin:12px 0 0;color:var(--muted);font-size:17px}
++  .review-filter-panel{margin:18px 0 8px;border:0;border-bottom:1px solid var(--border);border-radius:0;background:transparent}
++  .review-filter-panel summary{padding:10px 0 13px;color:var(--muted);font-size:14px;font-weight:700;cursor:pointer}
++  .review-filter-panel[open] summary{border-bottom:1px solid var(--border)}
++  .review-filters{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin:0;padding:8px 0 18px;background:transparent;border:0;border-radius:0}
++  .review-filters label{display:flex;flex-direction:column;font-size:13px;color:var(--muted);font-weight:700;gap:5px}
++  .review-filters input,.review-filters select{background:var(--surface);border:1px solid var(--border-strong);color:var(--text);padding:9px 10px;border-radius:8px;font-size:14px;min-width:140px}
++  .review-queue{margin-top:0;border-bottom:1px solid var(--border)}
++  .review-queue-item{position:relative;display:grid;grid-template-columns:54px minmax(0,1fr) 190px 154px;align-items:center;gap:22px;padding:23px 0;border-top:1px solid var(--border);background:transparent;transition:background 150ms ease,padding 150ms ease}
++  .review-queue-item:hover{margin:0 -18px;padding-right:18px;padding-left:18px;background:var(--surface-subtle)}
++  .queue-order{align-self:start;padding-top:3px;color:#9ba7ba;font-family:var(--font-mono);font-size:14px;font-weight:700}
++  .queue-kicker{margin:0 0 6px;color:var(--muted);font-size:12px;font-weight:800;letter-spacing:.08em}
++  .queue-item-copy h2{margin:0;font-family:var(--font-body);font-size:20px;font-weight:800;line-height:1.36;letter-spacing:-.02em}
++  .queue-item-copy h2 a{color:var(--text);text-decoration:none}
++  .queue-item-copy h2 a:hover{color:var(--accent)}
++  .queue-provenance{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;margin-top:9px;color:var(--muted);font-size:13px}
++  .classification-rail{display:flex;flex-direction:column;align-items:flex-start;gap:3px;padding:9px 13px;border-left:3px solid var(--accent);background:var(--accent-soft)}
++  .classification-rail span{color:var(--muted);font-size:11px;font-weight:800;letter-spacing:.07em}
++  .classification-rail strong{color:var(--text);font-size:15px;line-height:1.4}
++  .classification-rail code{padding:0;background:transparent;color:var(--muted);font-size:11px}
++  .queue-item-action{display:flex;flex-direction:column;align-items:flex-end;gap:10px}
++  .queue-item-action time{color:var(--muted);font-size:13px;white-space:nowrap}
++  .review-button{display:inline-flex;align-items:center;gap:7px;padding:0;border-radius:0;background:transparent;color:var(--accent);font-size:14px;font-weight:800;line-height:1.3;text-decoration:none;white-space:nowrap;transition:color 150ms}
++  .review-button:hover{background:transparent;color:var(--accent-hover);text-decoration:none}
++  .review-button span{font-size:18px;line-height:.8;transition:transform 150ms}
++  .review-button:hover span{transform:translateX(3px)}
++  .history-link{margin:22px 0 0;text-align:right}
++  .empty-state{text-align:center;color:var(--muted);padding:72px 0;font-size:16px}
++  .review-sheet{max-width:920px;margin:0 auto}
++  .review-detail-header{margin-bottom:28px;padding-bottom:24px;border-bottom:1px solid var(--border)}
++  .review-detail-header h1{margin-bottom:14px;font-size:32px}
++  .detail-meta{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
++  .review-section{margin-top:18px;padding:26px 28px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)}
++  .review-section h2{margin-top:0}
++  .review-section h3{margin:24px 0 8px;font-size:16px}
++  .experience-content{margin:0;background:var(--surface-subtle);line-height:1.75}
++  .scenario-list{margin:8px 0;padding-left:22px}
++  .scenario-list li{margin:5px 0;white-space:pre-wrap}
++  .missing-field{margin:8px 0;color:var(--warning);font-size:15px}
++  .recall-list{display:grid;gap:12px}
++  .recall-item{padding:18px;background:var(--surface-subtle);border:1px solid var(--border);border-radius:10px}
++  .recall-item-head{display:flex;justify-content:space-between;align-items:flex-start;gap:14px}
++  .recall-score{flex:none;color:var(--success);font-family:var(--font-mono);font-size:13px}
++  .recall-meta{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:5px 0 10px;color:var(--muted);font-size:13px}
++  .recall-chunk{padding:12px 14px;background:var(--surface);border-left:3px solid #9fcdbf;white-space:pre-wrap;font-size:15px}
++  .recall-item details{margin-top:10px}
++  .recall-item summary{color:var(--accent);cursor:pointer;font-size:14px;font-weight:800}
++  .review-action-form{display:flex;align-items:flex-end;gap:10px;margin:0;padding:0;border:0}
++  .review-action-form label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:12px}
++  .review-action-form select{min-width:220px}
++
+   @media (max-width: 768px) {
+-    body{padding:16px;overflow-wrap:anywhere}
+-    .review-container {
+-      display: flex;
+-      flex-direction: column;
+-      gap: 24px;
+-    }
+-    .decision-card-details dd, .muted, p {
+-      font-size: 14px;
+-      line-height: 1.7;
+-    }
++    body{padding:28px 16px 44px;font-size:16px;overflow-wrap:anywhere}
++    h1{font-size:30px}
++    h2{font-size:21px}
++    .workbench-header{padding-top:6px;padding-bottom:24px}
++    .workbench-intro{font-size:16px}
++    .heading-count{min-width:28px;height:28px;margin-left:8px;font-size:12px}
++    .review-queue-item{grid-template-columns:36px minmax(0,1fr);gap:12px;padding:21px 0}
++    .review-queue-item:hover{margin:0 -10px;padding-right:10px;padding-left:10px}
++    .queue-order{grid-column:1;grid-row:1;color:var(--accent)}
++    .queue-item-copy{grid-column:2;grid-row:1}
++    .classification-rail{grid-column:2;grid-row:2;padding:9px 12px;border-left:3px solid var(--accent);border-top:0}
++    .queue-item-action{grid-column:2;grid-row:3;align-items:flex-start;gap:8px}
++    .queue-item-action{align-items:stretch;gap:10px}
++    .queue-item-action time{text-align:left}
++    .review-button{justify-content:center}
++    .history-link{text-align:left}
++    .review-section{padding:20px}
++    .review-action-form{align-items:stretch;flex-direction:column}
++    .review-action-form label,.review-action-form select,.review-action-form button{width:100%}
++    .muted,p{font-size:16px;line-height:1.72}
+     table.review-table{table-layout:auto}
+     table.review-table thead{display:none}
+     table.review-table tbody,table.review-table tr,table.review-table th,table.review-table td{display:block;width:100%;box-sizing:border-box}
+-    table.review-table tr{margin:8px 0;border:1px solid #1e1e2e}
++    table.review-table tr{margin:8px 0;border:1px solid var(--border)}
+     table.review-table th,table.review-table td{border:0;padding:8px 10px}
+-    table.review-table th{background:#12121a}
+-    table.review-table td[data-label]::before{content:attr(data-label);display:block;margin-bottom:4px;color:#888888;font-family:Inter,sans-serif;font-size:12px;font-weight:500;letter-spacing:.04em}
++    table.review-table th{background:var(--surface-subtle)}
++    table.review-table td[data-label]::before{content:attr(data-label);display:block;margin-bottom:4px;color:var(--muted);font-size:12px;font-weight:600;letter-spacing:.02em}
+   }
+ </style></head><body>
+ ${body}
+diff --git a/src/commands/serve-http.ts b/src/commands/serve-http.ts
+index 2689aac..e20eaf3 100644
+--- a/src/commands/serve-http.ts
++++ b/src/commands/serve-http.ts
+@@ -451,6 +451,21 @@ export function skillPublishStatus(publishSkills: boolean): { bannerValue: strin
+   };
+ }
+ 
++export function resolveReviewWriterMcpUrl(raw: string | undefined, port: number): URL {
++  const value = raw?.trim() || `http://127.0.0.1:${port}/mcp`;
++  const url = new URL(value);
++  if (
++    url.pathname !== '/mcp'
++    || url.username !== ''
++    || url.password !== ''
++    || url.search !== ''
++    || url.hash !== ''
++  ) {
++    throw new Error('GBRAIN_REVIEW_WRITER_MCP_URL must be an absolute MCP URL ending in /mcp');
++  }
++  return url;
++}
++
+ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOptions) {
+   const { port, tokenTtl, enableDcr, enableDcrInsecure, publicUrl, logFullParams } = options;
+   const allowAnonymousMcp = options.allowAnonymousMcp === true;
+@@ -1642,7 +1657,15 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
+   // browser never sees writer credentials.
+   // ---------------------------------------------------------------------------
+   const { mountReviewRoutes } = await import('./serve-http-review.ts');
+-  mountReviewRoutes(app, engine, requireAdmin, { adminOrigin, issuerUrl });
++  const reviewWriterMcpUrl = resolveReviewWriterMcpUrl(
++    process.env.GBRAIN_REVIEW_WRITER_MCP_URL,
++    port,
++  );
++  mountReviewRoutes(app, engine, requireAdmin, {
++    adminOrigin,
++    issuerUrl,
++    writerMcpUrl: reviewWriterMcpUrl,
++  });
+ 
+   // ---------------------------------------------------------------------------
+   // Admin SPA static files (v0.36.x #1090)
+diff --git a/test/deployment-scripts.test.ts b/test/deployment-scripts.test.ts
+index 8a1b9a9..2bac379 100644
+--- a/test/deployment-scripts.test.ts
++++ b/test/deployment-scripts.test.ts
+@@ -35,5 +35,8 @@ describe('deployment scripts', () => {
+     expect(runServerScript).toContain('== https://*');
+     expect(runServerScript).toContain('--allow-anonymous-mcp');
+     expect(serviceUnit).toContain('deploy/scripts/run-server.sh');
++    expect(serviceUnit).toContain(
++      'LoadCredential=gbrain-local-writer.env:/etc/gbrain/clients/local-writer.env',
++    );
+   });
+ });
+diff --git a/test/serve-http-review.test.ts b/test/serve-http-review.test.ts
+index 80a69d8..54b225b 100644
+--- a/test/serve-http-review.test.ts
++++ b/test/serve-http-review.test.ts
+@@ -40,7 +40,12 @@ import {
+ import { planReview, type ReviewCoreDeps, type ReviewSourcePage } from '../src/core/review/index.ts';
+ import type { BrainEngine } from '../src/core/engine.ts';
+ import type { Page } from '../src/core/types.ts';
+-import { createLocalWriterSessionFactory, type WriterSessionFactory } from '../src/commands/gbrain-capture-writer.ts';
++import {
++  createLocalWriterSessionFactory,
++  localWriterEnvPath,
++  type WriterSessionFactory,
++} from '../src/commands/gbrain-capture-writer.ts';
++import { resolveReviewWriterMcpUrl } from '../src/commands/serve-http.ts';
+ 
+ const REVIEW_DATE = '2026-07-26';
+ 
+@@ -756,7 +761,35 @@ describe('review web routes', () => {
+     expect(result.text).toContain('inbox/html-test');
+   });
+ 
+-  test('GET /admin/review renders navigation-only triage console with 开始审核 and 未预检', async () => {
++  test('Given any review page When rendered Then it uses the larger Chinese reading type scale and light workbench palette', async () => {
++    const app = createApp(mockEngine([makePage('inbox/light-theme')]));
++    const result = await fetchApp(app, '/admin/review');
++
++    expect(result.status).toBe(200);
++    expect(result.text).toContain('color-scheme:light');
++    expect(result.text).toContain("--font-body:'MiSans','HarmonyOS Sans SC','Noto Sans SC'");
++    expect(result.text).toContain('--page:#f7f8fc');
++    expect(result.text).toContain('font-size:16px');
++    expect(result.text).not.toContain('background:#0a0a0f');
++    expect(result.text).not.toContain("'JetBrains Mono'");
++  });
++
++  test('Given a draft with content When the inbox list renders Then it stays compact and links to the full review page', async () => {
++    const page = makePage('inbox/content-summary', {
++      title: '机器标题',
++      compiled_truth: '# 这是一条项目决策\n\n保留旧资产，不设置自动删除日期。',
++    });
++    const app = createApp(mockEngine([page]));
++    const result = await fetchApp(app, '/admin/review');
++
++    expect(result.status).toBe(200);
++    expect(result.text).toContain('机器标题');
++    expect(result.text).toContain('打开并分类');
++    expect(result.text).not.toContain('展开查看内容摘要');
++    expect(result.text).not.toContain('保留旧资产');
++  });
++
++  test('GET /admin/review renders a compact classification queue with only essential information', async () => {
+     // given
+     const engine = mockEngine([makePage('inbox/triage-test', { title: '分诊测试草稿' })]);
+     const app = createApp(engine);
+@@ -764,13 +797,17 @@ describe('review web routes', () => {
+     // when
+     const result = await fetchApp(app, '/admin/review');
+ 
+-    // then: title, type, verification, status, stale, updated time, 开始审核 link
++    // then: title, system-suggested type, updated time, and detail link
+     expect(result.status).toBe(200);
+     expect(result.text).toContain('分诊测试草稿');
+-    expect(result.text).toContain('开始审核');
++    expect(result.text).toContain('AI 初判');
++    expect(result.text).toContain('打开并分类');
++    expect(result.text).toContain('class="review-queue-item"');
+     expect(result.text).toContain('/admin/review/detail/' + encodeURIComponent('inbox/triage-test'));
+-    // risk and duplicate fields render 未预检 (no preflight on list)
+-    expect(result.text).toContain('未预检');
++    expect(result.text).not.toContain('<th>风险</th>');
++    expect(result.text).not.toContain('<th>重复</th>');
++    expect(result.text).not.toContain('<th>过期</th>');
++    expect(result.text).not.toContain('<th>验证</th>');
+     // updated date present
+     expect(result.text).toContain('2026-07-26');
+     // only the four API-backed filters are offered; no risk filter
+@@ -843,6 +880,32 @@ describe('review web routes', () => {
+     expect(result.text).toContain('incidents/html-plan');
+   });
+ 
++  test('Given an already reviewed draft When a stale plan page is submitted Then it reports completion instead of a gate failure', async () => {
++    const sourceSlug = 'inbox/already-reviewed';
++    const review = makePage('decisions/reviews/already-reviewed-20260730', {
++      type: 'decision',
++      title: 'Review already reviewed',
++    });
++    review.frontmatter = {
++      ...review.frontmatter,
++      review_action: 'reject',
++      source_refs: [sourceSlug],
++      status: 'reviewed',
++    };
++    const app = createApp(mockEngine([review]));
++
++    const result = await fetchApp(
++      app,
++      `/admin/review/plan/${encodeURIComponent(sourceSlug)}?action=reject&reason=${encodeURIComponent('无保留价值')}`,
++    );
++
++    expect(result.status).toBe(200);
++    expect(result.text).toContain('这条经验已经完成审核');
++    expect(result.text).toContain('丢弃这条草稿');
++    expect(result.text).toContain('查看审核历史');
++    expect(result.text).not.toContain('门禁未通过，提交按钮已禁用');
++  });
++
+   test('Given a merge action with a PROMOTE-prefixed phrase When confirm is called Then the adapter rejects it', async () => {
+     // given
+     const source = makePage('inbox/web-merge', { type: 'incident' });
+@@ -949,7 +1012,8 @@ describe('review inbox triage console', () => {
+     // then
+     expect(result.status).toBe(200);
+     expect(result.text).toContain('未验证');
+-    expect(result.text).not.toContain('已验证');
++    expect(result.text).toContain('inbox/ver-no');
++    expect(result.text).not.toContain('inbox/ver-yes');
+   });
+ 
+   test('Given an inbox with no drafts When the list is requested Then Chinese empty state renders', async () => {
+@@ -991,9 +1055,8 @@ describe('review inbox triage console', () => {
+     // then
+     expect(result.status).toBe(200);
+     expect(result.text).toContain('稀疏草稿');
+-    expect(result.text).toContain('unverified');
+     expect(result.text).toContain('draft');
+-    expect(result.text).toContain('未预检');
++    expect(result.text).toContain('打开并分类');
+   });
+ 
+   test('Given an engine that throws on listPages When the list is requested Then 503 with fixed Chinese and no exception leak', async () => {
+@@ -1032,7 +1095,7 @@ describe('review inbox triage console', () => {
+     expect(result.text).toContain('method="get"');
+   });
+ 
+-  test('Given the triage list HTML When inspected Then each draft row links to detail via 开始审核', async () => {
++  test('Given the classification queue When inspected Then each experience card links to its detail page', async () => {
+     // given
+     const engine = mockEngine([makePage('inbox/link-test', { title: '链接测试' })]);
+     const app = createApp(engine);
+@@ -1042,73 +1105,48 @@ describe('review inbox triage console', () => {
+ 
+     // then
+     expect(result.status).toBe(200);
+-    expect(result.text).toContain('开始审核');
++    expect(result.text).toContain('打开并分类');
+     expect(result.text).toContain('href="/admin/review/detail/' + encodeURIComponent('inbox/link-test') + '"');
+   });
+ });
+ 
+-describe('detail summary', () => {
+-  test('Given a verified draft When its detail renders Then the summary precedes expandable evidence without a preflight', async () => {
+-    // given
+-    const page = makePage('inbox/detail-summary', {
+-      type: 'unrecognized-source-type',
+-      title: '摘要优先草稿',
++describe('simple review detail', () => {
++  test('Given a long experience When its detail renders Then full content and retrieval scenarios are listed', async () => {
++    const longTail = 'x'.repeat(2400);
++    const page = makePage('inbox/detail-content', {
++      title: '完整经验',
++      compiled_truth: `## 场景\n\n旧系统迁移。\n\n## 适用场景\n\n- 需要保留历史资产\n\n## 结论\n\n保留旧资产。\n\n${longTail}`,
+     });
+     page.frontmatter = {
+       ...page.frontmatter,
+-      applicability: ['当前项目', '复盘'],
+-      project_id: 'project-summary',
++      applicability: ['遗留系统迁移', '历史资产保留'],
++      non_applicable: ['全新项目'],
+     };
+-    const getPageCalls: string[] = [];
+-    let listPagesCalls = 0;
+-    const app = createApp(mockEngine([page], {
+-      onGetPage: (slug) => getPageCalls.push(slug),
+-      onListPages: () => { listPagesCalls += 1; },
+-    }));
++    const app = createApp(mockEngine([page]));
+ 
+-    // when
+     const result = await fetchApp(app, `/admin/review/detail/${encodeURIComponent(page.slug)}`);
+ 
+-    // then
+     expect(result.status).toBe(200);
+-    const summaryIndex = result.text.indexOf('class="detail-summary"');
+-    const metadataIndex = result.text.indexOf('<details');
+-    expect(summaryIndex).toBeGreaterThan(-1);
+-    expect(metadataIndex).toBeGreaterThan(summaryIndex);
+-    expect(result.text).toContain('草稿类型');
+-    expect(result.text).toContain('用途');
+-    expect(result.text).toContain('证据充分性');
+-    expect(result.text).toContain('敏感内容状态');
+-    expect(result.text).toContain('重复状态');
+-    expect(result.text).toContain('建议下一步');
+-    expect(result.text).toContain('选择处理方式后查看完整预检');
+-    expect(result.text.match(/未预检/g)?.length).toBeGreaterThanOrEqual(2);
+-    expect(result.text).toContain('unrecognized-source-type');
+-    expect(result.text).not.toContain('name="target_type"');
+-    expect(result.text).not.toContain('name="target"');
+-    expect(getPageCalls).toEqual([page.slug]);
+-    expect(listPagesCalls).toBe(0);
+-  });
+-
+-  test('Given an unverified long draft with missing metadata When its detail renders Then fixed fallbacks and a bounded preview render', async () => {
+-    // given
+-    const longBody = `长草稿 ${'x'.repeat(2400)}`;
+-    const page = makePage('inbox/detail-sparse', { compiled_truth: longBody, timeline: '' });
+-    page.frontmatter = {};
++    expect(result.text).toContain('经验内容');
++    expect(result.text).toContain(longTail);
++    expect(result.text).toContain('什么场景下会被召回');
++    expect(result.text).toContain('遗留系统迁移');
++    expect(result.text).toContain('需要保留历史资产');
++    expect(result.text).toContain('不应召回的场景');
++    expect(result.text).toContain('全新项目');
++  });
++
++  test('Given missing retrieval scenarios or migration placeholders When detail renders Then it reports missing fields without inventing content', async () => {
++    const page = makePage('inbox/detail-sparse', { compiled_truth: '## 结论\n\n只有结论。' });
++    page.frontmatter = { applicability: ['pending-human-review'], non_applicable: [] };
+     const app = createApp(mockEngine([page]));
+ 
+-    // when
+     const result = await fetchApp(app, `/admin/review/detail/${encodeURIComponent(page.slug)}`);
+ 
+-    // then
+     expect(result.status).toBe(200);
+-    expect(result.text).toContain('先补证据');
+-    expect(result.text).toContain('未提供');
+-    expect(result.text).toContain('长草稿');
+-    expect(result.text).not.toContain('x'.repeat(2100));
+-    expect(result.text).toContain('<details');
+-    expect(result.text).toContain('草稿元数据');
+-    expect(result.text).toContain('内容预览');
++    expect(result.text).toContain('尚未提供具体召回场景');
++    expect(result.text).toContain('尚未提供不应召回的场景');
++    expect(result.text).not.toContain('pending-human-review');
+   });
+ });
+ 
+@@ -1170,97 +1208,60 @@ describe('detail summary canary', () => {
+   });
+ });
+ 
+-describe('decision cards', () => {
+-  test('Given a draft detail When rendered Then common actions are primary Chinese decision cards with complete guidance', async () => {
+-    // given
+-    const page = makePage('inbox/decision-cards', { title: '决策卡草稿' });
++describe('review action dropdown and similar experience recall', () => {
++  test('Given a draft detail When rendered Then every action is available in one dropdown without decision cards', async () => {
++    const page = makePage('inbox/action-select', { title: '下拉审核草稿' });
+     const app = createApp(mockEngine([page]));
+ 
+-    // when
+     const result = await fetchApp(app, `/admin/review/detail/${encodeURIComponent(page.slug)}`);
+ 
+-    // then
+     expect(result.status).toBe(200);
+-    const primaryStart = result.text.indexOf('class="decision-card-section decision-card-section-primary"');
+-    const rareStart = result.text.indexOf('class="decision-card-section decision-card-section-rare"');
+-    expect(primaryStart).toBeGreaterThan(-1);
+-    expect(rareStart).toBeGreaterThan(primaryStart);
+-    expect(result.text).toContain('常用处理');
+-
+-    const primarySection = result.text.slice(primaryStart, rareStart);
+-    expect([...primarySection.matchAll(/data-action="([^"]+)"/g)].map((match) => match[1])).toEqual([
+-      'keep', 'promote', 'merge', 'needs_evidence',
+-    ]);
+-
+-    for (const action of ['keep', 'promote', 'merge', 'needs_evidence'] as const) {
+-      const entry = REVIEW_ACTION_CATALOG[action];
+-      const actionStart = primarySection.indexOf(`data-action="${entry.value}"`);
+-      const cardStart = primarySection.lastIndexOf('<a ', actionStart);
+-      const cardEnd = primarySection.indexOf('</a>', cardStart);
+-      const card = primarySection.slice(cardStart, cardEnd);
+-
+-      expect(card).toContain('decision-card-primary');
+-      expect(card).toContain(entry.label);
+-      expect(card).toContain(entry.explanation);
+-      expect(card).toContain(entry.example);
+-      expect(card).toContain(entry.riskText);
+-      expect(card).toContain(`data-confirmation="${entry.confirmationRequirement}"`);
+-      expect(card).toContain(`href="/admin/review/plan/${encodeURIComponent(page.slug)}?action=${entry.value}"`);
+-      for (const field of entry.requiredFields) {
+-        expect(card).toContain(`<code data-required-field="${field}">${field}</code>`);
+-      }
++    expect(result.text).toContain('<select id="review-action" name="action" required>');
++    for (const entry of Object.values(REVIEW_ACTION_CATALOG)) {
++      expect(result.text).toContain(`<option value="${entry.value}">${entry.label}</option>`);
++      expect(result.text).not.toContain(entry.explanation);
++      expect(result.text).not.toContain(entry.riskText);
+     }
+-    expect(result.text).not.toContain('method="post"');
+-    expect(result.text).not.toContain('name="confirmation"');
+-    expect(result.text).not.toContain('value="PROMOTE ');
+-    expect(result.text).not.toContain('value="MERGE ');
++    expect(result.text).not.toContain('decision-card');
+   });
+-});
+ 
+-describe('rare actions', () => {
+-  test('Given a draft detail When rendered Then rare actions stay under 更多处理方式 without execution controls', async () => {
+-    // given
+-    const page = makePage('inbox/rare-actions', { title: '少用操作草稿' });
+-    const app = createApp(mockEngine([page]));
++  test('Given keyword matches When detail renders Then MCP-style recall excludes the current draft and inbox pages', async () => {
++    const source = makePage('inbox/recall-source', {
++      title: '迁移保留策略',
++      compiled_truth: '## 适用场景\n\n迁移旧系统。',
++    });
++    const existing = makePage('knowledge/retention-policy', {
++      title: '历史资产保留策略',
++      type: 'knowledge',
++      compiled_truth: '## 场景\n\n旧系统迁移时保留审计资产。\n\n## 结论\n\n设置长期保留。',
++    });
++    const otherDraft = makePage('inbox/other-draft', { title: '其他草稿' });
++    const engine = mockEngine([source, existing, otherDraft]);
++    engine.searchKeyword = async () => [
++      {
++        slug: source.slug, page_id: source.id, title: source.title, type: source.type,
++        chunk_text: '当前草稿', chunk_source: 'compiled_truth', chunk_id: 1, chunk_index: 0, score: 1, stale: false,
++      },
++      {
++        slug: otherDraft.slug, page_id: otherDraft.id, title: otherDraft.title, type: otherDraft.type,
++        chunk_text: '未审核内容', chunk_source: 'compiled_truth', chunk_id: 2, chunk_index: 0, score: 0.9, stale: false,
++      },
++      {
++        slug: existing.slug, page_id: existing.id, title: existing.title, type: existing.type,
++        chunk_text: '旧系统迁移时保留审计资产', chunk_source: 'compiled_truth', chunk_id: 3, chunk_index: 0, score: 0.8123, stale: false,
++      },
++    ];
++    const app = createApp(engine);
+ 
+-    // when
+-    const result = await fetchApp(app, `/admin/review/detail/${encodeURIComponent(page.slug)}`);
++    const result = await fetchApp(app, `/admin/review/detail/${encodeURIComponent(source.slug)}`);
+ 
+-    // then
+     expect(result.status).toBe(200);
+-    const rareStart = result.text.indexOf('class="decision-card-section decision-card-section-rare"');
+-    expect(rareStart).toBeGreaterThan(-1);
+-    const rareSection = result.text.slice(rareStart);
+-    expect(rareSection).toContain('更多处理方式');
+-    expect([...rareSection.matchAll(/data-action="([^"]+)"/g)].map((match) => match[1])).toEqual([
+-      'reject', 'repair', 'cleanup',
+-    ]);
+-
+-    for (const action of ['reject', 'repair', 'cleanup'] as const) {
+-      const entry = REVIEW_ACTION_CATALOG[action];
+-      const actionStart = rareSection.indexOf(`data-action="${entry.value}"`);
+-      const cardStart = rareSection.lastIndexOf('<a ', actionStart);
+-      const cardEnd = rareSection.indexOf('</a>', cardStart);
+-      const card = rareSection.slice(cardStart, cardEnd);
+-
+-      expect(card).toContain('decision-card-rare');
+-      expect(card).toContain(entry.label);
+-      expect(card).toContain(entry.explanation);
+-      expect(card).toContain(entry.example);
+-      expect(card).toContain(entry.riskText);
+-      expect(card).toContain(`data-confirmation="${entry.confirmationRequirement}"`);
+-      expect(card).toContain(`href="/admin/review/plan/${encodeURIComponent(page.slug)}?action=${entry.value}"`);
+-      if (entry.requiredFields.length === 0) {
+-        expect(card).toContain('无需补充字段');
+-      } else {
+-        for (const field of entry.requiredFields) {
+-          expect(card).toContain(`<code data-required-field="${field}">${field}</code>`);
+-        }
+-      }
+-    }
+-    expect(rareSection).not.toContain('method="post"');
+-    expect(rareSection).not.toContain('name="confirmation"');
+-    expect(rareSection).not.toContain('确认执行');
++    expect(result.text).toContain('相似经验召回');
++    expect(result.text).toContain('0.8123');
++    expect(result.text).toContain('knowledge/retention-policy');
++    expect(result.text).toContain('旧系统迁移时保留审计资产');
++    expect(result.text).toContain('设置长期保留');
++    expect(result.text).not.toContain('未审核内容');
+   });
+ });
+ 
+@@ -1961,6 +1962,42 @@ describe('writer payload', () => {
+ });
+ 
+ describe('writer attestation', () => {
++  test('Given a systemd credential directory When resolving the writer env Then the credential is used without exposing the root-owned source', () => {
++    const tempDir = mkdtempSync(join(tmpdir(), 'gbrain-writer-credential-'));
++    const credentialPath = join(tempDir, 'gbrain-local-writer.env');
++    writeFileSync(credentialPath, 'GBRAIN_LOOPBACK_MCP_URL=http://127.0.0.1:3131/mcp\n');
++    try {
++      expect(localWriterEnvPath({ CREDENTIALS_DIRECTORY: tempDir }, '/unused-home')).toBe(credentialPath);
++      expect(localWriterEnvPath({ GBRAIN_REVIEW_WRITER_ENV_PATH: '/explicit/writer.env', CREDENTIALS_DIRECTORY: tempDir }, '/unused-home')).toBe('/explicit/writer.env');
++    } finally {
++      rmSync(tempDir, { recursive: true, force: true });
++    }
++  });
++
++  test('Given a loopback writer URL When opening the writer session Then it takes precedence over the public MCP URL', async () => {
++    const tempDir = mkdtempSync(join(tmpdir(), 'gbrain-writer-loopback-'));
++    const envPath = join(tempDir, 'writer.env');
++    writeFileSync(envPath, 'GBRAIN_MCP_URL=http://public.test/mcp\nGBRAIN_LOOPBACK_MCP_URL=http://127.0.0.1:3131/mcp\nBEARER_TOKEN=test-bearer\n');
++    const opened: string[] = [];
++    const factory = createLocalWriterSessionFactory(envPath, async (url) => {
++      opened.push(url);
++      return { callTool: async () => ({ source_id: 'default' }), close: async () => {} };
++    });
++    try {
++      const session = await factory('http://127.0.0.1:3131/mcp');
++      await session.close();
++      expect(opened).toEqual(['http://127.0.0.1:3131/mcp']);
++    } finally {
++      rmSync(tempDir, { recursive: true, force: true });
++    }
++  });
++
++  test('review writer MCP URL defaults to loopback and rejects non-MCP paths', () => {
++    expect(resolveReviewWriterMcpUrl(undefined, 3131).toString()).toBe('http://127.0.0.1:3131/mcp');
++    expect(resolveReviewWriterMcpUrl('https://review.test/mcp', 3131).toString()).toBe('https://review.test/mcp');
++    expect(() => resolveReviewWriterMcpUrl('https://review.test/admin', 3131)).toThrow('ending in /mcp');
++  });
++
+   test('Given an attested default-source writer session When a keep plan confirms Then identity and every write share that session', async () => {
+     // given
+     const calls: string[] = [];
+diff --git a/test/support/review-visual-qa.ts b/test/support/review-visual-qa.ts
+index 6dbbf05..e447170 100644
+--- a/test/support/review-visual-qa.ts
++++ b/test/support/review-visual-qa.ts
+@@ -5,7 +5,8 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+ import { chromium, type Page } from 'playwright';
+ 
+ const BASE_URL = 'http://127.0.0.1:4173';
+-const EVIDENCE_DIR = '/home/l30002999/source_code/gbrain/.omo/evidence/gbrain-review-ui-chinese-redesign/task-9-visual-qa';
++const EVIDENCE_DIR = process.env.GBRAIN_REVIEW_VISUAL_EVIDENCE_DIR
++  ?? join(process.cwd(), '.omo', 'evidence', 'gbrain-review-ui-chinese-redesign', 'visual-qa');
+ 
+ const VIEWPORTS = [
+   { width: 375, height: 667, name: 'mobile' },
+@@ -112,6 +113,19 @@ async function assertReadableMobileTable(page: Page, routeName: string): Promise
+   }
+ }
+ 
++async function assertReadableMobileQueue(page: Page): Promise<void> {
++  const metrics = await page.locator('.review-queue-item').evaluateAll((items) => items.map((item) => ({
++    scrollWidth: item.scrollWidth,
++    clientWidth: item.clientWidth,
++    display: getComputedStyle(item).display,
++  })));
++  if (metrics.length === 0) fail('list has no classification queue at 375px.');
++  for (const item of metrics) {
++    if (item.scrollWidth > item.clientWidth + 1) fail('classification queue item overflows horizontally at 375px.');
++    if (item.display !== 'grid') fail('classification queue item does not use its responsive grid layout at 375px.');
++  }
++}
++
+ async function focusByTab(page: Page, selector: string, label: string): Promise<void> {
+   for (let index = 0; index < 40; index += 1) {
+     await page.keyboard.press('Tab');
+@@ -132,8 +146,10 @@ async function focusByTab(page: Page, selector: string, label: string): Promise<
+ 
+ async function verifyKeyboardFlows(page: Page): Promise<void> {
+   await navigate(page, '/admin/review/detail/inbox%2Flist-item-1');
+-  await focusByTab(page, '[data-action="needs_evidence"]', 'the needs-evidence decision card');
++  await focusByTab(page, 'select[name="action"]', 'the review action selector');
++  await page.locator('select[name="action"]').selectOption('needs_evidence');
+   await page.screenshot({ path: join(EVIDENCE_DIR, 'keyboard-focus.png'), fullPage: true });
++  await focusByTab(page, 'button[type="submit"]', 'the review action submit control');
+   await page.keyboard.press('Enter');
+   await waitForVisibleHeading(page);
+   await focusByTab(page, 'textarea[name="reviewNotes"]', 'the review-notes field');
+@@ -148,7 +164,9 @@ async function verifyKeyboardFlows(page: Page): Promise<void> {
+   await waitForVisibleHeading(page);
+ 
+   await navigate(page, '/admin/review/detail/inbox%2Flist-item-1');
+-  await focusByTab(page, '[data-action="promote"]', 'the promote decision card');
++  await focusByTab(page, 'select[name="action"]', 'the review action selector');
++  await page.locator('select[name="action"]').selectOption('promote');
++  await focusByTab(page, 'button[type="submit"]', 'the review action submit control');
+   await page.keyboard.press('Enter');
+   await waitForVisibleHeading(page);
+   await focusByTab(page, 'select[name="target_type"]', 'the target selector');
+@@ -185,7 +203,10 @@ async function run(): Promise<void> {
+         console.log(`Capturing ${route.name} at ${viewport.name} (${viewport.width}px)...`);
+         await page.setViewportSize({ width: viewport.width, height: viewport.height });
+         await navigate(page, route.path);
+-        if (viewport.name === 'mobile' && (route.name === 'list' || route.name === 'history')) {
++        if (viewport.name === 'mobile' && route.name === 'list') {
++          await assertReadableMobileQueue(page);
++        }
++        if (viewport.name === 'mobile' && route.name === 'history') {
+           await assertReadableMobileTable(page, route.name);
+         }
+         const screenshotPath = join(EVIDENCE_DIR, `${route.name}-${viewport.name}.png`);
+
