@@ -23,12 +23,15 @@ import {
   isAvailable,
   getChatModel,
   getChatFallbackChain,
+  recipeSupportsStructuredOutputs,
+  parseExpansionResponse,
   chat,
   __setGenerateTextTransportForTests,
 } from '../../src/core/ai/gateway.ts';
 import { parseModelId, resolveRecipe, assertTouchpoint } from '../../src/core/ai/model-resolver.ts';
 import { AIConfigError } from '../../src/core/ai/errors.ts';
 import { listRecipes, getRecipe } from '../../src/core/ai/recipes/index.ts';
+import type { Recipe } from '../../src/core/ai/types.ts';
 
 describe('chat touchpoint — recipe registry', () => {
   test('all six chat-capable providers ship a chat touchpoint with supports_subagent_loop', () => {
@@ -42,11 +45,16 @@ describe('chat touchpoint — recipe registry', () => {
     }
   });
 
-  test('only Anthropic claims supports_prompt_cache=true', () => {
+  test('only Anthropic claims supports_prompt_cache outright; others gate per model', () => {
     for (const r of listRecipes()) {
       if (!r.touchpoints.chat) continue;
       if (r.id === 'anthropic') {
         expect(r.touchpoints.chat.supports_prompt_cache).toBe(true);
+      } else if (r.id === 'openrouter' || r.id === 'google') {
+        // Scoped predicates, never a blanket true: OpenRouter by routed model
+        // family (openai/* + anthropic/claude-*), Google by Gemini version
+        // (implicit caching is 2.5+). Matrices live in each recipe's test.
+        expect(typeof r.touchpoints.chat.supports_prompt_cache).toBe('function');
       } else {
         expect(r.touchpoints.chat.supports_prompt_cache ?? false).toBe(false);
       }
@@ -62,6 +70,56 @@ describe('chat touchpoint — recipe registry', () => {
     expect(getRecipe('deepseek')!.base_url_default).toBe('https://api.deepseek.com/v1');
     expect(getRecipe('groq')!.base_url_default).toBe('https://api.groq.com/openai/v1');
     expect(getRecipe('together')!.base_url_default).toBe('https://api.together.xyz/v1');
+  });
+});
+
+describe('expansion — structured-output capability gating', () => {
+  test('openai-compat chat recipes default to no structured-output support', () => {
+    // The capability is opt-in per recipe: an openai-compatible recipe may front
+    // arbitrary backends, so expand() routes the default through the schemaless
+    // text path rather than requesting a json_schema the backend may reject.
+    for (const id of ['deepseek', 'groq', 'together']) {
+      expect(recipeSupportsStructuredOutputs(getRecipe(id)!)).toBe(false);
+    }
+  });
+
+  test('recipeSupportsStructuredOutputs is false when no chat touchpoint exists', () => {
+    // Embedding-only recipes have no chat touchpoint; the helper must not throw.
+    expect(recipeSupportsStructuredOutputs(getRecipe('voyage')!)).toBe(false);
+  });
+
+  test('recipeSupportsStructuredOutputs is true when a recipe opts in', () => {
+    const optedIn = {
+      id: 'synthetic',
+      touchpoints: { chat: { models: [], supports_tools: true, supports_subagent_loop: true, supports_structured_outputs: true } },
+    } as unknown as Recipe;
+    expect(recipeSupportsStructuredOutputs(optedIn)).toBe(true);
+  });
+});
+
+describe('expansion — schemaless recovery (parseExpansionResponse)', () => {
+  // The openai-compat expansion paths recover queries from raw model text. This
+  // is the testable seam both the default and the strict-fallback paths share.
+  test('recovers queries from clean JSON', () => {
+    expect(parseExpansionResponse('{"queries":["a","b","c"]}')).toEqual(['a', 'b', 'c']);
+  });
+
+  test('recovers queries from fenced JSON', () => {
+    expect(parseExpansionResponse('```json\n{"queries":["a","b"]}\n```')).toEqual(['a', 'b']);
+  });
+
+  test('recovers queries from prose-wrapped JSON', () => {
+    expect(parseExpansionResponse('Here you go: {"queries":["a"]} done')).toEqual(['a']);
+  });
+
+  test('returns null for non-JSON so the caller can drop expansion cleanly', () => {
+    expect(parseExpansionResponse('I cannot help with that.')).toBeNull();
+  });
+
+  test('returns null when the JSON violates the schema', () => {
+    expect(parseExpansionResponse('{"queries":[]}')).toBeNull(); // min(1)
+    expect(parseExpansionResponse('{"rewrites":["a"]}')).toBeNull(); // wrong key
+    expect(parseExpansionResponse('{"queries":[1,2]}')).toBeNull(); // wrong item type
   });
 });
 
@@ -106,6 +164,9 @@ describe('chat touchpoint — model resolver + aliases (Codex F-OV-5)', () => {
     expect(() => assertTouchpoint(getRecipe('anthropic')!, 'chat', 'claude-opus-4-7')).not.toThrow();
     expect(() => assertTouchpoint(getRecipe('openai')!, 'chat', 'gpt-5.2')).not.toThrow();
     expect(() => assertTouchpoint(getRecipe('google')!, 'chat', 'gemini-2.0-flash')).not.toThrow();
+    expect(() => assertTouchpoint(getRecipe('deepseek')!, 'chat', 'deepseek-v4-flash')).not.toThrow();
+    // Legacy id retired by DeepSeek 2026-07-24 (#1255): still passes local
+    // validation (openai-compat tier), rejection surfaces at the provider.
     expect(() => assertTouchpoint(getRecipe('deepseek')!, 'chat', 'deepseek-chat')).not.toThrow();
   });
 
@@ -116,14 +177,15 @@ describe('chat touchpoint — model resolver + aliases (Codex F-OV-5)', () => {
       .toThrow(AIConfigError);
   });
 
-  test('assertTouchpoint rejects unknown native model with the model list in the fix hint', () => {
-    try {
-      assertTouchpoint(getRecipe('anthropic')!, 'chat', 'claude-opus-9-99');
-      throw new Error('should have thrown');
-    } catch (e) {
-      expect(e).toBeInstanceOf(AIConfigError);
-      expect((e as AIConfigError).message).toContain('claude-opus-9-99');
-    }
+  test('assertTouchpoint accepts unlisted models on native recipes (no runtime allowlist)', () => {
+    // Frontier models ship weekly; recipe models: arrays are informational
+    // (defaults, guard-test fixtures, display), not a gate. A nonexistent id
+    // surfaces as the provider's own model_not_found at call time.
+    expect(() => assertTouchpoint(getRecipe('anthropic')!, 'chat', 'claude-opus-9-99')).not.toThrow();
+    expect(() => assertTouchpoint(getRecipe('openai')!, 'chat', 'gpt-5.6-sol')).not.toThrow();
+    expect(() => assertTouchpoint(getRecipe('google')!, 'chat', 'gemini-9-flash')).not.toThrow();
+    expect(() => assertTouchpoint(getRecipe('openai')!, 'expansion', 'gpt-5.6-luna')).not.toThrow();
+    expect(() => assertTouchpoint(getRecipe('openai')!, 'embedding', 'text-embedding-9-huge')).not.toThrow();
   });
 
   test('assertTouchpoint accepts arbitrary model on openai-compat tier', () => {
@@ -319,5 +381,73 @@ describe('chat touchpoint — provider_chat_options passthrough', () => {
         thinking: { type: 'disabled' },
       },
     });
+  });
+});
+
+describe('chat touchpoint — per-part providerMetadata round trip (#4201)', () => {
+  beforeEach(() => {
+    resetGateway();
+    __setGenerateTextTransportForTests(null);
+  });
+
+  const SIG = { google: { thoughtSignature: 'opaque-turn1-signature' } };
+
+  test('chat() captures part providerMetadata onto ChatBlocks (inbound half)', async () => {
+    __setGenerateTextTransportForTests(async () => ({
+      content: [
+        { type: 'text', text: 'calling a tool', providerMetadata: SIG },
+        { type: 'tool-call', toolCallId: 'g1', toolName: 'search', input: { q: 'x' }, providerMetadata: SIG },
+      ],
+      finishReason: 'tool-calls',
+      usage: { inputTokens: 5, outputTokens: 5 },
+    }) as any);
+    configureGateway({
+      chat_model: 'google:gemini-3-pro-preview',
+      env: { GOOGLE_GENERATIVE_AI_API_KEY: 'fake' },
+    });
+    const result = await chat({
+      model: 'google:gemini-3-pro-preview',
+      messages: [{ role: 'user', content: 'hello' }],
+    });
+    const toolCall = result.blocks.find(b => b.type === 'tool-call') as any;
+    expect(toolCall.providerMetadata).toEqual(SIG);
+    const text = result.blocks.find(b => b.type === 'text') as any;
+    expect(text.providerMetadata).toEqual(SIG);
+  });
+
+  test('next-turn request echoes the signature as providerOptions (outbound half)', async () => {
+    let capturedMessages: any[] | undefined;
+    __setGenerateTextTransportForTests(async (args: any) => {
+      capturedMessages = args.messages;
+      return {
+        content: [{ type: 'text', text: 'done' }],
+        finishReason: 'stop',
+        usage: { inputTokens: 1, outputTokens: 1 },
+      } as any;
+    });
+    configureGateway({
+      chat_model: 'google:gemini-3-pro-preview',
+      env: { GOOGLE_GENERATIVE_AI_API_KEY: 'fake' },
+    });
+    // Turn-2 request: the transcript contains turn 1's tool-call block WITH
+    // the captured metadata (exactly what toolLoop pushes into messages) plus
+    // the tool-result user turn.
+    await chat({
+      model: 'google:gemini-3-pro-preview',
+      messages: [
+        { role: 'user', content: 'hello' },
+        {
+          role: 'assistant',
+          content: [{ type: 'tool-call', toolCallId: 'g1', toolName: 'search', input: { q: 'x' }, providerMetadata: SIG }],
+        },
+        {
+          role: 'user',
+          content: [{ type: 'tool-result', toolCallId: 'g1', toolName: 'search', output: { hits: 1 } }],
+        },
+      ],
+    });
+    expect(capturedMessages).toBeDefined();
+    const assistant = (capturedMessages as any[]).find(m => m.role === 'assistant');
+    expect(assistant.content[0].providerOptions).toEqual(SIG);
   });
 });

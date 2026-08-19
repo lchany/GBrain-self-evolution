@@ -35,8 +35,9 @@
  */
 
 import { createHash } from 'node:crypto';
-import { BaseCyclePhase, type ScopedReadOpts, type BasePhaseOpts } from './base-phase.ts';
-import { chat as gatewayChat } from '../ai/gateway.ts';
+import { BaseCyclePhase, effectivePhaseDeadlineMs, type ScopedReadOpts, type BasePhaseOpts } from './base-phase.ts';
+import { chat as gatewayChat, getChatModel } from '../ai/gateway.ts';
+import { splitProviderModelId } from '../model-id.ts';
 import { GBrainError } from '../types.ts';
 import type { OperationContext } from '../operations.ts';
 import type { BrainEngine, Take, TakeResolution } from '../engine.ts';
@@ -176,6 +177,8 @@ export function aggregateEnsemble(
 export type EvidenceRetrieverFn = (take: Take, scope: ScopedReadOpts) => Promise<string>;
 
 export interface GradeTakesOpts extends BasePhaseOpts {
+  /** Override the phase wall-clock deadline (tests). Default: 30 min, clamped to the job deadline (gbrain#4168). */
+  deadlineMs?: number;
   /** Minimum age in months before a take is eligible for grading. Default 6. */
   minAgeMonths?: number;
   /** Limit takes processed in this cycle. Default 50. */
@@ -219,7 +222,7 @@ export interface GradeTakesOpts extends BasePhaseOpts {
   /**
    * E2 ensemble judges. When useEnsemble=true and the single-model verdict
    * is borderline, all three judges are called in parallel via Promise.allSettled.
-   * Defaults to [openai:gpt-4o, anthropic:claude-sonnet-4-6, google:gemini-1.5-pro]
+   * Defaults to [openai:gpt-5.2, anthropic:claude-sonnet-4-6, google:gemini-2.0-flash]
    * via defaultJudge with model-string overrides. Tests inject deterministic
    * judges.
    */
@@ -251,6 +254,8 @@ export interface GradeTakesResult {
   ensemble_invoked: number;
   /** E2 ensemble (T5): count of takes where ensemble produced 3/3 unanimous. */
   ensemble_unanimous: number;
+  /** gbrain#4168: true when the phase deadline fired mid-loop (partial result). */
+  deadline_hit: boolean;
 }
 
 /**
@@ -367,6 +372,14 @@ function verdictToResolution(verdict: JudgeVerdict, resolvedByLabel: string): Ta
   };
 }
 
+/**
+ * Hard wall-clock deadline for the grade_takes phase (gbrain#4168). Same
+ * clean-partial-exit contract as propose_takes: judge calls have long tails,
+ * and without a phase deadline the worker's job timeout killed the phase
+ * mid-write instead of letting it bank completed verdicts.
+ */
+const GRADE_TAKES_PHASE_DEADLINE_MS = 30 * 60 * 1000;
+
 class GradeTakesPhase extends BaseCyclePhase {
   readonly name = 'grade_takes' as CyclePhase;
   protected readonly budgetUsdKey = 'cycle.grade_takes.budget_usd';
@@ -395,7 +408,21 @@ class GradeTakesPhase extends BaseCyclePhase {
     const autoResolve = opts.autoResolve ?? false; // D17 default OFF
     const autoResolveThreshold = opts.autoResolveThreshold ?? 0.95; // D12 conservative
     const resolvedByLabel = opts.resolvedByLabel ?? 'gbrain:grade_takes';
-    const judgeModelId = opts.model ?? 'claude-sonnet-4-6';
+    // One resolved string drives the judge call, the verdict-cache key, and
+    // the stored judge_model_id — the convention propose_takes adopted in
+    // v0.42.62. Previously the default judge call passed NO model hint (it
+    // rode the gateway's chat_model) while 'claude-sonnet-4-6' was hardcoded
+    // into judge_model_id, the evidence signature, and budget metering — on
+    // brains with a different chat_model, telemetry priced and recorded a
+    // model that never ran.
+    const judgeModelFull = opts.model ?? getChatModel();
+    // Bare tail for the stored judge_model_id + evidence signature
+    // (historical convention). Stock installs are unchanged: getChatModel()
+    // defaults to 'anthropic:claude-sonnet-4-6', whose tail equals the old
+    // hardcoded value — zero verdict-cache invalidation. A genuinely
+    // different chat_model invalidates, which is correct: the judge really
+    // changed.
+    const judgeModelId = splitProviderModelId(judgeModelFull).model || judgeModelFull;
 
     const useEnsemble = opts.useEnsemble ?? false;
     const ensembleThreshold = opts.ensembleThreshold ?? 0.85;
@@ -411,7 +438,28 @@ class GradeTakesPhase extends BaseCyclePhase {
       warnings: [],
       ensemble_invoked: 0,
       ensemble_unanimous: 0,
+      deadline_hit: false,
     };
+
+    // gbrain#4168: relative phase deadline clamped to the job's absolute
+    // deadline minus the reserve — same clean partial-exit contract as
+    // propose_takes (break, bank verdicts already written, report).
+    const phaseStartMs = Date.now();
+    const deadlineMs = effectivePhaseDeadlineMs(
+      opts.deadlineMs ?? GRADE_TAKES_PHASE_DEADLINE_MS,
+      opts.deadlineAtMs,
+      phaseStartMs,
+    );
+    if (deadlineMs <= 0) {
+      // Job budget already inside the reserve — exit before ANY judge call.
+      result.warnings.push('phase skipped: job deadline already inside the reserve window');
+      result.deadline_hit = true;
+      return {
+        summary: 'grade_takes: skipped — job deadline inside the reserve window',
+        details: { ...result, prompt_version: promptVersion, auto_resolve: autoResolve, auto_resolve_threshold: autoResolveThreshold },
+        status: 'warn',
+      };
+    }
 
     // Load unresolved active takes, oldest-first.
     const takes = await engine.listTakes({
@@ -427,6 +475,19 @@ class GradeTakesPhase extends BaseCyclePhase {
 
     const now = new Date();
     for (const take of takes) {
+      // Phase deadline check (gbrain#4168). Break, not throw: verdicts
+      // already cached stay banked, and the phase reports partial cleanly
+      // before the worker's kill switch fires.
+      const elapsedMs = Date.now() - phaseStartMs;
+      if (elapsedMs > deadlineMs) {
+        result.warnings.push(
+          `phase deadline hit at take ${result.takes_scanned}/${takes.length} ` +
+          `after ${(elapsedMs / 1000).toFixed(0)}s (cap ${(deadlineMs / 1000).toFixed(0)}s); partial completion`,
+        );
+        result.deadline_hit = true;
+        break;
+      }
+
       result.takes_scanned += 1;
       this.tick(opts);
 
@@ -468,7 +529,7 @@ class GradeTakesPhase extends BaseCyclePhase {
       // Call the single-model judge. Errors on a single take log warning + continue.
       let verdict: JudgeVerdict;
       try {
-        verdict = await judge({ take, evidence, modelHint: opts.model });
+        verdict = await judge({ take, evidence, modelHint: judgeModelFull });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         result.warnings.push(`judge failed on take ${take.id}: ${msg}`);
@@ -598,7 +659,8 @@ class GradeTakesPhase extends BaseCyclePhase {
     const summary =
       `grade_takes: scanned ${result.takes_scanned} takes ` +
       `(${result.too_recent} too recent, ${result.cache_hits} cached, ` +
-      `${result.verdicts_written} new verdicts, ${result.auto_applied} auto-applied)`;
+      `${result.verdicts_written} new verdicts, ${result.auto_applied} auto-applied)` +
+      (result.deadline_hit ? ' [deadline hit — partial]' : '');
     return {
       summary,
       details: {
@@ -607,7 +669,7 @@ class GradeTakesPhase extends BaseCyclePhase {
         auto_resolve: autoResolve,
         auto_resolve_threshold: autoResolveThreshold,
       },
-      status: result.budget_exhausted ? 'warn' : 'ok',
+      status: result.budget_exhausted || result.deadline_hit ? 'warn' : 'ok',
     };
   }
 }

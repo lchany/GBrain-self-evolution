@@ -31,8 +31,22 @@ export class WriterAttestationError extends Error {
   }
 }
 
-export function localWriterEnvPath(): string {
-  return join(homedir(), '.config', 'gbrain', 'local-writer.env');
+const SYSTEMD_WRITER_CREDENTIAL = 'gbrain-local-writer.env';
+
+export function localWriterEnvPath(
+  env: NodeJS.ProcessEnv = process.env,
+  home = homedir(),
+): string {
+  const explicitPath = env.GBRAIN_REVIEW_WRITER_ENV_PATH?.trim();
+  if (explicitPath) return explicitPath;
+
+  const credentialsDirectory = env.CREDENTIALS_DIRECTORY?.trim();
+  if (credentialsDirectory) {
+    const credentialPath = join(credentialsDirectory, SYSTEMD_WRITER_CREDENTIAL);
+    if (existsSync(credentialPath)) return credentialPath;
+  }
+
+  return join(home, '.config', 'gbrain', 'local-writer.env');
 }
 
 export function createLocalWriterToolCaller(envPath = localWriterEnvPath()): WriterToolCaller {
@@ -81,7 +95,7 @@ export function createLocalWriterSessionFactory(
 ): WriterSessionFactory {
   return async (expectedMcpUrl) => {
     const env = readWriterEnv(envPath);
-    const mcpUrl = normalizeMcpUrl(firstEnv(env, ['GBRAIN_MCP_URL', 'GBRAIN_REMOTE_MCP_URL', 'GBRAIN_WRITER_MCP_URL', 'MCP_URL']));
+    const mcpUrl = normalizeMcpUrl(firstEnv(env, ['GBRAIN_LOOPBACK_MCP_URL', 'GBRAIN_MCP_URL', 'GBRAIN_REMOTE_MCP_URL', 'GBRAIN_WRITER_MCP_URL', 'MCP_URL']));
     if (mcpUrl === null || mcpUrl !== normalizeMcpUrl(expectedMcpUrl)) throw new WriterAttestationError();
 
     const bearer = firstEnv(env, ['GBRAIN_REMOTE_TOKEN', 'GBRAIN_WRITER_TOKEN', 'GBRAIN_BEARER_TOKEN', 'BEARER_TOKEN']);

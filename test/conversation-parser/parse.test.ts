@@ -24,7 +24,10 @@ import {
   scorePattern,
   scorePatternFull,
 } from '../../src/core/conversation-parser/parse.ts';
-import { BUILTIN_PATTERNS } from '../../src/core/conversation-parser/builtins.ts';
+import {
+  BUILTIN_PATTERNS,
+  validatePatternEntry,
+} from '../../src/core/conversation-parser/builtins.ts';
 import type { Page } from '../../src/core/types.ts';
 
 // Helper to construct a minimal Page for date-derivation tests.
@@ -139,6 +142,35 @@ describe('parseConversation — every built-in matches its test_positive sample'
   }
 });
 
+test('validatePatternEntry rejects invalid capture indexes', () => {
+  const base = BUILTIN_PATTERNS[0];
+  const aboveRange = {
+    ...base,
+    id: 'invalid-text-capture',
+    captures: { ...base.captures, text_group: 99 },
+  };
+  const zeroSpeaker = {
+    ...base,
+    id: 'invalid-speaker-capture',
+    captures: { ...base.captures, speaker_group: 0 },
+  };
+  const negativeText = {
+    ...base,
+    id: 'negative-text-capture',
+    captures: { ...base.captures, text_group: -1 },
+  };
+
+  expect(() => validatePatternEntry(aboveRange)).toThrow(
+    "captures group 99 but regex only emits",
+  );
+  expect(() => validatePatternEntry(zeroSpeaker)).toThrow(
+    'speaker_group must be an integer >= 1',
+  );
+  expect(() => validatePatternEntry(negativeText)).toThrow(
+    'text_group must be an integer >= 0',
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Date derivation precedence (D8)
 // ---------------------------------------------------------------------------
@@ -243,6 +275,33 @@ describe('parseConversation — disabledBuiltinIds', () => {
 // ---------------------------------------------------------------------------
 // Multi-line continuation (D5)
 // ---------------------------------------------------------------------------
+
+describe('parseConversation — markdown-heading-turn (gbrain transcript ingest)', () => {
+  test('parses ## User / ## Assistant heading-only turns with continuation body', () => {
+    const body = [
+      '## User',
+      'What is the capital of France?',
+      '## Assistant',
+      'The capital of France is Paris.',
+      'It is also its largest city.',
+    ].join('\n');
+    const r = parseConversation(body, { fallbackDate: '2026-08-11' });
+    expect(r.matched_pattern_id).toBe('markdown-heading-turn');
+    expect(r.messages).toHaveLength(2);
+    expect(r.messages[0].speaker).toBe('User');
+    expect(r.messages[0].text).toBe('What is the capital of France?');
+    expect(r.messages[1].speaker).toBe('Assistant');
+    expect(r.messages[1].text).toBe(
+      'The capital of France is Paris.\nIt is also its largest city.',
+    );
+  });
+
+  test('does not mistake an ordinary ## Summary heading for a turn', () => {
+    const body = ['## Summary', 'This is not a speaker turn.'].join('\n');
+    const r = parseConversation(body, { fallbackDate: '2026-08-11' });
+    expect(r.matched_pattern_id).not.toBe('markdown-heading-turn');
+  });
+});
 
 describe('parseConversation — multi-line continuation (D5)', () => {
   test('iMessage continuation absorbs orphan lines', () => {
@@ -410,7 +469,7 @@ describe('scorePatternFull — full-body scoring (v0.41.18+ Codex P1 #1)', () =>
     const im = BUILTIN_PATTERNS.find((p) => p.id === 'imessage-slack')!;
     expect(scorePatternFull('', im)).toBe(0);
   });
-  test('preamble + 20 matching lines scores 20/(preamble + 20)', () => {
+  test('multi-line format ignores preamble after multiple anchors establish a transcript', () => {
     const im = BUILTIN_PATTERNS.find((p) => p.id === 'imessage-slack')!;
     const preamble = ['## Summary', 'Three sentences.', '> Source: ref', '## Transcript'];
     const matches = Array.from(
@@ -418,8 +477,9 @@ describe('scorePatternFull — full-body scoring (v0.41.18+ Codex P1 #1)', () =>
       (_, i) => `**Garry Tan** (2026-01-29 12:00 PM): message ${i}`,
     );
     const body = [...preamble, ...matches].join('\n');
-    // 24 total non-blank, 20 match → 20/24 ≈ 0.833
-    expect(scorePatternFull(body, im)).toBeCloseTo(20 / 24, 5);
+    // Once two anchors establish a real multi-line transcript, unrelated
+    // preamble/continuation lines no longer dilute the format score.
+    expect(scorePatternFull(body, im)).toBe(1);
   });
   test('preamble-only-no-match scores 0', () => {
     const im = BUILTIN_PATTERNS.find((p) => p.id === 'imessage-slack')!;
@@ -509,6 +569,152 @@ describe('bold-paren-time pattern (Circleback meeting transcripts)', () => {
     expect(r.phase).toBe('regex_match');
     expect(r.matched_pattern_id).toBe('bold-paren-time');
     expect(r.messages).toHaveLength(20);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// bold-time-dash pattern (normalized Slack Markdown)
+// ---------------------------------------------------------------------------
+
+describe('bold-time-dash pattern (normalized Slack Markdown)', () => {
+  test('parses anchors, dash variants, and multi-line continuation text', () => {
+    const body = [
+      '# Team channel — 2026-04-09',
+      '**Alice Example** 09:15 — first line',
+      '- detailed bullet one',
+      '- detailed bullet two',
+      '**Summary Bot** 09:18 – second message',
+      '> continuation of second message',
+      '**Bob Example** 10:01 - final message',
+    ].join('\n');
+    const r = parseConversation(body, { fallbackDate: '2026-04-09' });
+
+    expect(r.phase).toBe('regex_match');
+    expect(r.matched_pattern_id).toBe('bold-time-dash');
+    expect(r.messages).toHaveLength(3);
+    expect(r.messages[0]).toEqual({
+      speaker: 'Alice Example',
+      timestamp: '2026-04-09T09:15:00Z',
+      text: 'first line\n- detailed bullet one\n- detailed bullet two',
+    });
+    expect(r.messages[1]).toEqual({
+      speaker: 'Summary Bot',
+      timestamp: '2026-04-09T09:18:00Z',
+      text: 'second message\n> continuation of second message',
+    });
+    expect(r.messages[2]).toEqual({
+      speaker: 'Bob Example',
+      timestamp: '2026-04-09T10:01:00Z',
+      text: 'final message',
+    });
+  });
+
+  test('parses one anchor with a long Markdown continuation body', () => {
+    const continuation = Array.from(
+      { length: 30 },
+      (_, index) => `- supporting detail ${index + 1}`,
+    );
+    const body = [
+      '**Alice Example** 09:15 — summary',
+      ...continuation,
+    ].join('\n');
+    const r = parseConversation(body, { fallbackDate: '2026-04-09' });
+
+    expect(r.matched_pattern_id).toBe('bold-time-dash');
+    expect(r.messages).toHaveLength(1);
+    expect(r.messages[0].text.split('\n')).toHaveLength(31);
+    expect(r.messages[0].text.endsWith('- supporting detail 30')).toBe(true);
+  });
+
+  test('does not treat one stray anchor in long prose as a conversation', () => {
+    const before = Array.from(
+      { length: 150 },
+      (_, index) => `Prose paragraph before ${index + 1}.`,
+    );
+    const after = Array.from(
+      { length: 150 },
+      (_, index) => `Prose paragraph after ${index + 1}.`,
+    );
+    const body = [
+      ...before,
+      '**Deadline** 09:15 — quoted schedule entry',
+      ...after,
+    ].join('\n');
+    const r = parseConversation(body, { fallbackDate: '2026-04-09' });
+
+    expect(r.phase).toBe('no_match');
+    expect(r.messages).toEqual([]);
+  });
+
+  test('uses date headings to advance the frontmatter date anchor', () => {
+    const body = [
+      '## 2026-04-09',
+      '**Alice Example** 23:59 — day one',
+      '## 2026-04-10',
+      '**Bob Example** 00:01 — day two',
+    ].join('\n');
+    const r = parseConversation(body, { fallbackDate: '2026-04-09' });
+
+    expect(r.matched_pattern_id).toBe('bold-time-dash');
+    expect(r.messages.map((message) => message.timestamp)).toEqual([
+      '2026-04-09T23:59:00Z',
+      '2026-04-10T00:01:00Z',
+    ]);
+  });
+
+  test('uses page date and preserves the time-only timezone policy', () => {
+    const body = '**Alice Example** 09:15 — hello';
+    const withoutTimezone = parseConversation(body, {
+      page: makePage({ date: '2026-04-09' }),
+    });
+    const withTimezone = parseConversation(body, {
+      page: makePage({
+        date: '2026-04-09',
+        timezone: 'America/Los_Angeles',
+      }),
+    });
+
+    expect(withoutTimezone.messages[0].timestamp).toBe(
+      '2026-04-09T09:15:00Z',
+    );
+    expect(withoutTimezone.timezone_warning).toContain('bold-time-dash');
+    // Current time-only policy records the captured wall-clock fields with Z;
+    // timezone metadata suppresses the warning but does not convert the time.
+    expect(withTimezone.messages[0].timestamp).toBe('2026-04-09T09:15:00Z');
+    expect(withTimezone.timezone_warning).toBeUndefined();
+  });
+
+  test('does not shadow existing bold transcript formats', () => {
+    const opts = { fallbackDate: '2026-04-09' };
+
+    expect(
+      parseConversation('**Alice Example** (00:00): hello', opts)
+        .matched_pattern_id,
+    ).toBe('bold-paren-time');
+    expect(
+      parseConversation('**Alice Example** (9:15 AM): hello', opts)
+        .matched_pattern_id,
+    ).toBe('bold-paren-time-12h');
+    expect(
+      parseConversation('**Alice Example:** hello', opts).matched_pattern_id,
+    ).toBe('bold-name-no-time');
+    expect(
+      parseConversation(
+        '**Alice Example** (2026-04-09 9:15 AM): hello',
+        opts,
+      ).matched_pattern_id,
+    ).toBe('imessage-slack');
+  });
+
+  test('rejects invalid 24-hour times', () => {
+    const body = [
+      '**Alice Example** 24:00 — invalid hour',
+      '**Bob Example** 09:60 — invalid minute',
+    ].join('\n');
+    const r = parseConversation(body, { fallbackDate: '2026-04-09' });
+
+    expect(r.phase).toBe('no_match');
+    expect(r.messages).toEqual([]);
   });
 });
 
@@ -777,5 +983,88 @@ describe('parseConversation — full-body fallback', () => {
     // Post-fix: no_match because 1/301 < 0.05 acceptance floor.
     expect(r.phase).toBe('no_match');
     expect(r.messages).toHaveLength(0);
+  });
+});
+
+describe('unrecognized_headings — folded speaker headings surface (#4136)', () => {
+  const mk = (label: string) =>
+    `## User\n\nWhat is the deploy command?\n\n## ${label}\n\nRun the deploy script from the repo root.\n\n## User\n\nThanks.\n`;
+
+  test('THE repro: ## Claude folds into the previous turn and is REPORTED', () => {
+    const r = parseConversation(mk('Claude'), {});
+    expect(r.phase).toBe('regex_match');
+    expect(r.matched_pattern_id).toBe('markdown-heading-turn');
+    expect(r.messages.length).toBe(2); // the fold itself (unchanged behavior)
+    expect(r.messages.map((m) => m.speaker)).toEqual(['User', 'User']);
+    expect(r.unrecognized_headings).toEqual(['Claude']);
+  });
+
+  test('the OTHER fold site: ## Assistant Bot passes quick_reject, fails regex, is reported', () => {
+    const r = parseConversation(mk('Assistant Bot'), {});
+    expect(r.phase).toBe('regex_match');
+    expect(r.messages.length).toBe(2);
+    expect(r.unrecognized_headings).toEqual(['Assistant Bot']);
+  });
+
+  test('#### User (depth outside the pattern) is reported as a folded heading', () => {
+    const r = parseConversation(mk('Claude').replace('## Claude', '#### User'), {});
+    expect(r.unrecognized_headings).toEqual(['User']);
+  });
+
+  test('a heading dropped BEFORE the first anchor is still reported (content silently discarded)', () => {
+    const body = `## Claude\n\nOrphan reply before any anchor.\n\n## User\n\nQuestion?\n\n## Assistant\n\nAnswer.\n`;
+    const r = parseConversation(body, {});
+    expect(r.phase).toBe('regex_match');
+    expect(r.unrecognized_headings).toEqual(['Claude']);
+  });
+
+  test('NO false positive: a clean User/Assistant transcript leaves the field undefined', () => {
+    const body = `## User\n\nQuestion?\n\n## Assistant\n\nAnswer.\n`;
+    const r = parseConversation(body, {});
+    expect(r.phase).toBe('regex_match');
+    expect(r.messages.length).toBe(2);
+    expect(r.unrecognized_headings).toBeUndefined();
+  });
+
+  test('NO false positive: a heading inside a code fence is not reported (answers paste markdown)', () => {
+    const body = [
+      '## User', '', 'Show me the doc template.', '',
+      '## Assistant', '', '```', '## Claude', '## Summary', '```', 'Done.', '',
+      '## User', '', 'Thanks.',
+    ].join('\n');
+    const r = parseConversation(body, {});
+    expect(r.phase).toBe('regex_match');
+    expect(r.messages.length).toBe(3);
+    expect(r.unrecognized_headings).toBeUndefined();
+  });
+
+  test('long prose headings are not collected (section titles, not lost speakers)', () => {
+    const body = `## User\n\nQ?\n\n## Assistant\n\nA.\n\n## How We Should Think About Deploys Going Forward\n\nnotes\n`;
+    const r = parseConversation(body, {});
+    expect(r.phase).toBe('regex_match');
+    expect(r.unrecognized_headings).toBeUndefined(); // >3 tokens — not speaker-shaped-ish
+  });
+
+  test('ordinary doc headings ARE reported (policy lives in the caller, not here)', () => {
+    const body = `## User\n\nQ?\n\n## Assistant\n\nA.\n\n## Summary\n\nwrap-up notes\n`;
+    const r = parseConversation(body, {});
+    expect(r.unrecognized_headings).toEqual(['Summary']);
+  });
+
+  test('labels dedupe and cap; parse behavior is unchanged by collection', () => {
+    const repeated = Array.from({ length: 30 }, (_, i) => `## Ghost${i}\n\nx.\n`).join('\n');
+    const body = `## User\n\nQ?\n\n## Assistant\n\nA.\n\n${repeated}`;
+    const r = parseConversation(body, {});
+    expect(r.unrecognized_headings!.length).toBeLessThanOrEqual(10);
+  });
+
+  test('applyPattern 3-arg call keeps compiling and behaving identically (back-compat)', () => {
+    const entry = BUILTIN_PATTERNS.find((p) => p.id === 'markdown-heading-turn')!;
+    const messages = applyPattern('## User\nhello\n## Assistant\nhi', entry, {
+      fallbackDate: '2026-01-01',
+      timezone: undefined,
+      source: 'explicit',
+    });
+    expect(messages.length).toBe(2);
   });
 });

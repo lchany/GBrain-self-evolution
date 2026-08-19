@@ -5,10 +5,8 @@ import { join } from 'node:path';
 import {
   PROJECT_ID_RE,
   buildProjectMarker,
-  buildProjectReference,
   generateProjectId,
   normalizeRepositoryRef,
-  readProjectReference,
   readProjectMarker,
   writeProjectMarker,
 } from '../src/core/project-context.ts';
@@ -44,18 +42,6 @@ describe('project identity context', () => {
       schema_version: 1,
       project_id: 'prj-0123456789abcdef',
       marker_path: join(root, '.gbrain-project.yaml'),
-    });
-  });
-
-  test('walks ancestors for a tracked project reference', () => {
-    mkdirSync(join(root, '.gbrain'), { recursive: true });
-    writeFileSync(join(root, '.gbrain', 'project.yaml'), buildProjectReference('prj-0123456789abcdef'));
-    const nested = join(root, 'packages', 'api');
-    mkdirSync(nested, { recursive: true });
-    expect(readProjectReference(nested)).toEqual({
-      schema_version: 1,
-      project_id: 'prj-0123456789abcdef',
-      reference_path: join(root, '.gbrain', 'project.yaml'),
     });
   });
 

@@ -21,7 +21,7 @@
  * regression trip-wire if anyone later re-hardcodes a view back into a duplicate)
  * and that the cross-modal panel models are all present in canonical.
  *
- * Prices verified 2026-06-03 against published provider pricing:
+ * Prices verified 2026-07-26 against published provider pricing:
  *   - Anthropic: https://platform.claude.com/docs/en/about-claude/models/overview
  *   - OpenAI:    https://openai.com/api/pricing
  *   - Google:    https://ai.google.dev/gemini-api/docs/pricing
@@ -54,8 +54,9 @@ export const CANONICAL_PRICING: Record<string, ModelPricing> = {
   // ── Anthropic ──────────────────────────────────────────────────────────
   // Fable 5: Anthropic's top tier, above Opus. $10 in / $50 out.
   'anthropic:claude-fable-5':             { input: 10.00, output: 50.00 },
-  // Opus 4.x: $5 in / $25 out. 4.8 (released 2026-05-28) shares 4.7's
-  // per-token rate — closes gbrain#1819.
+  // Opus 4.x/5: $5 in / $25 out. Opus 5 (new generation) shares the same
+  // per-token rate as 4.8 (released 2026-05-28) — closes gbrain#1819.
+  'anthropic:claude-opus-5':              { input:  5.00, output: 25.00 },
   'anthropic:claude-opus-4-8':            { input:  5.00, output: 25.00 },
   'anthropic:claude-opus-4-7':            { input:  5.00, output: 25.00 },
   'anthropic:claude-opus-4-6':            { input:  5.00, output: 25.00 },
@@ -75,9 +76,27 @@ export const CANONICAL_PRICING: Record<string, ModelPricing> = {
   'openai:gpt-4o':                        { input:  2.50, output: 10.00 },
   'openai:gpt-4o-mini':                   { input:  0.15, output:  0.60 },
   'openai:gpt-5':                         { input:  5.00, output: 20.00 },
+  // gpt-5.2: rates from the OpenAI recipe chat touchpoint (verified
+  // 2026-04-20). Needed here because it's the cross-modal DEFAULT_SLOTS
+  // slot-A model — without a canonical entry estimateCost silently drops
+  // slot A from the --max-usd pre-flight and est_cost_usd audit rows.
+  'openai:gpt-5.2':                       { input:  1.25, output: 10.00 },
   'openai:gpt-5.5':                       { input:  4.00, output: 16.00 },
+  // gpt-5.6 family (GA 2026-07-09; rates cross-checked 2026-08-17 across
+  // aggregator trackers — re-verify against platform.openai.com/pricing at
+  // next release). The bare `gpt-5.6` id is OpenAI's rolling alias for the
+  // family flagship (sol). These rows are LOAD-BEARING for latest-model
+  // discovery (src/core/ai/openai-latest.ts): only priced ids are eligible
+  // as defaults, so budget caps never fail closed on a discovered model.
+  'openai:gpt-5.6':                       { input:  5.00, output: 30.00 },
+  'openai:gpt-5.6-sol':                   { input:  5.00, output: 30.00 },
+  'openai:gpt-5.6-terra':                 { input:  2.50, output: 15.00 },
+  'openai:gpt-5.6-luna':                  { input:  1.00, output:  6.00 },
 
   // ── Google ─────────────────────────────────────────────────────────────
+  // `gemini-1.5-pro` was retired by Google (#3510); kept so historical
+  // usage/audit rows still price. Not a valid default — it's deliberately
+  // absent from the google recipe's chat list.
   'google:gemini-1.5-pro':                { input:  1.25, output:  5.00 },
   // Gemini 2.0 Flash: $0.10 in / $0.40 out (verified 2026-06-03). Reconciled
   // from a stale $0.30/$1.20 entry that had drifted in takes-quality-eval.
@@ -87,7 +106,12 @@ export const CANONICAL_PRICING: Record<string, ModelPricing> = {
 
   // ── Together / DeepSeek (cross-modal-eval panel) ───────────────────────
   'together:meta-llama/Llama-3.3-70B-Instruct-Turbo': { input: 0.88, output: 0.88 },
+  // `deepseek-chat` was retired by DeepSeek 2026-07-24 (#1255); kept so
+  // historical usage/audit rows still price. New calls use the v4 names.
   'deepseek:deepseek-chat':               { input:  0.14, output:  0.28 },
+  // DeepSeek v4 (verified 2026-07-27 at api-docs.deepseek.com): cache-miss rates.
+  'deepseek:deepseek-v4-flash':           { input:  0.14, output:  0.28 },
+  'deepseek:deepseek-v4-pro':             { input:  0.435, output: 0.87 },
 };
 
 /**
@@ -117,5 +141,25 @@ export function canonicalLookup(
   const { provider, model } = splitProviderModelId(modelId);
   if (!model) return undefined;
   const key = provider ? `${provider}:${model}` : `anthropic:${model}`;
-  return CANONICAL_PRICING[key];
+  const normalized = CANONICAL_PRICING[key];
+  if (normalized) return normalized;
+  // 3. #4123 (TODOS P3 case-sensitivity): case-insensitive fallback, folding
+  //    BOTH sides — some canonical keys carry cased model tails verbatim
+  //    (Llama-3.3-70B-...), so folding only the probe would miss those. Exact
+  //    matches above stay first, so all-lowercase lookups pay nothing new.
+  //    Safe only while no two canonical keys collide case-insensitively —
+  //    pinned by test/model-pricing.test.ts.
+  const folded = canonicalFoldedView();
+  return folded[modelId.toLowerCase()] ?? folded[key.toLowerCase()];
+}
+
+let _canonicalFoldedView: Record<string, ModelPricing> | null = null;
+function canonicalFoldedView(): Record<string, ModelPricing> {
+  if (!_canonicalFoldedView) {
+    _canonicalFoldedView = {};
+    for (const [k, v] of Object.entries(CANONICAL_PRICING)) {
+      _canonicalFoldedView[k.toLowerCase()] = v;
+    }
+  }
+  return _canonicalFoldedView;
 }

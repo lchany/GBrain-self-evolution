@@ -44,6 +44,13 @@ export interface ParsedMarkdown {
   timeline: string;
   slug: string;
   type: PageType;
+  /**
+   * #1035: true when `type` came from an explicit frontmatter `type:` field,
+   * false when it was inferred from the file path (or defaulted to 'concept').
+   * Importers use this to preserve an existing page's type on round-trip:
+   * explicit frontmatter type is an override; absence means "don't change it".
+   */
+  typeExplicit?: boolean;
   title: string;
   tags: string[];
   /** Present iff opts.validate. Empty array means no errors. */
@@ -67,6 +74,45 @@ export function coerceFrontmatterString(v: unknown): string {
   if (v == null) return '';
   if (v instanceof Date) return v.toISOString().slice(0, 10);
   return String(v);
+}
+
+/**
+ * Byte offset of the first character AFTER the closing frontmatter fence —
+ * i.e. where the body starts and where a body-only editor may safely operate
+ * without ever touching frontmatter bytes.
+ *
+ * Fence semantics mirror collectValidationErrors exactly (the canonical
+ * definition): leading blank lines are allowed before the opener, fences are
+ * matched with trim() so CRLF line endings (`---\r`) count. Returns 0 when the
+ * file has no frontmatter at all (first non-empty line is not `---`) — there
+ * is no fence to protect, the whole file is body. Returns 0 for an UNCLOSED
+ * fence too; callers that must not edit such files should pre-validate with
+ * parseMarkdown({validate:true}) and treat MISSING_CLOSE as a blocker (the
+ * backlinks fixer does).
+ */
+export function frontmatterBodyOffset(content: string): number {
+  const lines = content.split('\n');
+
+  let offset = 0;
+  let i = 0;
+  // Skip leading blank lines.
+  for (; i < lines.length; i++) {
+    if (lines[i].trim().length > 0) break;
+    offset += lines[i].length + 1;
+  }
+  if (i >= lines.length) return 0; // empty / whitespace-only file
+  if (lines[i].trim() !== '---') return 0; // no frontmatter
+
+  offset += lines[i].length + 1; // consume the opening fence line
+  for (i = i + 1; i < lines.length; i++) {
+    const isLast = i === lines.length - 1;
+    const lineLen = lines[i].length + (isLast ? 0 : 1);
+    offset += lineLen;
+    if (lines[i].trim() === '---') {
+      return Math.min(offset, content.length);
+    }
+  }
+  return 0; // unclosed fence — no safe body offset
 }
 
 /**
@@ -132,10 +178,20 @@ export function parseMarkdown(
   // coerceFrontmatterString turns a scalar/date into a usable string (a date slug
   // `2024-06-01` is legitimate); the NON_STRING_FIELD lint finding below still
   // surfaces the un-quoted field so it can be cleaned up.
-  const type = coerceFrontmatterString(frontmatter.type) || (
+  const explicitType = coerceFrontmatterString(frontmatter.type);
+  const type = explicitType || (
     opts?.activePack ? inferTypeFromPack(filePath, opts.activePack) : inferType(filePath)
   );
-  const title = coerceFrontmatterString(frontmatter.title).trim() || inferTitle(filePath);
+  // #2446: title precedence is frontmatter `title:` > the body's first H1 >
+  // the slug/filename-humanized fallback. Slug-based imports (contacts,
+  // calendar) write a correct `# Heading` but no frontmatter title; without
+  // the H1 fallback they get junk titles humanized from the slug
+  // (`Contact 20170928 5 John Defalco`), which also breaks anything keyed on
+  // the title (e.g. the by-mention gazetteer's first-token bucketing).
+  const title =
+    coerceFrontmatterString(frontmatter.title).trim() ||
+    inferTitleFromBody(body) ||
+    inferTitle(filePath);
   const tags = extractTags(frontmatter);
   const slug = coerceFrontmatterString(frontmatter.slug) || inferSlug(filePath);
 
@@ -151,6 +207,7 @@ export function parseMarkdown(
     timeline: timeline.trim(),
     slug,
     type,
+    typeExplicit: explicitType !== '',
     title,
     tags,
   };
@@ -297,11 +354,25 @@ function collectValidationErrors(
     }
   }
 
-  // 6. YAML_PARSE — gray-matter threw.
-  if (ctx.yamlParseError) {
+  const looksLikeFrontmatter = hasFrontmatterFieldSyntax(fmBody);
+
+  // 6. YAML_PARSE — validate the fenced YAML directly. gray-matter normally
+  // throws for malformed frontmatter, but it can also return the whole file as
+  // body with empty data, so the validation surface must not depend only on
+  // gray-matter's parse path. Gate this on frontmatter-shaped fields so a
+  // leading Markdown thematic break / epigraph is preserved as body content.
+  let detectedYamlParseError = looksLikeFrontmatter ? ctx.yamlParseError : null;
+  if (!detectedYamlParseError && looksLikeFrontmatter) {
+    try {
+      yamlSafeLoad(fmBody);
+    } catch (e) {
+      detectedYamlParseError = e as Error;
+    }
+  }
+  if (detectedYamlParseError) {
     errors.push({
       code: 'YAML_PARSE',
-      message: `YAML parse failed: ${ctx.yamlParseError.message}`,
+      message: `YAML parse failed: ${detectedYamlParseError.message}`,
       line: firstNonEmpty + 1,
     });
   }
@@ -331,6 +402,17 @@ function collectValidationErrors(
       });
     }
   }
+}
+
+function hasFrontmatterFieldSyntax(fmBody: string): boolean {
+  for (const line of fmBody.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || trimmed.startsWith('#')) continue;
+    if (/^(?:['"][^'"]+['"]|[A-Za-z_][\w.-]*)\s*:/.test(trimmed)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -600,6 +682,31 @@ function inferTypeWithPrefixes(
     }
   }
   return 'concept';
+}
+
+/**
+ * #2446: derive a title from the body's first ATX H1 (`# Heading`).
+ *
+ * Returns the trimmed heading text with the leading `# ` and any decorative
+ * trailing `#` run stripped, or '' if the body has no H1. Only a SINGLE leading
+ * `#` matches — `##`+ (h2 and deeper) are skipped — and lines inside a fenced
+ * code block (```/~~~) are ignored so a `# comment` in a shell snippet can't be
+ * mistaken for the page title.
+ */
+function inferTitleFromBody(body: string): string {
+  let inFence = false;
+  for (const raw of body.split('\n')) {
+    const fence = /^\s*(`{3,}|~{3,})/.exec(raw);
+    if (fence) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    // Exactly one leading `#`, then whitespace, then the heading text.
+    const m = /^#(?!#)\s+(.+?)\s*$/.exec(raw);
+    if (m) return m[1].replace(/\s+#+\s*$/, '').trim();
+  }
+  return '';
 }
 
 function inferTitle(filePath?: string): string {

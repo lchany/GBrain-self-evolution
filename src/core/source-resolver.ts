@@ -16,8 +16,13 @@
 import { readFileSync, lstatSync, type Stats } from 'fs';
 import { join, dirname, resolve } from 'path';
 import type { BrainEngine } from './engine.ts';
-import { SOURCE_ID_RE, isValidSourceId } from './source-id.ts';
+import { isSourceFederated, parseSourceConfig } from './sources-load.ts';
+import { SOURCE_ID_RE, isValidSourceId, ALL_SOURCES } from './source-id.ts';
 import { isTrustedDotfile, realpathOrResolve } from './path-confine.ts';
+
+// Re-export so scope-resolution call sites can import the sentinel from
+// either module (#1712).
+export { ALL_SOURCES };
 
 const DOTFILE = '.gbrain-source';
 // Canonical SOURCE_ID_RE imported from `source-id.ts` (single source of truth).
@@ -82,8 +87,11 @@ export async function resolveSourceId(
   explicit: string | null | undefined,
   cwd: string = process.cwd(),
 ): Promise<string> {
-  // 1. Explicit flag wins.
+  // 1. Explicit flag wins. The __all__ sentinel passes through verbatim
+  //    (#1712) — it is not a source id, so it skips both the regex and
+  //    assertSourceExists; sourceScopeOpts gives it span-everything semantics.
   if (explicit) {
+    if (explicit === ALL_SOURCES) return ALL_SOURCES;
     if (!SOURCE_ID_RE.test(explicit)) {
       throw new Error(`Invalid --source value "${explicit}". Must match [a-z0-9-]{1,32}.`);
     }
@@ -91,9 +99,10 @@ export async function resolveSourceId(
     return explicit;
   }
 
-  // 2. Env var.
+  // 2. Env var. Same __all__ pass-through (#2140).
   const env = process.env.GBRAIN_SOURCE;
   if (env && env.length > 0) {
+    if (env === ALL_SOURCES) return ALL_SOURCES;
     if (!SOURCE_ID_RE.test(env)) {
       throw new Error(`Invalid GBRAIN_SOURCE value "${env}". Must match [a-z0-9-]{1,32}.`);
     }
@@ -161,6 +170,35 @@ export async function resolveSourceId(
 }
 
 /**
+ * Engine-free tiers (1-3) of the resolution chain: explicit flag →
+ * GBRAIN_SOURCE env → .gbrain-source dotfile walk. Used by the thin-client
+ * CLI path (#2098), which has no local engine to run tiers 4-6 or
+ * assertSourceExists against — the remote server enforces existence + grant.
+ * Returns null when no engine-free tier fires.
+ */
+export function resolveSourceIdEngineFree(
+  explicit: string | null | undefined,
+  cwd: string = process.cwd(),
+): string | null {
+  if (explicit) {
+    if (explicit === ALL_SOURCES) return ALL_SOURCES; // #1712 sentinel pass-through
+    if (!SOURCE_ID_RE.test(explicit)) {
+      throw new Error(`Invalid --source value "${explicit}". Must match [a-z0-9-]{1,32}.`);
+    }
+    return explicit;
+  }
+  const env = process.env.GBRAIN_SOURCE;
+  if (env && env.length > 0) {
+    if (env === ALL_SOURCES) return ALL_SOURCES; // #2140 sentinel pass-through
+    if (!SOURCE_ID_RE.test(env)) {
+      throw new Error(`Invalid GBRAIN_SOURCE value "${env}". Must match [a-z0-9-]{1,32}.`);
+    }
+    return env;
+  }
+  return readDotfileWalk(cwd);
+}
+
+/**
  * Returns the id of the SINGLE registered non-default source with a
  * local_path, when exactly one such row exists. Returns null when:
  *   - zero non-default sources are registered (fresh install)
@@ -171,6 +209,12 @@ export async function resolveSourceId(
  * Excludes archived sources (`archived = false`) so a soft-deleted source
  * doesn't auto-resolve. Shared by `resolveSourceId` and `resolveSourceWithTier`
  * so the heuristic can't drift between the two entry points.
+ *
+ * NOTE (#2928): this tier deliberately does NOT consult config.federated —
+ * `--no-federated` governs READ mixing, not write routing, and unqualified
+ * `sync`/`import` on a single-vault brain must keep landing in the vault
+ * (#1434, pinned by test/sync-sole-non-default-routing.test.ts). The
+ * unfederate read fix lives in `localFederatedSourceIds` below.
  */
 async function pickSoleNonDefaultSource(engine: BrainEngine): Promise<string | null> {
   // archived column was added in v34 (v0.26.5). Older brains may not have
@@ -287,8 +331,11 @@ export async function resolveSourceWithTier(
   explicit: string | null | undefined,
   cwd: string = process.cwd(),
 ): Promise<{ source_id: string; tier: SourceTier; detail?: string }> {
-  // 1. Explicit flag wins.
+  // 1. Explicit flag wins. __all__ sentinel passes through verbatim (#1712).
   if (explicit) {
+    if (explicit === ALL_SOURCES) {
+      return { source_id: ALL_SOURCES, tier: 'flag', detail: `--source ${ALL_SOURCES} (spans all sources)` };
+    }
     if (!SOURCE_ID_RE.test(explicit)) {
       throw new Error(`Invalid --source value "${explicit}". Must match [a-z0-9-]{1,32}.`);
     }
@@ -296,9 +343,12 @@ export async function resolveSourceWithTier(
     return { source_id: explicit, tier: 'flag', detail: `--source ${explicit}` };
   }
 
-  // 2. Env var.
+  // 2. Env var. Same __all__ pass-through (#2140).
   const env = process.env.GBRAIN_SOURCE;
   if (env && env.length > 0) {
+    if (env === ALL_SOURCES) {
+      return { source_id: ALL_SOURCES, tier: 'env', detail: `GBRAIN_SOURCE=${ALL_SOURCES} (spans all sources)` };
+    }
     if (!SOURCE_ID_RE.test(env)) {
       throw new Error(`Invalid GBRAIN_SOURCE value "${env}". Must match [a-z0-9-]{1,32}.`);
     }
@@ -351,6 +401,196 @@ export async function resolveSourceWithTier(
 
   // 6. Fallback: seeded 'default' source.
   return { source_id: 'default', tier: 'seed_default' };
+}
+
+/**
+ * #3242 parity: the widening set a TRANSPORT should attach for a caller that
+ * carries no operator source grant, or `undefined` when the caller must keep
+ * its scalar scope.
+ *
+ * The gate is deliberately `hasSourceGrant === false` rather than falsy.
+ * `false` is set only for a legacy bearer token whose
+ * `access_tokens.permissions.source_id` is absent — the historical no-grant
+ * floor. `true` is an operator-set scope and `undefined` is an OAuth client,
+ * and neither may widen, so a falsy check would hand OAuth clients the
+ * federated set.
+ *
+ * Resolution is best-effort by design: a source table that cannot be read
+ * leaves the scalar scope standing rather than failing the request, matching
+ * the surrounding transport behaviour.
+ */
+export async function noGrantFederatedScope(
+  engine: BrainEngine,
+  hasSourceGrant: boolean | undefined,
+  sourceId: string | undefined,
+): Promise<string[] | undefined> {
+  if (hasSourceGrant !== false || !sourceId) return undefined;
+  try {
+    return await localFederatedSourceIds(engine, sourceId, 'seed_default');
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * #2561 — compute the federated read scope for an UNQUALIFIED local CLI call.
+ *
+ * `sources add --federated` promises that a `config.federated = true` source
+ * "participates in unqualified `gbrain search` results"
+ * (docs/guides/multi-source-brains.md). This helper turns that promise into a
+ * scope: given the resolved source and WHICH tier resolved it, return
+ * `[resolvedSource, ...other federated source ids]` — or `undefined` when the
+ * expansion must not apply:
+ *
+ *   - explicit tiers (`flag` / `env` / `dotfile`): the user named a source;
+ *     scalar scope stands (that IS the qualified case);
+ *   - no other federated source exists: keep the scalar fast path unchanged;
+ *   - #2928: the resolved source is explicitly isolated (config.federated =
+ *     false): it must not be mixed into a cross-source read in EITHER
+ *     direction, so the scalar scope stands.
+ *
+ * Archived sources are excluded (same rationale as pickSoleNonDefaultSource);
+ * the archived column is v34+, so fall back to the un-archived query on older
+ * brains. Callers put the result on `OperationContext.localFederatedSourceIds`,
+ * consumed by `federatedSearchScope`. Two caller classes exist: local CLI/MCP
+ * stdio (`remote === false`, the original #2561 path) and — via
+ * `noGrantFederatedScope` below — remote transports for a legacy no-grant
+ * bearer token (#3242 parity), where the transport itself decides the caller
+ * may see the federated floor.
+ */
+export async function localFederatedSourceIds(
+  engine: BrainEngine,
+  sourceId: string,
+  tier: SourceTier,
+): Promise<string[] | undefined> {
+  if (tier === 'flag' || tier === 'env' || tier === 'dotfile') return undefined;
+  let rows: Array<{ id: string; config: unknown; archived?: boolean }>;
+  try {
+    rows = await engine.executeRaw<{ id: string; config: unknown; archived?: boolean }>(
+      `SELECT id, config, archived FROM sources WHERE archived = false ORDER BY id`,
+    );
+  } catch {
+    rows = await engine.executeRaw<{ id: string; config: unknown }>(
+      `SELECT id, config FROM sources ORDER BY id`,
+    );
+  }
+  // #2928: an EXPLICITLY isolated anchor (`sources unfederate` /
+  // `--no-federated` → config.federated = false) opted out of cross-source
+  // read mixing — never widen it into the federated set (which would drag
+  // other sources' pages into its unqualified reads and vice versa). Scalar
+  // scope stands. UNSET federated keeps the pre-#2928 widening behavior;
+  // write routing (tier 5.5 above) is deliberately untouched.
+  const resolvedRow = rows.find((row) => row.id === sourceId);
+  if (resolvedRow && parseSourceConfig(resolvedRow.config).federated === false) {
+    return undefined;
+  }
+  const ids = [
+    sourceId,
+    ...rows
+      .filter((row) => row.archived !== true && isSourceFederated(row.config))
+      .map((row) => row.id)
+      .filter((id) => id !== sourceId),
+  ];
+  return ids.length > 1 ? ids : undefined;
+}
+
+/**
+ * Source-guard write policy (`gbrain serve --source-guard`) — the plugin
+ * lanes' fail-closed routing rule.
+ *
+ * A plugin-managed MCP server is user-global and runs with the plugin
+ * snapshot as its cwd, so two ambient resolution tiers lose their meaning:
+ * `dotfile` never finds the user's project pin, and `local_path` can match a
+ * registered source whose local_path happens to CONTAIN the snapshot dir
+ * (e.g. a source registered at $HOME) — the exact silent-wrong-source write
+ * the guard exists to prevent. Under the guard, write/admin ops are allowed
+ * only when the binding is deliberate or unambiguous:
+ *
+ *   flag / env / dotfile   deliberate binding (dotfile still counts: if it
+ *                          resolved, someone placed a pin on the cwd path —
+ *                          a hand-run from a real project, not the snapshot)
+ *   brain_default          the operator configured sources.default
+ *   sole_non_default       exactly one candidate — unambiguous
+ *   seed_default           unambiguous ONLY while 'default' is the sole
+ *                          source; ambiguous the moment others exist
+ *   local_path             blocked — cwd-derived intent is invalid under a
+ *                          plugin-managed serve
+ *
+ * Reads stay unrestricted on every tier (within-brain, and the federated
+ * read scope is transport-computed) — the guard is a WRITE guard.
+ */
+export const WRITE_SAFE_SOURCE_TIERS: ReadonlySet<SourceTier> = new Set([
+  'flag',
+  'env',
+  'dotfile',
+  'brain_default',
+  'sole_non_default',
+]);
+
+/**
+ * Decide whether a write/admin op must be blocked under `--source-guard`
+ * for the given resolution tier. Engine is consulted only on the
+ * `seed_default` tier (source count decides ambiguity); errors fail CLOSED
+ * — if the guard cannot prove the write is unambiguous, it blocks.
+ */
+/**
+ * Which sources-query shape this engine's schema supports. Cached at module
+ * level after the first successful probe so a pre-`archived`-column schema
+ * pays the fallback exception ONCE, not on every guarded write (the guard
+ * runs on the seed_default tier of every write/admin MCP call).
+ */
+let sourcesQueryShape: 'archived' | 'legacy' | null = null;
+
+/** True iff a source other than the seeded 'default' exists. Bounded single-
+ *  row probe (the verdict needs existence, not the list) with the
+ *  pre-`archived`-column fallback. The `legacy` shape is memoized ONLY when
+ *  the archived query fails with a missing-column error — a transient error
+ *  (pool blip, connection reset) must NOT poison the shape for the process
+ *  lifetime (which would make archived-capable brains block forever). Errors
+ *  propagate to the caller, which decides the fail-closed verdict. */
+async function otherSourceExists(engine: BrainEngine): Promise<boolean> {
+  if (sourcesQueryShape !== 'legacy') {
+    try {
+      const rows = await engine.executeRaw<{ id: string }>(
+        `SELECT id FROM sources WHERE id <> 'default' AND archived = false LIMIT 1`,
+      );
+      sourcesQueryShape = 'archived';
+      return rows.length > 0;
+    } catch (err) {
+      // Cache 'legacy' ONLY for a genuine missing-column error; re-throw
+      // anything else so a transient failure doesn't permanently degrade.
+      const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+      const missingColumn = msg.includes('archived') && (msg.includes('column') || msg.includes('does not exist') || msg.includes('no such column'));
+      if (!missingColumn) throw err;
+      sourcesQueryShape = 'legacy';
+    }
+  }
+  const rows = await engine.executeRaw<{ id: string }>(
+    `SELECT id FROM sources WHERE id <> 'default' LIMIT 1`,
+  );
+  return rows.length > 0;
+}
+
+export async function sourceGuardBlocksWrite(
+  engine: BrainEngine,
+  tier: SourceTier,
+): Promise<boolean> {
+  if (WRITE_SAFE_SOURCE_TIERS.has(tier)) return false;
+  // local_path AND seed_default are cwd-derived / seed-fallback tiers under a
+  // plugin serve — block ONLY when the binding is genuinely ambiguous (some
+  // OTHER source exists). A sole-source brain is unambiguous even when its
+  // local_path contains the serve cwd, so it must not be blocked. Engine
+  // failure fails CLOSED.
+  try {
+    return await otherSourceExists(engine);
+  } catch {
+    return true;
+  }
+}
+
+/** Test seam: reset the cached sources-query shape (module-level memo). */
+export function __resetSourceGuardQueryShape(): void {
+  sourcesQueryShape = null;
 }
 
 /** Exposed for tests. */

@@ -79,7 +79,6 @@ export function readProjectReference(startDir: string = process.cwd()): ProjectR
       return reference === null ? null : { ...reference, reference_path: referencePath };
     } catch (error) {
       if (!isMissingFileError(error)) return null;
-      // Missing reference: continue walking toward the project root.
     }
     const parent = dirname(dir);
     if (parent === dir) break;

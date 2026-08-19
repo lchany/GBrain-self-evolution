@@ -1,5 +1,4 @@
 import type { Operation, ParamDef } from '../core/operations.ts';
-import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 
 export interface McpToolDef {
   name: string;
@@ -8,8 +7,20 @@ export interface McpToolDef {
     type: 'object';
     properties: Record<string, unknown>;
     required: string[];
+    /** WP3 (D14.1): emitted ONLY when buildToolDefs runs with strictParams. */
+    additionalProperties?: false;
   };
-  annotations: ToolAnnotations;
+  /**
+   * MCP ToolAnnotations (SDK 1.29+), emitted ONLY when the op defines them —
+   * existing tools keep byte-identical definitions (the byte-equality
+   * regression test depends on absent keys staying absent).
+   */
+  annotations?: {
+    title?: string;
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+  };
 }
 
 /**
@@ -35,48 +46,67 @@ export function paramDefToSchema(p: ParamDef): Record<string, unknown> {
     ...(p.description ? { description: p.description } : {}),
     ...(p.enum ? { enum: p.enum } : {}),
     ...(p.default !== undefined ? { default: p.default } : {}),
-    ...(p.minimum !== undefined ? { minimum: p.minimum } : {}),
-    ...(p.maximum !== undefined ? { maximum: p.maximum } : {}),
+    ...(p.items ? { items: paramDefToSchema(p.items) } : {}),
     ...(p.minLength !== undefined ? { minLength: p.minLength } : {}),
     ...(p.maxLength !== undefined ? { maxLength: p.maxLength } : {}),
+    ...(p.pattern ? { pattern: p.pattern } : {}),
+    ...(p.integer === true ? { multipleOf: 1 } : {}),
+    ...(p.minimum !== undefined ? { minimum: p.minimum } : {}),
+    ...(p.maximum !== undefined ? { maximum: p.maximum } : {}),
     ...(p.minItems !== undefined ? { minItems: p.minItems } : {}),
     ...(p.maxItems !== undefined ? { maxItems: p.maxItems } : {}),
-    ...(p.pattern ? { pattern: p.pattern } : {}),
-    ...(p.items ? { items: paramDefToSchema(p.items) } : {}),
   };
 }
 
-function toolAnnotations(op: Operation): ToolAnnotations {
-  const readOnly = (op.scope ?? 'read') === 'read' || op.mutating === false;
-  const destructive = op.mutating === true || op.scope === 'write' || op.name === 'delete_page';
-  const idempotent = op.name === 'get_page'
-    || op.name === 'list_pages'
-    || op.name === 'delete_page'
-    || (readOnly && op.name !== 'search' && op.name !== 'query');
-  const openWorld = op.name === 'search' || op.name === 'query';
+/**
+ * WP3 (D14.1): when a strict schema closes the property set with
+ * `additionalProperties: false`, the two dispatch-allowlisted passthrough
+ * keys MUST be declared in `properties` — schema-validating clients
+ * (Gemini strict, OpenAI structured outputs) would otherwise strip
+ * `_meta.session_id` and `dry_run` from arguments before they ever reach
+ * the server. Declared only when the op doesn't already declare them
+ * (several ops carry a real `dry_run` param).
+ */
+function strictPassthroughProperties(op: Operation): Record<string, unknown> {
   return {
-    readOnlyHint: readOnly,
-    destructiveHint: destructive,
-    idempotentHint: idempotent,
-    openWorldHint: openWorld,
+    ...('_meta' in op.params ? {} : {
+      _meta: {
+        type: 'object',
+        description: 'MCP client metadata passthrough (e.g. session id); not an operation parameter.',
+      },
+    }),
+    ...('dry_run' in op.params ? {} : { dry_run: { type: 'boolean' } }),
   };
 }
 
-export function buildToolDefs(ops: Operation[]): McpToolDef[] {
-  return ops.map(op => {
-    return {
-      name: op.name,
-      description: op.description,
-      inputSchema: {
-        type: 'object' as const,
-        properties: Object.fromEntries(
+/**
+ * Build MCP tool definitions from operations.
+ *
+ * Default emission (no opts / strictParams false) is BYTE-IDENTICAL to the
+ * pre-WP3 output — pinned by test/mcp-tool-defs.test.ts. With
+ * `strictParams: true` (mcp.strict_params = 'reject'), each inputSchema
+ * additionally declares the `_meta`/`dry_run` passthrough keys and closes
+ * the schema with `additionalProperties: false`, keeping client-side
+ * validation aligned with the server's reject posture.
+ */
+export function buildToolDefs(ops: Operation[], opts?: { strictParams?: boolean }): McpToolDef[] {
+  const strict = opts?.strictParams === true;
+  return ops.map(op => ({
+    name: op.name,
+    description: op.description,
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        ...Object.fromEntries(
           Object.entries(op.params).map(([k, v]) => [k, paramDefToSchema(v)]),
         ),
-        required: Object.entries(op.params)
-          .filter(([, v]) => v.required)
-          .map(([k]) => k),
+        ...(strict ? strictPassthroughProperties(op) : {}),
       },
-      annotations: toolAnnotations(op),
-    };
-  });
+      required: Object.entries(op.params)
+        .filter(([, v]) => v.required)
+        .map(([k]) => k),
+      ...(strict ? { additionalProperties: false as const } : {}),
+    },
+    ...(op.annotations ? { annotations: op.annotations } : {}),
+  }));
 }

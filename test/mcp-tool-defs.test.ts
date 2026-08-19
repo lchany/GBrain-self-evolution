@@ -3,9 +3,9 @@
  *
  * Before v0.15 the mapping lived inline in src/mcp/server.ts. After the
  * extraction, buildToolDefs is the single source of truth; the subagent tool
- * registry calls it with a filtered OPERATIONS subset. This test compares the
- * extracted output with an independent reference mapper so MCP-facing schema
- * and annotation changes cannot drift silently.
+ * registry calls it with a filtered OPERATIONS subset. This test pins the
+ * extracted output to the pre-extraction shape byte-for-byte so we don't
+ * silently drift the MCP-facing tool schema.
  */
 
 import { describe, test, expect } from 'bun:test';
@@ -13,8 +13,9 @@ import { operations } from '../src/core/operations.ts';
 import { buildToolDefs, paramDefToSchema } from '../src/mcp/tool-defs.ts';
 import type { ParamDef } from '../src/core/operations.ts';
 
-// Reference shape mirrors the canonical `paramDefToSchema` contract from
-// src/mcp/tool-defs.ts. Drift between both mappings fails loudly.
+// Reference shape — mirrors the canonical `paramDefToSchema` helper from
+// src/mcp/tool-defs.ts. Drift between the helper and this reference fails
+// the byte-equality test loudly.
 //
 // v0.34 update: paramDefToSchema is recursive on `items` so nested
 // array-of-arrays preserves the inner shape on the MCP wire. The reference
@@ -31,13 +32,6 @@ type ParamDefLike = {
   description?: string;
   enum?: string[];
   default?: unknown;
-  minimum?: number;
-  maximum?: number;
-  minLength?: number;
-  maxLength?: number;
-  minItems?: number;
-  maxItems?: number;
-  pattern?: string;
   items?: ParamDefLike;
 };
 function referenceParamDefToSchema(p: ParamDefLike): Record<string, unknown> {
@@ -46,52 +40,51 @@ function referenceParamDefToSchema(p: ParamDefLike): Record<string, unknown> {
     ...(p.description ? { description: p.description } : {}),
     ...(p.enum ? { enum: p.enum } : {}),
     ...(p.default !== undefined ? { default: p.default } : {}),
-    ...(p.minimum !== undefined ? { minimum: p.minimum } : {}),
-    ...(p.maximum !== undefined ? { maximum: p.maximum } : {}),
-    ...(p.minLength !== undefined ? { minLength: p.minLength } : {}),
-    ...(p.maxLength !== undefined ? { maxLength: p.maxLength } : {}),
-    ...(p.minItems !== undefined ? { minItems: p.minItems } : {}),
-    ...(p.maxItems !== undefined ? { maxItems: p.maxItems } : {}),
-    ...(p.pattern ? { pattern: p.pattern } : {}),
     ...(p.items ? { items: referenceParamDefToSchema(p.items) } : {}),
   };
 }
-function referenceToolMap(ops: typeof operations) {
-  return ops.map(op => {
-    const readOnly = (op.scope ?? 'read') === 'read' || op.mutating === false;
-    const destructive = op.mutating === true || op.scope === 'write' || op.name === 'delete_page';
-    const idempotent = op.name === 'get_page'
-      || op.name === 'list_pages'
-      || op.name === 'delete_page'
-      || (readOnly && op.name !== 'search' && op.name !== 'query');
-    const openWorld = op.name === 'search' || op.name === 'query';
-    return {
-      name: op.name,
-      description: op.description,
-      inputSchema: {
-        type: 'object' as const,
-        properties: Object.fromEntries(
-          Object.entries(op.params).map(([k, v]) => [k, referenceParamDefToSchema(v)]),
-        ),
-        required: Object.entries(op.params)
-          .filter(([, v]) => v.required)
-          .map(([k]) => k),
-      },
-      annotations: {
-        readOnlyHint: readOnly,
-        destructiveHint: destructive,
-        idempotentHint: idempotent,
-        openWorldHint: openWorld,
-      },
-    };
-  });
+function legacyInlineMap(ops: typeof operations) {
+  return ops.map(op => ({
+    name: op.name,
+    description: op.description,
+    inputSchema: {
+      type: 'object' as const,
+      properties: Object.fromEntries(
+        Object.entries(op.params).map(([k, v]) => [k, referenceParamDefToSchema(v)]),
+      ),
+      required: Object.entries(op.params)
+        .filter(([, v]) => v.required)
+        .map(([k]) => k),
+    },
+    // MEMORY_VERBS v1: ToolAnnotations passthrough, emitted ONLY when the op
+    // defines them. The byte-stability contract is per-op: ops WITHOUT
+    // annotations keep the exact pre-v1 shape (pinned explicitly below).
+    ...(op.annotations ? { annotations: op.annotations } : {}),
+  }));
 }
 
 describe('buildToolDefs', () => {
-  test('output equals the independent reference mapping byte-for-byte', () => {
+  test('output equals pre-extraction inline mapping byte-for-byte', () => {
     const extracted = buildToolDefs(operations);
-    const inline = referenceToolMap(operations);
+    const inline = legacyInlineMap(operations);
     expect(JSON.stringify(extracted)).toBe(JSON.stringify(inline));
+  });
+
+  test('explicit strictParams:false / empty opts stay byte-identical to the default emission (WP3)', () => {
+    const base = JSON.stringify(buildToolDefs(operations));
+    expect(JSON.stringify(buildToolDefs(operations, {}))).toBe(base);
+    expect(JSON.stringify(buildToolDefs(operations, { strictParams: false }))).toBe(base);
+  });
+
+  test('ops without annotations keep the pre-annotations shape exactly (no annotations key)', () => {
+    const extracted = buildToolDefs(operations);
+    for (const def of extracted) {
+      const op = operations.find(o => o.name === def.name)!;
+      if (!op.annotations) {
+        expect('annotations' in def).toBe(false);
+        expect(Object.keys(def)).toEqual(['name', 'description', 'inputSchema']);
+      }
+    }
   });
 
   test('preserves operation count', () => {
@@ -116,35 +109,103 @@ describe('buildToolDefs', () => {
       expect(Array.isArray(def.inputSchema.required)).toBe(true);
     }
   });
+});
 
-  test('classifies read and write operations with conservative MCP annotations', () => {
-    const defs = buildToolDefs(operations);
-    const search = defs.find(def => def.name === 'search');
-    const putPage = defs.find(def => def.name === 'put_page');
-    const matchProject = defs.find(def => def.name === 'match_project');
-    const ensureProject = defs.find(def => def.name === 'ensure_project');
+// ---------------------------------------------------------------------------
+// WP3 (D14.1) — strictParams emission state.
+//
+// With mcp.strict_params = 'reject' the transports build schemas that CLOSE
+// the property set (`additionalProperties: false`); the two dispatch-level
+// passthrough keys (`_meta`, `dry_run`) must then be DECLARED so
+// schema-validating clients (Gemini strict, OpenAI structured outputs) don't
+// strip them from arguments. Both emission states are pinned here; the
+// default state's byte-identity is pinned above.
+// ---------------------------------------------------------------------------
 
-    expect(search?.annotations).toEqual({
-      readOnlyHint: true,
-      destructiveHint: false,
-      idempotentHint: false,
-      openWorldHint: true,
-    });
-    expect(putPage?.annotations).toEqual({
-      readOnlyHint: false,
-      destructiveHint: true,
-      idempotentHint: false,
-      openWorldHint: false,
-    });
-    expect(matchProject?.inputSchema.required).toEqual(['project_id']);
-    expect(matchProject?.inputSchema.properties).not.toHaveProperty('repository_ref');
-    expect(ensureProject?.annotations).toEqual({
-      readOnlyHint: false,
-      destructiveHint: true,
-      idempotentHint: false,
-      openWorldHint: false,
-    });
-    expect(ensureProject?.inputSchema.properties).not.toHaveProperty('repository_ref');
+describe('buildToolDefs strictParams emission (WP3/D14.1)', () => {
+  const strictDefs = buildToolDefs(operations, { strictParams: true });
+
+  test('every strict def closes the schema and declares _meta + dry_run', () => {
+    for (const def of strictDefs) {
+      expect(def.inputSchema.additionalProperties).toBe(false);
+      const props = def.inputSchema.properties as Record<string, { type?: string }>;
+      expect(props._meta).toBeDefined();
+      expect(props._meta.type).toBe('object');
+      expect(props.dry_run).toBeDefined();
+      expect(props.dry_run.type).toBe('boolean');
+    }
+  });
+
+  test('an op with a REAL declared dry_run param keeps its own schema (no clobber)', () => {
+    const op = operations.find(o => 'dry_run' in o.params)!;
+    expect(op).toBeDefined();
+    const def = strictDefs.find(d => d.name === op.name)!;
+    const props = def.inputSchema.properties as Record<string, { description?: string }>;
+    // The declared param's own description survives; the injected fallback
+    // (bare {type:'boolean'}) is only used when the op doesn't declare one.
+    expect(props.dry_run.description).toBe(op.params.dry_run.description);
+  });
+
+  test('strict mode changes ONLY additionalProperties + the two passthrough keys', () => {
+    const base = buildToolDefs(operations);
+    for (let i = 0; i < base.length; i++) {
+      const strict = strictDefs[i];
+      const loose = base[i];
+      expect(strict.name).toBe(loose.name);
+      // Same declared params, byte-identical per-param schemas.
+      for (const [k, v] of Object.entries(loose.inputSchema.properties)) {
+        expect(JSON.stringify((strict.inputSchema.properties as Record<string, unknown>)[k])).toBe(JSON.stringify(v));
+      }
+      const extraKeys = Object.keys(strict.inputSchema.properties)
+        .filter(k => !(k in loose.inputSchema.properties));
+      expect(extraKeys.sort()).toEqual(['_meta', 'dry_run'].filter(k => !(k in loose.inputSchema.properties)).sort());
+      expect(strict.inputSchema.required).toEqual(loose.inputSchema.required);
+    }
+  });
+
+  test('default emission never carries additionalProperties', () => {
+    for (const def of buildToolDefs(operations)) {
+      expect('additionalProperties' in def.inputSchema).toBe(false);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WP3 (T6) — param-description completeness walker.
+//
+// Every param of every non-localOnly op is an agent-facing contract: a param
+// without a description is exactly the "unguessable arg names" consumer
+// complaint. localOnly ops are exempt (operator-facing CLI surface). Mirrors
+// the findArrayWithoutItems drift-guard pattern below.
+// ---------------------------------------------------------------------------
+
+describe('param description completeness (WP3)', () => {
+  test('every non-localOnly op param carries a non-empty description', () => {
+    const violations: string[] = [];
+    for (const op of operations) {
+      if (op.localOnly) continue;
+      for (const [key, def] of Object.entries(op.params)) {
+        if (typeof def.description !== 'string' || def.description.trim() === '') {
+          violations.push(`${op.name}.${key}`);
+        }
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  // WP4 (amendment 22): every non-localOnly op must carry an `area` — the
+  // request_tools catalog groups by it, and an op missing from the central
+  // OP_AREAS map in operations.ts would silently land in the 'other' bucket.
+  // Area NAMES are non-contractual; presence is not.
+  test('every non-localOnly op carries a non-empty area (WP4)', () => {
+    const violations: string[] = [];
+    for (const op of operations) {
+      if (op.localOnly) continue;
+      if (typeof op.area !== 'string' || op.area.trim() === '') {
+        violations.push(op.name);
+      }
+    }
+    expect(violations).toEqual([]);
   });
 });
 

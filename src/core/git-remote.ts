@@ -269,8 +269,7 @@ export type RepoState =
  * Classify the on-disk state of a clone. Used by performSync to decide
  * whether to run pull (healthy), re-clone (missing/no-git/not-a-dir),
  * refuse with corruption error (corrupted), or refuse with rebase-clone
- * hint (url-drift). Local-only sources with no expected remote are healthy
- * when Git can resolve their repository metadata; they do not need origin.
+ * hint (url-drift).
  */
 export function validateRepoState(
   repoPath: string,
@@ -289,9 +288,7 @@ export function validateRepoState(
   if (expectedRemoteUrl === undefined) {
     try {
       execFileSync('git', ['-C', repoPath, 'rev-parse', '--git-dir'], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        timeout: 10_000,
-        env: { ...process.env, ...GIT_ENV },
+        stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000, env: { ...process.env, ...GIT_ENV },
       });
       return 'healthy';
     } catch {
@@ -407,7 +404,7 @@ export function hasTrackedContent(path: string): boolean {
  * transport. Default stays `never`. These ops act on an ALREADY-validated origin
  * (set + checked at clone time); `http.followRedirects=false` is the live guard.
  */
-function durableSsrfFlags(): string[] {
+export function durableSsrfFlags(): string[] {
   const fileAllow = process.env.GBRAIN_GIT_ALLOW_FILE_TRANSPORT === '1' ? 'always' : 'never';
   return [
     '-c', 'http.followRedirects=false',

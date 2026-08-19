@@ -5,7 +5,8 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { chromium, type Page } from 'playwright';
 
 const BASE_URL = 'http://127.0.0.1:4173';
-const EVIDENCE_DIR = '/home/l30002999/source_code/gbrain/.omo/evidence/gbrain-review-ui-chinese-redesign/task-9-visual-qa';
+const EVIDENCE_DIR = process.env.GBRAIN_REVIEW_VISUAL_EVIDENCE_DIR
+  ?? join(process.cwd(), '.omo', 'evidence', 'gbrain-review-ui-chinese-redesign', 'visual-qa');
 
 const VIEWPORTS = [
   { width: 375, height: 667, name: 'mobile' },
@@ -112,6 +113,19 @@ async function assertReadableMobileTable(page: Page, routeName: string): Promise
   }
 }
 
+async function assertReadableMobileQueue(page: Page): Promise<void> {
+  const metrics = await page.locator('.review-queue-item').evaluateAll((items) => items.map((item) => ({
+    scrollWidth: item.scrollWidth,
+    clientWidth: item.clientWidth,
+    display: getComputedStyle(item).display,
+  })));
+  if (metrics.length === 0) fail('list has no classification queue at 375px.');
+  for (const item of metrics) {
+    if (item.scrollWidth > item.clientWidth + 1) fail('classification queue item overflows horizontally at 375px.');
+    if (item.display !== 'grid') fail('classification queue item does not use its responsive grid layout at 375px.');
+  }
+}
+
 async function focusByTab(page: Page, selector: string, label: string): Promise<void> {
   for (let index = 0; index < 40; index += 1) {
     await page.keyboard.press('Tab');
@@ -132,8 +146,10 @@ async function focusByTab(page: Page, selector: string, label: string): Promise<
 
 async function verifyKeyboardFlows(page: Page): Promise<void> {
   await navigate(page, '/admin/review/detail/inbox%2Flist-item-1');
-  await focusByTab(page, '[data-action="needs_evidence"]', 'the needs-evidence decision card');
+  await focusByTab(page, 'select[name="action"]', 'the review action selector');
+  await page.locator('select[name="action"]').selectOption('needs_evidence');
   await page.screenshot({ path: join(EVIDENCE_DIR, 'keyboard-focus.png'), fullPage: true });
+  await focusByTab(page, 'button[type="submit"]', 'the review action submit control');
   await page.keyboard.press('Enter');
   await waitForVisibleHeading(page);
   await focusByTab(page, 'textarea[name="reviewNotes"]', 'the review-notes field');
@@ -148,7 +164,9 @@ async function verifyKeyboardFlows(page: Page): Promise<void> {
   await waitForVisibleHeading(page);
 
   await navigate(page, '/admin/review/detail/inbox%2Flist-item-1');
-  await focusByTab(page, '[data-action="promote"]', 'the promote decision card');
+  await focusByTab(page, 'select[name="action"]', 'the review action selector');
+  await page.locator('select[name="action"]').selectOption('promote');
+  await focusByTab(page, 'button[type="submit"]', 'the review action submit control');
   await page.keyboard.press('Enter');
   await waitForVisibleHeading(page);
   await focusByTab(page, 'select[name="target_type"]', 'the target selector');
@@ -185,7 +203,10 @@ async function run(): Promise<void> {
         console.log(`Capturing ${route.name} at ${viewport.name} (${viewport.width}px)...`);
         await page.setViewportSize({ width: viewport.width, height: viewport.height });
         await navigate(page, route.path);
-        if (viewport.name === 'mobile' && (route.name === 'list' || route.name === 'history')) {
+        if (viewport.name === 'mobile' && route.name === 'list') {
+          await assertReadableMobileQueue(page);
+        }
+        if (viewport.name === 'mobile' && route.name === 'history') {
           await assertReadableMobileTable(page, route.name);
         }
         const screenshotPath = join(EVIDENCE_DIR, `${route.name}-${viewport.name}.png`);

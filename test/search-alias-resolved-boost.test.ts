@@ -89,7 +89,7 @@ describe('alias_resolved boost stage', () => {
 });
 
 describe('KNOBS_HASH_VERSION', () => {
-  it('is 12 (11→12 hard-exclude fold invalidates rows written under a different exclude policy, #2825)', () => {
-    expect(KNOBS_HASH_VERSION).toBe(12);
+  it('is 18 (16→17 degradation-stamp epoch; 17→18 autocut weak-top floor #1863)', () => {
+    expect(KNOBS_HASH_VERSION).toBe(18);
   });
 });

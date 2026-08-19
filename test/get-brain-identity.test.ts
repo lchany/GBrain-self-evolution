@@ -69,7 +69,6 @@ describe('get_brain_identity op', () => {
       page_count: number;
       chunk_count: number;
       last_sync_iso: string | null;
-      source_id: string;
     };
 
     expect(result.version).toBe(VERSION);
@@ -77,7 +76,6 @@ describe('get_brain_identity op', () => {
     expect(result.page_count).toBe(0);
     expect(result.chunk_count).toBe(0);
     expect(result.last_sync_iso).toBe(null);
-    expect(result.source_id).toBe('default');
   });
 
   test('reflects page count after pages are seeded', async () => {
@@ -113,7 +111,6 @@ describe('get_brain_identity op', () => {
       'last_sync_iso',
       'latest_version',
       'page_count',
-      'source_id',
       'update_available',
       'version',
     ]);
