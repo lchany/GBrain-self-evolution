@@ -33,6 +33,14 @@ type ParamDefLike = {
   enum?: string[];
   default?: unknown;
   items?: ParamDefLike;
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string;
+  integer?: boolean;
+  minimum?: number;
+  maximum?: number;
+  minItems?: number;
+  maxItems?: number;
 };
 function referenceParamDefToSchema(p: ParamDefLike): Record<string, unknown> {
   return {
@@ -41,6 +49,14 @@ function referenceParamDefToSchema(p: ParamDefLike): Record<string, unknown> {
     ...(p.enum ? { enum: p.enum } : {}),
     ...(p.default !== undefined ? { default: p.default } : {}),
     ...(p.items ? { items: referenceParamDefToSchema(p.items) } : {}),
+    ...(p.minLength !== undefined ? { minLength: p.minLength } : {}),
+    ...(p.maxLength !== undefined ? { maxLength: p.maxLength } : {}),
+    ...(p.pattern ? { pattern: p.pattern } : {}),
+    ...(p.integer === true ? { multipleOf: 1 } : {}),
+    ...(p.minimum !== undefined ? { minimum: p.minimum } : {}),
+    ...(p.maximum !== undefined ? { maximum: p.maximum } : {}),
+    ...(p.minItems !== undefined ? { minItems: p.minItems } : {}),
+    ...(p.maxItems !== undefined ? { maxItems: p.maxItems } : {}),
   };
 }
 function legacyInlineMap(ops: typeof operations) {

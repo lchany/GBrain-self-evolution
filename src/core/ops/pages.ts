@@ -44,20 +44,6 @@ const get_page: Operation = {
   },
   handler: async (ctx, p) => {
     const slug = p.slug as string;
-    const content = p.content as string;
-    if (ctx.remote !== false && /^projects\/prj-[0-9a-f]{16}\/index$/.test(slug)) {
-      throw new OperationError('invalid_params', 'project_registry_managed: 远程客户端不能通过 put_page 创建或修改项目登记页。', '请调用 ensure_project 精确复用或创建项目登记页。');
-    }
-    const validation = validatePutPageWrite(slug, content, { strictSchema: ctx.remote !== false });
-    if (!validation.ok) throw new OperationError('invalid_params', validation.message, validation.suggestion, 'gbrain://schema/page');
-    const registrySlug = requiredProjectRegistrySlug(slug, content);
-    if (registrySlug !== null) {
-      const registry = await ctx.engine.getPage(registrySlug, { sourceId: ctx.sourceId ?? 'default' });
-      const expectedProjectId = registrySlug.split('/')[1];
-      if (registry === null || registry.frontmatter?.record_kind !== 'project-registry' || registry.frontmatter?.project_id !== expectedProjectId) {
-        throw new OperationError('invalid_params', `project_registry_not_found: canonical project registry ${registrySlug} does not exist.`, 'Create or bind the canonical project registry before writing project experience.');
-      }
-    }
     const fuzzy = (p.fuzzy as boolean) || false;
     const includeDeleted = (p.include_deleted as boolean) === true;
     // #1393: route BOTH the exact-match read and the fuzzy resolveSlugs through
@@ -172,6 +158,20 @@ const put_page: Operation = {
   scope: 'write',
   handler: async (ctx, p) => {
     const slug = p.slug as string;
+    const content = p.content as string;
+    if (ctx.remote !== false && /^projects\/prj-[0-9a-f]{16}\/index$/.test(slug)) {
+      throw new OperationError('invalid_params', 'project_registry_managed: 远程客户端不能通过 put_page 创建或修改项目登记页。', '请调用 ensure_project 精确复用或创建项目登记页。');
+    }
+    const validation = validatePutPageWrite(slug, content, { strictSchema: ctx.remote !== false });
+    if (!validation.ok) throw new OperationError('invalid_params', validation.message, validation.suggestion, 'gbrain://schema/page');
+    const registrySlug = requiredProjectRegistrySlug(slug, content);
+    if (registrySlug !== null) {
+      const registry = await ctx.engine.getPage(registrySlug, { sourceId: ctx.sourceId ?? 'default' });
+      const expectedProjectId = registrySlug.split('/')[1];
+      if (registry === null || registry.frontmatter?.record_kind !== 'project-registry' || registry.frontmatter?.project_id !== expectedProjectId) {
+        throw new OperationError('invalid_params', `project_registry_not_found: canonical project registry ${registrySlug} does not exist.`, 'Create or bind the canonical project registry before writing project experience.');
+      }
+    }
 
     // v0.39.3.0 CV6 trust gate for provenance write-through (WARN-8).
     // Only trusted LOCAL callers (ctx.remote === false — capture CLI,

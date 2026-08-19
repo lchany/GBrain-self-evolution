@@ -4,7 +4,7 @@
 <!-- Regenerate: bun run scripts/generate-tool-catalog.ts -->
 <!-- Freshness-guarded by scripts/check-tool-catalog-fresh.sh (bun run verify). -->
 
-Every non-localOnly operation on the MCP surface: 115 tools across 22 areas. **Starter** marks membership in the ~27-op `starter` surface (`src/mcp/surface.ts`); **Gate** names the config key that must be true before remote callers see/call the op (`gbrain config set <key> true`). What a given token actually sees is further filtered per request by scope, bound-client fence, publish gates, and the per-client surface — see `docs/operations/mcp-surface-runbook.md`. Area names are non-contractual groupings.
+Every non-localOnly operation on the MCP surface: 117 tools across 22 areas. **Starter** marks membership in the ~27-op `starter` surface (`src/mcp/surface.ts`); **Gate** names the config key that must be true before remote callers see/call the op (`gbrain config set <key> true`). What a given token actually sees is further filtered per request by scope, bound-client fence, publish gates, and the per-client surface — see `docs/operations/mcp-surface-runbook.md`. Area names are non-contractual groupings.
 
 ## admin
 
@@ -62,7 +62,9 @@ Every non-localOnly operation on the MCP surface: 115 tools across 22 areas. **S
 
 | Tool | Description | Scope | Starter | Gate |
 |---|---|---|---|---|
+| `ensure_project` | 在当前 source 按精确 project_id 复用或原子创建项目登记页；无 ID 时使用随机 creation_key 幂等生成新 ID。 | write |  |  |
 | `get_brain_identity` | Brain identity + counters for thin-client banner. | read |  |  |
+| `match_project` | 只按规范 project_id 在当前 source 精确检查项目登记页；不使用 Git、目录、名称、别名或语义匹配。 | read |  |  |
 | `whoami` | Introspect the calling identity. | read | yes |  |
 
 ## ingest
