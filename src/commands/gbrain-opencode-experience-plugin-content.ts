@@ -97,9 +97,11 @@ const failedToolOutput = (output: unknown): { failed: boolean; exitCode?: number
   const metadata = isRecord(output.metadata) ? output.metadata : {};
   const rawExit = metadata.exit ?? metadata.exitCode ?? output.exit_code;
   const exitCode = typeof rawExit === 'number' ? rawExit : undefined;
+  const textOutput = typeof output.output === 'string' ? output.output : '';
   return {
     failed: output.isError === true || output.is_error === true || typeof output.error === 'string'
-      || (exitCode !== undefined && exitCode !== 0),
+      || (exitCode !== undefined && exitCode !== 0)
+      || /process exited with code\\s*[1-9]|exit[_ -]?code["']?\\s*[:=]\\s*[1-9]/i.test(textOutput),
     exitCode,
   };
 };

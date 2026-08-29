@@ -247,7 +247,7 @@ describe('OpenCode GBrain client guard', () => {
       ]);
       expect(receipt.exitCode).toBe(1);
       await hook(harness, 'event')({ event: { type: 'session.idle', properties: { sessionID: captureSession } } });
-      expect(harness.calls).toHaveLength(1);
+      expect(harness.calls).toHaveLength(0);
     } finally {
       await hook(harness, 'dispose')({});
       rmSync(harness.root, { recursive: true, force: true });
