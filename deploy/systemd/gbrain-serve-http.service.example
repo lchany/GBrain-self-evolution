@@ -1,45 +1,31 @@
-# GBrain HTTP MCP 服务模板。
-# 安装步骤：
-#   sudo install -m 0644 gbrain-serve-http.service.example /etc/systemd/system/gbrain-serve-http.service
-#   sudo install -m 0600 -o root -g gbrain ../env/gbrain-serve.env.example /etc/gbrain/gbrain-serve.env
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable --now gbrain-serve-http.service
-# 环境文件必须是 root 可读、0600；不要把真实 token、secret、DATABASE_URL 写进 unit 或证据。
+# Install the env file as root-owned mode 0600 before enabling this unit.
+# Put TLS termination and the cloud firewall allowlist in front of this listener.
 
 [Unit]
-Description=GBrain HTTP MCP service
+Description=GBrain HTTP MCP and admin review service
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-# 默认使用专用低权限账号；如需变更，先创建并验证该账号拥有 /opt/gbrain 的只读执行权限。
 User=gbrain
 Group=gbrain
 WorkingDirectory=/opt/gbrain
 EnvironmentFile=/etc/gbrain/gbrain-serve.env
-# writer 凭据在磁盘上保持 root:root 0600；systemd 仅向本服务暴露只读副本。
-LoadCredential=gbrain-local-writer.env:/etc/gbrain/clients/local-writer.env
-
-# GBRAIN_HTTP_BIND_FLAGS 可设置为 "--bind <BIND_ADDRESS>"；保持空值表示使用 CLI 默认绑定。
-# GBRAIN_PUBLIC_URL 供操作文档记录公网入口；实际是否需要传入 CLI 请以 `gbrain --help` 为准。
-ExecStart=/usr/local/bin/gbrain serve --http --port ${GBRAIN_HTTP_PORT} ${GBRAIN_HTTP_BIND_FLAGS}
-
+ExecStart=/bin/bash /opt/gbrain/deploy/scripts/run-server.sh
 Restart=on-failure
-RestartSec=10s
+RestartSec=5s
 KillSignal=SIGTERM
 TimeoutStopSec=30s
-
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=gbrain-serve-http
-
-# 加固建议：上线前逐项验证；若阻断 Bun、Postgres socket 或工作目录访问，再按最小例外放开。
+UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/opt/gbrain /opt/gbrain-knowledge /var/lib/gbrain /run/gbrain
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gbrain-serve-http
 
 [Install]
 WantedBy=multi-user.target
