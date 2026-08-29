@@ -2,7 +2,7 @@ export const GBRAIN_CODEX_EXPERIENCE_HOOK_FILENAME = 'gbrain-experience-guard.py
 export const GBRAIN_CODEX_EXPERIENCE_HOOK_STATUS = 'GBrain 经验 Worker 守卫';
 
 export const GBRAIN_CODEX_EXPERIENCE_HOOK = String.raw`#!/usr/bin/env python3
-"""Codex worker guard for read-only GBrain experience recall.
+"""Codex worker guard for GBrain experience recall and closeout.
 
 The hook never calls MCP and never stores raw prompts, commands, responses, or
 transcripts. It records only bounded turn metadata and structured receipts.
@@ -32,6 +32,12 @@ RETENTION_SECONDS = 7 * 24 * 60 * 60
 TOKEN_TTL_SECONDS = 24 * 60 * 60
 VALID_CLOSEOUT_OUTCOMES = {"no_candidate", "captured", "blocked"}
 VALID_RECALL_CLASSIFICATIONS = {"direct", "partial", "none"}
+VALID_CANDIDATE_BASES = {
+    "explicit_retention_request",
+    "repeated_verified_incident",
+    "verified_reusable_knowledge",
+    "verified_project_milestone",
+}
 MAX_ENVELOPE_BYTES = 2048
 MAX_CONSTRAINTS = 3
 MAX_CONSTRAINT_CHARS = 240
@@ -42,23 +48,21 @@ INSTRUCTION_AUTHORITY_RE = re.compile(r"(?m)^authority:\s*user_explicit_instruct
 INSTRUCTION_SCOPE_RE = re.compile(r"(?m)^instruction_scope:\s*(global|project)\s*$")
 INSTRUCTION_SOURCE_RE = re.compile(r"(?ms)^source_refs:\s*\n(?:\s*-\s*user_instruction:(global|project):[^\s#][^\n]*\n?)+")
 UNVERIFIED_VALUE_RE = re.compile(r"(?:待验证|未验证|未知|不适用|猜测|推测|假设|\btbd\b|\bunknown\b|\bunverified\b)", re.IGNORECASE)
-EXPLICIT_RECALL_RE = re.compile(
-    r"(召回.{0,12}经验|查(?:找|询)?.{0,12}(?:历史|既有|已有)经验|"
-    r"(?:recall|search|look\s+up).{0,20}(?:experience|lesson))",
+NONTRIVIAL_RE = re.compile(
+    r"(修改|实现|开发|修复|部署|迁移|诊断|排查|安全|隐私|项目规则|总结|复盘|"
+    r"modify|implement|build|fix|deploy|migrat|diagnos|debug|security|privacy|summari[sz]e)",
     re.IGNORECASE,
 )
-DECISION_INTENT_RE = re.compile(
-    r"(选择|选型|比较.{0,16}方案|决定|决策|取舍|要不要|该不该|是否采用|是否切换|"
-    r"改变.{0,12}(?:架构|策略|边界|规则)|设计.{0,12}(?:架构|策略|方案)|"
-    r"choose|select|decid|trade[ -]?off|should\s+we|whether\s+to\s+(?:adopt|switch)|redesign)",
+PERSIST_INTENT_RE = re.compile(
+    r"(保存为经验|记录(?:这|该)?条?(?:规则|经验|知识)|写入(?:长期)?(?:记忆|经验)|沉淀为经验|"
+    r"请记住|帮我记住|remember\s+(?:this|that)|save\s+(?:this|that)\s+(?:as\s+)?(?:memory|experience)|"
+    r"record\s+(?:this|that)\s+(?:rule|experience|knowledge)|persist\s+(?:this|that))",
     re.IGNORECASE,
 )
-HIGH_IMPACT_RE = re.compile(
-    r"(架构|技术栈|数据库|核心协议|认证|授权|权限|安全|隐私|密钥|生产环境|生产拓扑|"
-    r"流量入口|基础设施|数据迁移|批量删除|不可逆|恢复策略|全局规则|项目规则|长期约束|"
-    r"architecture|tech(?:nology)?\s+stack|database|core\s+protocol|auth(?:entication|orization)?|"
-    r"permission|security|privacy|secret|production|topology|infrastructure|data\s+migration|"
-    r"bulk\s+delet|irreversible|recovery\s+strategy|global\s+rule|project\s+rule|long-term\s+constraint)",
+CRITICAL_BASH_RE = re.compile(
+    r"(^|\s)(git\s+(commit|push)|docker|kubectl|helm|systemctl|ssh|scp|rsync|"
+    r"npm\s+(install|publish)|pnpm\s+(install|publish)|bun\s+(install|publish)|"
+    r"rm\s|mv\s|cp\s|chmod\s|chown\s|sed\s+-i|deploy|migrat)",
     re.IGNORECASE,
 )
 EXPECTED_TEST_RE = re.compile(
@@ -67,11 +71,6 @@ EXPECTED_TEST_RE = re.compile(
 )
 EXPECTED_NEGATIVE_RE = re.compile(r"(^|\s)(rg|grep|git\s+diff\s+--quiet)(\s|$)", re.IGNORECASE)
 FAILED_RESPONSE_RE = re.compile(r"(process exited with code|exit[_ -]?code[\"']?\s*[:=])\s*[1-9]", re.IGNORECASE)
-CANCELLED_OR_INPUT_ERROR_RE = re.compile(
-    r"(cancelled|canceled|aborted by user|invalid (?:input|argument)|missing required (?:input|argument)|"
-    r"用户取消|已取消|参数无效|缺少必填)",
-    re.IGNORECASE,
-)
 INBOX_SLUG_RE = re.compile(r"^inbox/[a-z0-9][a-z0-9/_-]{0,180}$")
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,240}$")
 RECALL_WORKER_RE = re.compile(r"(?:^|\n)GBRAIN_EXPERIENCE_RECALL_WORKER_TOKEN=(gbr_[A-Za-z0-9_-]+)(?:\n|$)")
@@ -211,6 +210,10 @@ def _turn_path(root: Path, key: str) -> Path:
     return root / "turns" / f"{key}.json"
 
 
+def _pending_path(root: Path, session_key: str) -> Path:
+    return root / "pending" / f"{session_key}.json"
+
+
 @contextmanager
 def _turn_lock(root: Path, key: str):
     if re.fullmatch(r"[a-f0-9]{64}", key) is None:
@@ -234,12 +237,15 @@ def _turn_lock(root: Path, key: str):
 
 
 def _new_turn_state(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    pending = bool(_read_json(_pending_path(root, _session_key(payload))))
     return {
         "schema_version": SCHEMA_VERSION,
         "created_at": int(time.time()),
         "updated_at": int(time.time()),
         "session_key": _session_key(payload),
-        "decision_intent": False,
+        "intent_nontrivial": False,
+        "explicit_persist_intent": False,
+        "prior_pending": pending,
         "block_count": 0,
         "recall_token_hash": None,
         "closeout_token_hash": None,
@@ -247,8 +253,6 @@ def _new_turn_state(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
         "worker_phase": None,
         "closeout_worker": False,
         "recall_notified": False,
-        "failure_recall_notified": False,
-        "recall_kind": None,
         "closeout_notified": False,
         "recall_receipt": None,
         "closeout_receipt": None,
@@ -266,11 +270,10 @@ def _upgrade_turn_state(state: dict[str, Any]) -> dict[str, Any]:
     state["schema_version"] = SCHEMA_VERSION
     state.setdefault("recall_token_hash", None)
     state.setdefault("closeout_token_hash", None)
+    state.setdefault("explicit_persist_intent", False)
     state.setdefault("worker_token_hash", None)
     state.setdefault("worker_phase", "closeout" if state.get("closeout_worker") else None)
     state.setdefault("recall_notified", False)
-    state.setdefault("failure_recall_notified", False)
-    state.setdefault("recall_kind", None)
     state.setdefault("closeout_notified", False)
     state.setdefault("recall_receipt", None)
     state.setdefault("closeout_receipt", None)
@@ -293,30 +296,66 @@ def _save_turn(root: Path, key: str, state: dict[str, Any]) -> None:
 def _tool_event(payload: dict[str, Any]) -> dict[str, Any]:
     tool_name = _safe_identifier(payload.get("tool_name"), "unknown")
     tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
-    raw_command = tool_input.get("command", tool_input.get("cmd"))
-    command = raw_command if isinstance(raw_command, str) else ""
+    command = tool_input.get("command") if isinstance(tool_input.get("command"), str) else ""
     response = payload.get("tool_response")
     response_dict = response if isinstance(response, dict) else {}
     failed = bool(response_dict.get("isError") or response_dict.get("is_error") or response_dict.get("error"))
     exit_code = response_dict.get("exit_code")
     if isinstance(exit_code, int) and exit_code != 0:
         failed = True
-    response_text = response if isinstance(response, str) else json.dumps(response_dict, ensure_ascii=False)
-    if FAILED_RESPONSE_RE.search(response_text):
+    if isinstance(response, str) and FAILED_RESPONSE_RE.search(response):
         failed = True
-    shell_tool = tool_name.casefold() in {"bash", "exec_command"} or tool_name.casefold().endswith("__exec_command")
-    expected_failure = shell_tool and bool(EXPECTED_TEST_RE.search(command) or EXPECTED_NEGATIVE_RE.search(command))
-    cancelled_or_input_error = bool(CANCELLED_OR_INPUT_ERROR_RE.search(response_text))
+    output = response_dict.get("output")
+    if isinstance(output, str) and FAILED_RESPONSE_RE.search(output):
+        failed = True
+    expected_failure = tool_name == "Bash" and bool(EXPECTED_TEST_RE.search(command) or EXPECTED_NEGATIVE_RE.search(command))
+    write_like = tool_name in {"apply_patch", "Edit", "Write"} or tool_name.endswith("__write_file")
+    critical_bash = tool_name == "Bash" and bool(CRITICAL_BASH_RE.search(command))
+    slug = tool_input.get("slug") if isinstance(tool_input.get("slug"), str) else None
+    safe_slug = slug if slug and INBOX_SLUG_RE.fullmatch(slug) else None
+    success = not failed
     return {
         "schema_version": SCHEMA_VERSION,
         "created_at": int(time.time()),
         "tool_name_hash": _hash(tool_name),
-        "unexpected_failure": failed and not expected_failure and not cancelled_or_input_error,
+        "write_like": write_like,
+        "critical_bash": critical_bash,
+        "unexpected_failure": failed and not expected_failure,
+        "put_slug": safe_slug if tool_name == "mcp__gbrain__put_page" and success else None,
+        "get_slug": safe_slug if tool_name == "mcp__gbrain__get_page" and success else None,
     }
 
 
-def _requires_decision_recall(prompt: str) -> bool:
-    return bool(EXPLICIT_RECALL_RE.search(prompt) or (DECISION_INTENT_RE.search(prompt) and HIGH_IMPACT_RE.search(prompt)))
+def _events(root: Path, key: str) -> list[dict[str, Any]]:
+    directory = root / "events" / key
+    _secure_dir(directory)
+    if not directory.exists():
+        return []
+    values: list[dict[str, Any]] = []
+    for path in directory.glob("*.json"):
+        try:
+            value = _read_json(path)
+            if value:
+                values.append(value)
+        except (OSError, ValueError, RuntimeError):
+            continue
+    return values
+
+
+def _requires_closeout(state: dict[str, Any], events: list[dict[str, Any]]) -> bool:
+    return bool(
+        state.get("explicit_persist_intent")
+        or state.get("prior_pending")
+        or any(event.get("unexpected_failure") for event in events)
+    )
+
+
+def _requires_recall(state: dict[str, Any]) -> bool:
+    return bool(
+        state.get("intent_nontrivial")
+        or state.get("explicit_persist_intent")
+        or state.get("prior_pending")
+    )
 
 
 def _valid_constraints(value: Any) -> bool:
@@ -355,12 +394,14 @@ def _closeout_receipt_valid(receipt: dict[str, Any]) -> tuple[bool, str]:
             or not INBOX_SLUG_RE.fullmatch(slug)
             or receipt.get("verified") is not True
             or receipt.get("blocker_code") is not None
+            or receipt.get("candidate_basis") not in VALID_CANDIDATE_BASES
         ):
-            return False, "captured receipt requires a verified inbox slug"
+            return False, "captured receipt requires a verified inbox slug and valid candidate basis"
     if outcome == "no_candidate" and (
         receipt.get("verified") is not True
         or receipt.get("slug") is not None
         or receipt.get("blocker_code") is not None
+        or receipt.get("candidate_basis") is not None
     ):
         return False, "no-candidate receipt requires verified recall and dedup"
     if outcome == "blocked":
@@ -370,6 +411,7 @@ def _closeout_receipt_valid(receipt: dict[str, Any]) -> tuple[bool, str]:
             or not BLOCKER_CODE_RE.fullmatch(blocker_code)
             or receipt.get("slug") is not None
             or receipt.get("verified") is not False
+            or receipt.get("candidate_basis") is not None
         ):
             return False, "blocked receipt requires a safe blocker code"
     if not _envelope_fits(receipt):
@@ -445,28 +487,13 @@ def _receipt_shell_command(token: str | None = None) -> str:
     return command + (" --token " + shlex.quote(token) if token is not None else "")
 
 
-def _parent_context(
-    recall_token: str | None,
-    closeout_token: str | None,
-    event_name: str,
-    recall_kind: str | None = None,
-) -> dict[str, Any]:
+def _parent_context(recall_token: str | None, closeout_token: str | None, event_name: str) -> dict[str, Any]:
     sections: list[str] = []
     if recall_token is not None:
         recall_command = _receipt_shell_command(recall_token)
-        trigger = (
-            "当前方案出现非预期错误后"
-            if recall_kind == "failure"
-            else "重大决策执行前"
-        )
-        scope = (
-            "只传递脱敏后的操作类别、稳定错误码或错误类别和环境类型"
-            if recall_kind == "failure"
-            else "只传递脱敏任务目标"
-        )
         sections.append(
-            f"GBRAIN_EXPERIENCE_RECALL_REQUIRED：{trigger}，必须派发独立 Recall Worker。"
-            f"主 Agent {scope}并等待最小结构化 envelope，不得自行调用 GBrain MCP 进行经验召回。"
+            "GBRAIN_EXPERIENCE_RECALL_REQUIRED：开始当前非平凡任务前，必须派发独立 Recall Worker。"
+            "主 Agent 只传递脱敏任务目标并等待最小结构化 envelope，不得自行调用 GBrain MCP 进行经验召回。"
             f"\nGBRAIN_EXPERIENCE_RECALL_WORKER_TOKEN={recall_token}\n"
             f"Worker 完成只读召回和分类后执行：{recall_command} "
             "--classification <direct|partial|none> --constraints-json '<JSON array>'。"
@@ -480,7 +507,9 @@ def _parent_context(
             f"\nGBRAIN_EXPERIENCE_CLOSEOUT_WORKER_TOKEN={closeout_token}\n"
             f"Worker 完成后执行：{closeout_command} "
             "--outcome <no_candidate|captured|blocked>；captured/no_candidate 必须追加 "
-            "--verified，captured 还必须追加 --slug inbox/<slug>，blocked 必须追加 --blocker-code <code>。"
+            "--verified，captured 还必须追加 --slug inbox/<slug> 和 --candidate-basis "
+            "<explicit_retention_request|repeated_verified_incident|verified_reusable_knowledge|verified_project_milestone>，"
+            "blocked 必须追加 --blocker-code <code>。"
         )
     return {
         "hookSpecificOutput": {
@@ -517,15 +546,20 @@ def _handle_hook(root: Path, payload: dict[str, Any]) -> None:
     if event_name == "UserPromptSubmit":
         prompt = payload.get("prompt") if isinstance(payload.get("prompt"), str) else ""
         recall_worker_match = RECALL_WORKER_RE.search(prompt)
-        if recall_worker_match is not None:
-            phase = "recall"
-            token = recall_worker_match.group(1)
+        closeout_worker_match = CLOSEOUT_WORKER_RE.search(prompt)
+        if recall_worker_match is not None or closeout_worker_match is not None:
+            phase = "recall" if recall_worker_match is not None else "closeout"
+            match = recall_worker_match if recall_worker_match is not None else closeout_worker_match
+            if match is None:
+                raise RuntimeError("worker token match disappeared")
+            token = match.group(1)
             found = _find_turn_for_token(root, token)
             if found is None or found[2] != phase:
                 _remove_turn(root, key)
                 _json_out({"systemMessage": f"GBRAIN_EXPERIENCE_{phase.upper()}_WORKER_INVALID：token 无效；Worker 不得继续。"})
                 return
-            state["decision_intent"] = False
+            state["intent_nontrivial"] = False
+            state["explicit_persist_intent"] = False
             state["worker_phase"] = phase
             state["closeout_worker"] = phase == "closeout"
             state["worker_token_hash"] = _hash(token)
@@ -538,6 +572,18 @@ def _handle_hook(root: Path, payload: dict[str, Any]) -> None:
                     "--constraints-json '<JSON array>'。只返回 receipt 输出的最小 envelope，不要返回正文、"
                     "搜索列表或日志。不要再派生 Recall Worker。"
                 )
+            else:
+                worker_context = (
+                    "GBRAIN_EXPERIENCE_CLOSEOUT_WORKER：独占召回、去重、脱敏、写入、可修复拒绝重试与回读验证。"
+                    f"完成后执行：{receipt_command} "
+                    "--outcome <no_candidate|captured|blocked>；captured/no_candidate 追加 --verified，"
+                    "captured 再追加 --slug inbox/<slug> 和 --candidate-basis "
+                    "<explicit_retention_request|repeated_verified_incident|verified_reusable_knowledge|verified_project_milestone>，"
+                    "blocked 追加 --blocker-code <code>。默认 no_candidate；只有一条资格路径成立且全部质量门禁通过时才能 captured。"
+                    "按顺序搜索去重、选择资格路径，并检查新颖性、持久性、证据、可操作性、信息密度和载体必要性；"
+                    "任一门禁失败即 no_candidate。任务复杂度、工具数量和完成状态不是候选依据。"
+                    "只返回 receipt 输出的最小 envelope，不要返回正文、搜索列表、模板或日志。不要再派生 Closeout Worker。"
+                )
             _json_out({
                 "hookSpecificOutput": {
                     "hookEventName": "UserPromptSubmit",
@@ -545,38 +591,70 @@ def _handle_hook(root: Path, payload: dict[str, Any]) -> None:
                 },
             })
             return
-        state["decision_intent"] = _requires_decision_recall(prompt)
-        recall_token = _arm_phase(state, "recall") if state["decision_intent"] and not state.get("recall_notified") else None
-        if recall_token is not None:
-            state["recall_kind"] = "decision"
+        state["intent_nontrivial"] = bool(NONTRIVIAL_RE.search(prompt))
+        state["explicit_persist_intent"] = bool(PERSIST_INTENT_RE.search(prompt))
+        recall_token = _arm_phase(state, "recall") if _requires_recall(state) and not state.get("recall_notified") else None
+        closeout_token = _arm_phase(state, "closeout") if _requires_closeout(state, []) and not state.get("closeout_notified") else None
         _save_turn(root, key, state)
-        if recall_token is not None:
-            _json_out(_parent_context(recall_token, None, "UserPromptSubmit", "decision"))
+        if recall_token is not None or closeout_token is not None:
+            _json_out(_parent_context(recall_token, closeout_token, "UserPromptSubmit"))
         else:
             _json_out({})
         return
     if event_name == "PostToolUse":
-        tool_event = _tool_event(payload)
-        if state.get("worker_phase") or not tool_event.get("unexpected_failure") or state.get("failure_recall_notified"):
+        tool_id = _safe_identifier(payload.get("tool_use_id"), secrets.token_hex(12))
+        event_path = root / "events" / key / f"{_hash(tool_id)}.json"
+        if not event_path.exists():
+            _atomic_write(event_path, _tool_event(payload))
+        if not _turn_path(root, key).exists():
+            _save_turn(root, key, state)
+        events = _events(root, key)
+        if not state.get("worker_phase") and not state.get("closeout_notified") and _requires_closeout(state, events):
+            token = _arm_phase(state, "closeout")
+            _save_turn(root, key, state)
+            _json_out(_parent_context(None, token, "PostToolUse"))
+        else:
             _json_out({})
-            return
-        if state.get("recall_notified") and not isinstance(state.get("recall_receipt"), dict):
-            _json_out({})
-            return
-        state["recall_receipt"] = None
-        state["recall_notified"] = False
-        recall_token = _arm_phase(state, "recall")
-        state["failure_recall_notified"] = True
-        state["recall_kind"] = "failure"
-        _save_turn(root, key, state)
-        _json_out(_parent_context(recall_token, None, "PostToolUse", "failure"))
         return
     if event_name != "Stop":
         _json_out({})
         return
-    # Older installations may still invoke this script from a managed Stop
-    # handler. Fail open and clear the turn so upgrading the generated script
-    # disables automatic closeout before hooks.json is rewritten.
+    if state.get("worker_phase"):
+        _json_out({})
+        return
+    events = _events(root, key)
+    needs_recall = _requires_recall(state)
+    needs_closeout = _requires_closeout(state, events)
+    if not needs_recall and not needs_closeout:
+        _remove_turn_family(root, key, state)
+        _json_out({})
+        return
+    invalid_phases: set[str] = set()
+    reasons: list[str] = []
+    if needs_recall:
+        recall_receipt = state.get("recall_receipt")
+        if not isinstance(recall_receipt, dict):
+            invalid_phases.add("recall")
+            reasons.append("missing recall receipt")
+        else:
+            valid, reason = _recall_receipt_valid(recall_receipt)
+            if not valid:
+                invalid_phases.add("recall")
+                reasons.append(reason)
+    if needs_closeout:
+        closeout_receipt = state.get("closeout_receipt")
+        if not isinstance(closeout_receipt, dict):
+            invalid_phases.add("closeout")
+            reasons.append("missing closeout receipt")
+        else:
+            valid, reason = _closeout_receipt_valid(closeout_receipt)
+            if not valid:
+                invalid_phases.add("closeout")
+                reasons.append(reason)
+    if invalid_phases:
+        _block(root, key, state, invalid_phases, "; ".join(reasons))
+        return
+    _unlink_state_file(_pending_path(root, str(state.get("session_key") or "")))
     _remove_turn_family(root, key, state)
     _json_out({})
 
@@ -636,7 +714,13 @@ def _receipt_command(root: Path, args: argparse.Namespace) -> int:
             _json_out({"ok": False, "error": "invalid_or_expired_token"})
             return 1
         if phase == "recall":
-            if args.outcome is not None or args.slug is not None or args.verified or args.blocker_code is not None:
+            if (
+                args.outcome is not None
+                or args.slug is not None
+                or args.verified
+                or args.blocker_code is not None
+                or args.candidate_basis is not None
+            ):
                 _json_out({"ok": False, "error": "phase_argument_mismatch"})
                 return 1
             if args.classification not in VALID_RECALL_CLASSIFICATIONS:
@@ -676,6 +760,8 @@ def _receipt_command(root: Path, args: argparse.Namespace) -> int:
                 "receipt_status": "blocked" if args.outcome == "blocked" else "accepted",
                 "blocker_code": args.blocker_code,
             }
+            if args.candidate_basis is not None:
+                envelope["candidate_basis"] = args.candidate_basis
             valid, reason = _closeout_receipt_valid(envelope)
             if not valid:
                 _json_out({"ok": False, "error": reason})
@@ -698,6 +784,7 @@ def _parser() -> argparse.ArgumentParser:
     receipt.add_argument("--slug")
     receipt.add_argument("--verified", action="store_true")
     receipt.add_argument("--blocker-code")
+    receipt.add_argument("--candidate-basis", choices=sorted(VALID_CANDIDATE_BASES))
     return parser
 
 

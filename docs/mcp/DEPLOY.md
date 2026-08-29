@@ -1,38 +1,76 @@
 # Deploy GBrain Remote MCP Server
 
-> `gbrain serve --http` ships full OAuth 2.1 (client credentials, auth code +
-> PKCE, refresh rotation, optional DCR), an embedded React admin dashboard at
-> `/admin`, scoped operations, and a live SSE activity feed. Legacy bearer
-> tokens still work — `verifyAccessToken` falls back to the `access_tokens`
-> table; tokens with no `scopes` grant are grandfathered to `read+write+admin`,
-> while tokens minted with `gbrain auth create --scopes …` (or by
-> `gbrain bootstrap harness`) are honored at exactly their granted scopes.
-> Both the legacy fallback and the OAuth tables work on PGLite and Postgres
-> (both engine schemas carry `access_tokens`). See [SECURITY.md](../../SECURITY.md) for env vars and
-> tunable defaults.
+## Cloud-firewall allowlist deployment
+
+For the allowlisted server deployment, put the listener behind the cloud
+firewall and a TLS termination layer, then start it with:
+
+```bash
+gbrain serve --http --port 3131 --bind 127.0.0.1 \
+  --public-url https://<PUBLIC_GBRAIN_HOST> --allow-anonymous-mcp
+```
+
+`--allow-anonymous-mcp` gives firewall-allowlisted clients anonymous `read`
+and `write` MCP access. It does not expose `admin` operations and does not
+replace Basic Auth for `/admin` or `/admin/review`. Configure
+`GBRAIN_ADMIN_BASIC_USER`, `GBRAIN_ADMIN_BASIC_PASSWORD`, and
+`GBRAIN_ADMIN_ORIGIN` in a root-owned mode-600 environment file. Do not put
+these values in the repository or client installer inputs.
+
+The checked-in systemd/env templates and read-only verification script are in
+[`deploy/`](../../deploy/). `deploy/scripts/install-client-assets.sh` and
+`gbrain install-client` installs rules, skills, and project/experience guards
+for both OpenCode and Codex. Each project guard checks only the session `cwd`;
+it does not walk parents or call MCP. When unbound, it emits a bootstrap task
+with one atomically reused local creation key so concurrent sessions converge
+on one project registry. Both clients share the Python experience state machine,
+which observes only bounded metadata and never calls MCP or writes GBrain.
+Nontrivial turns arm a one-time recall token. A closeout token is armed only for
+an explicit retention request, a write, a critical external change, an unexpected
+failure, or pending closeout state; read-only tool counts and subagent calls do
+not qualify. An isolated Recall Worker owns read-only retrieval. An isolated
+Closeout Worker defaults to `no_candidate` and captures only after one durable
+candidate path and all quality gates pass. Workers submit explicit cross-session
+receipts and return only bounded envelopes to the parent. Codex receives phase prompts from `UserPromptSubmit` and `PostToolUse`;
+OpenCode adapts `chat.message`, `tool.execute.after`, and `session.idle`,
+resuming the same session when a receipt is missing.
+Client credentials are not created or distributed. Client reachability is
+controlled by the cloud firewall allowlist.
+
+Each client root also receives a mode-600 `.gbrain-client-install.json` with
+the managed protocol version, build asset digest, and experience-guard choice.
+`gbrain install-client --check --json` verifies the managed blocks, skills,
+hooks, plugin, Codex handlers, permissions, and manifest without writing or
+printing managed file contents. `gbrain post-upgrade` repairs stale managed
+assets only when an existing installation can be identified and its guard
+choice recovered; it does not create client config for uninstalled users or
+block schema migration when repair fails.
+
+> **v0.26.0+:** `gbrain serve --http` ships full OAuth 2.1 (client credentials,
+> auth code + PKCE, refresh rotation, optional DCR), an embedded React admin
+> dashboard at `/admin`, scoped operations, and a live SSE activity feed.
+> Pre-v0.26 legacy bearer tokens still work — `verifyAccessToken` falls back
+> to the `access_tokens` table and grandfathers tokens to `read+write+admin`.
+> Postgres-only for the legacy fallback (the `access_tokens` table is Postgres-only);
+> OAuth tables work on both PGLite and Postgres. See [SECURITY.md](../../SECURITY.md)
+> for env vars and tunable defaults.
 
 Access your brain from any device, any AI client. GBrain ships two transports:
-`gbrain serve` (stdio) for local agents, and `gbrain serve --http` for remote
-clients over OAuth 2.1.
+`gbrain serve` (stdio) for local agents, and `gbrain serve --http` (v0.26.0+)
+for remote clients over OAuth 2.1.
 
 ## Three Paths
 
 ### Local stdio (zero setup)
 
 ```bash
-gbrain serve                  # full operation catalog (default)
-gbrain serve --surface verbs  # just the 7 memory verbs (quickstart surface)
+gbrain serve
 ```
 
 Works with Claude Code, Cursor, Windsurf, and any MCP client that supports stdio.
 No server, no tunnel, no token needed. Works on both PGLite and Postgres engines.
-`--surface verbs` exposes exactly the seven-verb memory protocol (`recall`,
-`remember`, `entity`, `synthesize`, `forget`, `context_pack`, `delta` —
-[MEMORY_VERBS v1](../protocol/MEMORY_VERBS_v1.md)) instead of the full catalog;
-`--surface starter` sits between (~27 ops: the verbs plus the daily-driver set);
-omit the flag (default `full`) for every operation.
 
-### Remote over OAuth 2.1 (recommended)
+### Remote over OAuth 2.1 (recommended, v0.26.0+)
 
 ```bash
 gbrain serve --http --port 3131
@@ -53,28 +91,28 @@ Supported clients:
 - **Perplexity** — OAuth 2.1 client credentials grant.
 - **Claude Code, Cursor, Windsurf** — can use OAuth or legacy bearer.
 
-See the [OAuth 2.1 setup](#oauth-21-setup) section below.
+See the [OAuth 2.1 setup](#oauth-21-setup-v100) section below.
 
-### Remote with legacy bearer tokens (simplest)
+### Remote with legacy bearer tokens (pre-v0.26 deployments) — Postgres only
 
 ```
 Your AI client (Claude Desktop, Perplexity, etc.)
   → ngrok tunnel (https://YOUR-DOMAIN.ngrok.app)
   → gbrain serve --http  (built-in transport with bearer auth)
-  → Postgres or PGLite
+  → Postgres (pooler connection or self-hosted)
 ```
 
 This requires:
-1. A machine running `gbrain serve --http` (works on both PGLite and Postgres
-   brains)
-2. A public tunnel (ngrok, Tailscale, or cloud host)
-3. A bearer token created via `gbrain auth create <name>`
+1. A Postgres-backed brain (the `access_tokens` table only exists on Postgres;
+   running `gbrain serve --http` against a PGLite install fails fast at startup)
+2. A machine running `gbrain serve --http`
+3. A public tunnel (ngrok, Tailscale, or cloud host)
+4. A bearer token created via `gbrain auth create <name>`
 
-Existing bearer tokens (no `scopes` grant) are grandfathered as
-`read+write+admin` on the OAuth-capable HTTP server, so no migration is
-required; `gbrain auth create --scopes read,write` mints narrowed tokens.
+Pre-v1.0 tokens are grandfathered as `read+write+admin` scopes when you upgrade
+to the HTTP server, so no migration is required.
 
-## OAuth 2.1 Setup
+## OAuth 2.1 Setup (v0.26.0+)
 
 ### 1. Start the HTTP server
 
@@ -100,8 +138,8 @@ Save this token. Open `http://localhost:3131/admin` and paste it to access the
 dashboard. The dashboard shows live activity, registered clients, request logs,
 and per-client config export.
 
-> `mcp_request_log.params` and the live SSE activity feed default to a redacted
-> summary `{redacted, kind, declared_keys, unknown_key_count, approx_bytes}`.
+> **v0.26.9+:** `mcp_request_log.params` and the live SSE activity feed default
+> to a redacted summary `{redacted, kind, declared_keys, unknown_key_count, approx_bytes}`.
 > Declared param keys are kept (intersected against the operation's spec); unknown
 > keys are counted but never named, and byte sizes round up to 1KB so size-probe
 > attacks can't binary-search secret content. Operators on a personal laptop who
@@ -132,9 +170,9 @@ gbrain auth register-client perplexity \
   --scopes "read write"
 ```
 
-**Source-scoped clients.** Multi-source brains can scope a client's write
-authority to one source and its read scope to a curated set with the
-`--source` and `--federated-read` flags:
+**v0.34 — source-scoped clients.** Multi-source brains can scope a client's
+write authority to one source and its read scope to a curated set with the
+new `--source` and `--federated-read` flags:
 
 ```bash
 gbrain auth register-client dept-x-agent \
@@ -146,12 +184,9 @@ gbrain auth register-client dept-x-agent \
 
 `--source` controls the write authority — `put_page` / `add_link` / etc only
 land in `dept-x`. `--federated-read` controls the read axis independently;
-queries return rows from any of the listed sources. Omit both flags for an
-unscoped super-client. Clients registered before source scoping existed are
-backfilled to `source_id='default'` on `gbrain upgrade`. Within a source,
-slug-level write fencing is also available: `--bound-slug-prefixes p1/,p2/`
-rejects slug-mutating writes outside the listed prefixes (update later with
-`gbrain auth rescope-client <id> --bound-slug-prefixes <p1,p2|none>`).
+queries return rows from any of the listed sources. Omit both flags for the
+v0.33-compatible super-client shape. Pre-v0.34 clients are backfilled to
+`source_id='default'` on `gbrain upgrade`.
 
 Host-repo wrappers can register programmatically:
 
@@ -167,25 +202,9 @@ await oauthProvider.registerClientManual(
 For self-service client registration (Dynamic Client Registration, RFC 7591),
 start the server with `--enable-dcr`. DCR is off by default.
 
-DCR requests may include an optional `token_ttl_seconds` field (integer,
-seconds) to request a per-client access-token lifetime. The server clamps the
-request into an admin-configured window — never rejects over it — persists the
-effective value as the client's TTL override, and echoes it back as
-`token_ttl_seconds` in the registration response. Subsequent `/token` responses
-for that client carry the matching `expires_in`. Clients that omit the field
-keep the server default (`--token-ttl`). The window defaults fail-closed: min
-300 seconds, max bounded by your `--token-ttl` — a self-registering client
-cannot request a longer-lived token than the server default unless you
-explicitly widen the window:
-
-```bash
-gbrain config set oauth.dcr_ttl_min_seconds 600
-gbrain config set oauth.dcr_ttl_max_seconds 86400
-```
-
 ### 3. Expose the server
 
-**Bind explicitly.** `gbrain serve --http` defaults to `127.0.0.1`.
+**v0.34 — bind explicitly.** `gbrain serve --http` defaults to `127.0.0.1`.
 To accept connections from the ngrok tunnel (or any non-loopback source),
 restart with `--bind`:
 
@@ -209,10 +228,10 @@ router exposes the spec-compliant discovery endpoint at
 
 ### 4. Scopes and localOnly
 
-Every operation is tagged `read | write | admin`. Operations flagged
-`localOnly: true` in `src/core/operations.ts` (10 today — `sync_brain` and
-the `file_*` ops among them) are rejected over HTTP regardless of scope.
-Remote agents cannot reach local filesystem surface area.
+Every operation is tagged `read | write | admin`. Four operations are
+`localOnly` and rejected over HTTP regardless of scope: `sync_brain`,
+`file_upload`, `file_list`, `file_url`. Remote agents cannot reach local
+filesystem surface area.
 
 | Scope | What it allows |
 |-------|---------------|
@@ -220,14 +239,10 @@ Remote agents cannot reach local filesystem surface area.
 | `write` | `put_page`, `delete_page`, `add_link`, `add_timeline_entry` |
 | `admin` | Client management, token revocation, sweep, local-only ops |
 
-Write ops can additionally be fenced per client with `--bound-slug-prefixes`
-(see [Register OAuth clients](#2-register-oauth-clients) above).
-
 ## Legacy Bearer Token Setup
 
-Bearer tokens are the simple path when you don't need per-client scoping.
-Without a `--scopes` grant they grandfather to `read+write+admin` on the
-HTTP server; pass `--scopes read,write` at creation to narrow one.
+Keep using pre-v0.26 bearer tokens if you aren't ready to migrate. They
+grandfather to `read+write+admin` scopes on the HTTP server.
 
 ### 1. Set up the tunnel
 
@@ -253,11 +268,8 @@ gbrain auth list
 gbrain auth revoke "claude-desktop"
 ```
 
-Tokens are per-client. Create one for each device/app. Names are not
-unique: `gbrain auth revoke "<name>"` revokes EVERY active token carrying
-that name — use `gbrain auth list` (shows each token's id and scopes) and
-`gbrain auth revoke --id <uuid>` to revoke exactly one. Tokens are stored
-SHA-256 hashed in your database.
+Tokens are per-client. Create one for each device/app. Revoke individually
+if compromised. Tokens are stored SHA-256 hashed in your database.
 
 ### 3. Connect your AI client
 
@@ -277,62 +289,20 @@ gbrain auth test \
 
 ## Operations
 
-GBrain's full operation catalog (100+ operations in `src/core/operations.ts`)
-is available remotely, with no timeout limits on a self-hosted server. The
-only exceptions are the operations flagged `localOnly: true` — `sync_brain`
-and the `file_*` ops among them — which are rejected over HTTP regardless of
-scope (see [Scopes and localOnly](#4-scopes-and-localonly) above).
+All 30 GBrain operations are available remotely, including `sync_brain` and
+`file_upload` (no timeout limits with self-hosted server).
 
-**Security note on file access:** the `file_*` operations being localOnly is
-the first line of defense; as defense-in-depth, `file_upload` also confines
-any caller that isn't verifiably the trusted local CLI to the working
-directory where `gbrain serve` was launched. Symlinks, `..` traversal, and
-absolute paths outside cwd are rejected, and page slugs and filenames are
-allowlist-validated (alphanumeric + hyphens; no control chars, RTL overrides,
-or backslashes). Local CLI callers (`gbrain files upload ...`) keep
-unrestricted filesystem access since the user owns the machine.
+**Security note on `file_upload`:** remote MCP callers are confined to the working
+directory where `gbrain serve` was launched. Symlinks, `..` traversal, and absolute
+paths outside cwd are rejected. Page slugs and filenames are allowlist-validated
+(alphanumeric + hyphens; no control chars, RTL overrides, or backslashes). Local
+CLI callers (`gbrain file upload ...`) keep unrestricted filesystem access since
+the user owns the machine.
 
 ## Deployment Options
 
 See [ALTERNATIVES.md](ALTERNATIVES.md) for a comparison of ngrok, Tailscale
 Funnel, and cloud hosts (Fly.io, Railway).
-
-### Co-located Docker workloads (self-hosted Postgres)
-
-OAuth scopes and source scoping guard the `gbrain serve --http` path. They do
-NOT guard raw Postgres. If the brain's Postgres runs as a container on the same
-Docker host as other workloads (agent runtimes, n8n, staging fixtures), any
-container sharing Docker's default `bridge` network can open a direct DB
-session — no OAuth token required — and read every source. That silently
-recreates a privileged path underneath the isolation you configured at the MCP
-layer.
-
-Network-zone the host so untrusted containers can never reach Postgres:
-
-```
-Docker host
-├── gbrain-net          ← ONLY the brain's Postgres (+ gbrain serve, if containerized)
-├── agent-<id>-net      ← each untrusted agent runtime, isolated
-└── default bridge      ← no secret-bearing databases
-```
-
-Operator checklist:
-
-```text
-[ ] Postgres is on a user-defined Docker network, not the default bridge
-    (or nothing else runs on that bridge)
-[ ] If Postgres publishes a host port at all, it binds loopback only
-    (`-p 127.0.0.1:5432:5432`, never `0.0.0.0`)
-[ ] Untrusted agent containers have no DATABASE_URL or Postgres password
-[ ] Untrusted agents reach the brain via OAuth/Bearer against serve --http only
-    (host loopback via host.docker.internal / host gateway — never gbrain-net)
-[ ] OAuth clients are least-privilege: scoped --source / --federated-read,
-    pre-minted short-lived tokens preferred over long-lived client secrets
-[ ] Isolation verified: a team-scoped client cannot read internal-only sources
-```
-
-Optional defense-in-depth: a dedicated Postgres role (or RLS) limited to the
-allowed `source_id`s, so even a leaked connection string can't read everything.
 
 ## Troubleshooting
 
@@ -360,8 +330,8 @@ Remote servers must be added via Settings > Integrations, NOT
 | put_page | 100-500ms | Write + trigger search_vector update |
 | get_stats | < 100ms | Aggregate query |
 
-**Note:** `gbrain serve --http` has OAuth 2.1 + the admin dashboard baked
-into the binary. The custom HTTP wrapper pattern (see
+**Note:** `gbrain serve --http` shipped in v0.26.0 with OAuth 2.1 + admin
+dashboard baked into the binary. The custom HTTP wrapper pattern (see
 [voice recipe](../../recipes/twilio-voice-brain.md)) is still supported for
 teams that need bespoke middleware, but for most remote deployments the
 built-in server is the recommended path.

@@ -54,3 +54,9 @@ reports/network-intelligence/
 # run-serial-tests.sh / run-e2e.sh; merged by scripts/merge-lcov.ts)
 .coverage/
 .gbrain-project.yaml
+
+# Local agent/client state — never commit credentials, session artifacts, or plans.
+.config/
+.local/
+.omo/
+.planning/
