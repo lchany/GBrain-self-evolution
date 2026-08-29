@@ -2302,7 +2302,7 @@ SETUP
   upgrade                            Self-update
   check-update [--json]              Check for new versions
   doctor [--json] [--fast]            Health check (resolver, skills, pgvector, RLS, embeddings)
-  install-client [--json]             Install GBrain client rules, skills, and hooks
+  install-client [--json|--check]     Install or verify GBrain client rules, skills, and hooks
   project <current|match|init|bind>    Resolve or bind stable business-project identity
   integrations [subcommand]          Manage integration recipes (senses + reflexes)
 

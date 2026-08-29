@@ -81,7 +81,7 @@ function workerReceipt(harness: PluginHarness, args: string[]) {
 }
 
 describe('OpenCode GBrain client guard', () => {
-  test('Given an unbound project and nontrivial prompt When the first message runs Then bootstrap and both worker phases are injected', async () => {
+  test('Given an unbound project and nontrivial prompt When the first message runs Then bootstrap and recall are injected', async () => {
     const harness = await installPlugin(false);
     try {
       const output = textOutput('请修改代码并完成部署配置');
@@ -90,8 +90,8 @@ describe('OpenCode GBrain client guard', () => {
       expect(output.parts[0]?.text).toContain('GBRAIN_PROJECT_BOOTSTRAP_CREATION_KEY=');
       expect(output.parts[0]?.text).toContain('GBRAIN_EXPERIENCE_RECALL_REQUIRED');
       expect(output.parts[0]?.text).toContain('GBRAIN_EXPERIENCE_RECALL_WORKER_TOKEN=gbr_');
-      expect(output.parts[0]?.text).toContain('GBRAIN_EXPERIENCE_CLOSEOUT_REQUIRED');
-      expect(output.parts[0]?.text).toContain('GBRAIN_EXPERIENCE_CLOSEOUT_WORKER_TOKEN=gbc_');
+      expect(output.parts[0]?.text).not.toContain('GBRAIN_EXPERIENCE_CLOSEOUT_REQUIRED');
+      expect(output.parts[0]?.text).not.toContain('GBRAIN_EXPERIENCE_CLOSEOUT_WORKER_TOKEN=gbc_');
       expect(output.parts[0]?.text).toContain('GBRAIN_EXPERIENCE_HOOK_STATE_DIR=');
 
       const second = textOutput('继续');
@@ -122,7 +122,7 @@ describe('OpenCode GBrain client guard', () => {
     }
   });
 
-  test('Given a generic prompt followed by a write tool When the next model step starts Then closeout context is injected once', async () => {
+  test('Given a generic prompt followed by a successful write When the next model step starts Then no closeout context is injected', async () => {
     const harness = await installPlugin();
     try {
       const output = textOutput('please take care of it');
@@ -135,7 +135,7 @@ describe('OpenCode GBrain client guard', () => {
       );
       const system = { system: [] as string[] };
       await hook(harness, 'experimental.chat.system.transform')({ sessionID: 'session-tools' }, system);
-      expect(system.system.join('\n')).toContain('GBRAIN_EXPERIENCE_CLOSEOUT_REQUIRED');
+      expect(system.system).toHaveLength(0);
       const repeated = { system: [] as string[] };
       await hook(harness, 'experimental.chat.system.transform')({ sessionID: 'session-tools' }, repeated);
       expect(repeated.system).toHaveLength(0);
@@ -145,16 +145,17 @@ describe('OpenCode GBrain client guard', () => {
     }
   });
 
-  test('Given missing closeout receipt When the session becomes idle Then OpenCode resumes the same session', async () => {
+  test('Given a successful write When the session becomes idle Then OpenCode does not resume for closeout', async () => {
     const harness = await installPlugin();
     try {
-      const output = textOutput('请修改代码');
+      const output = textOutput('please take care of it');
       await hook(harness, 'chat.message')({ sessionID: 'session-idle', messageID: 'turn-idle' }, output);
+      await hook(harness, 'tool.execute.after')(
+        { tool: 'apply_patch', sessionID: 'session-idle', callID: 'edit-idle', args: { patchText: 'change' } },
+        { title: 'Done', output: 'Done', metadata: {} },
+      );
       await hook(harness, 'event')({ event: { type: 'session.idle', properties: { sessionID: 'session-idle' } } });
-      expect(harness.calls).toHaveLength(1);
-      expect(JSON.stringify(harness.calls[0])).toContain('session-idle');
-      expect(JSON.stringify(harness.calls[0])).toContain('GBRAIN_EXPERIENCE_RECALL_REQUIRED');
-      expect(JSON.stringify(harness.calls[0])).toContain('GBRAIN_EXPERIENCE_CLOSEOUT_REQUIRED');
+      expect(harness.calls).toHaveLength(0);
     } finally {
       await hook(harness, 'dispose')({});
       rmSync(harness.root, { recursive: true, force: true });
@@ -164,7 +165,7 @@ describe('OpenCode GBrain client guard', () => {
   test('Given explicit recall and closeout receipts from isolated workers When the parent idles Then no resume prompt is sent', async () => {
     const harness = await installPlugin();
     try {
-      const parent = textOutput('请修改代码');
+      const parent = textOutput('请保存为经验：修改代码前先检查现有约束');
       await hook(harness, 'chat.message')({ sessionID: 'session-parent', messageID: 'turn-parent' }, parent);
       const parentText = parent.parts[0]?.text ?? '';
       const recallToken = tokenFromText(parentText, 'RECALL');
@@ -178,6 +179,7 @@ describe('OpenCode GBrain client guard', () => {
       expect(recalled.exitCode).toBe(0);
       const closed = workerReceipt(harness, [
         '--token', closeoutToken, '--outcome', 'captured', '--verified', '--slug', 'inbox/opencode-capture',
+        '--candidate-basis', 'explicit_retention_request',
       ]);
       expect(closed.exitCode).toBe(0);
 
@@ -230,7 +232,7 @@ describe('OpenCode GBrain client guard', () => {
       expect(taskSystem.system.join('')).toContain('GBRAIN_EXPERIENCE_CLOSEOUT_REQUIRED');
 
       const captureSession = 'session-failed-capture';
-      const parent = textOutput('请修改代码', captureSession, 'turn-failed-capture');
+      const parent = textOutput('请保存为经验：记录本次验证结论', captureSession, 'turn-failed-capture');
       await hook(harness, 'chat.message')({ sessionID: captureSession, messageID: 'turn-failed-capture' }, parent);
       const token = tokenFromText(parent.parts[0]?.text ?? '', 'CLOSEOUT');
       for (const [toolName, callID] of [['gbrain_put_page', 'failed-put'], ['gbrain_get_page', 'failed-get']]) {
@@ -262,7 +264,8 @@ describe('OpenCode GBrain client guard', () => {
       await hook(harness, 'event')({ event: { type: 'session.idle', properties: { sessionID: 'session-prompt-error' } } });
       const next = textOutput('请修改配置', 'session-prompt-error', 'turn-after-error');
       await hook(harness, 'chat.message')({ sessionID: 'session-prompt-error', messageID: 'turn-after-error' }, next);
-      expect(next.parts[0]?.text).toContain('GBRAIN_EXPERIENCE_CLOSEOUT_REQUIRED');
+      expect(next.parts[0]?.text).toContain('GBRAIN_EXPERIENCE_RECALL_REQUIRED');
+      expect(next.parts[0]?.text).not.toContain('GBRAIN_EXPERIENCE_CLOSEOUT_REQUIRED');
     } finally {
       await hook(harness, 'dispose')({});
       rmSync(harness.root, { recursive: true, force: true });

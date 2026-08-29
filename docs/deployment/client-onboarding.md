@@ -38,12 +38,29 @@ bun src/cli.ts install-client --json
 - `~/.config/opencode/hooks/gbrain-project-check.py`
 - `~/.config/opencode/hooks/gbrain-experience-guard.py`
 - `~/.config/opencode/plugins/gbrain-experience-guard.ts`
+- `~/.config/opencode/.gbrain-client-install.json`
 - `~/.codex/AGENTS.md`
 - `~/.codex/skills/gbrain-capture/SKILL.md`
 - `~/.codex/skills/gbrain-review/SKILL.md`
 - `~/.codex/hooks/gbrain-project-check.py`
 - `~/.codex/hooks/gbrain-experience-guard.py`
-- `~/.codex/hooks.json` 中由 GBrain 管理的 `SessionStart`、`UserPromptSubmit`、`PostToolUse` 和 `Stop` handler
+- `~/.codex/hooks.json` 中由 GBrain 管理的 `SessionStart`、`UserPromptSubmit` 和 `PostToolUse` handler
+- `~/.codex/.gbrain-client-install.json`
+
+两个安装清单均为 `0600`，只保存 `schema_version`、客户端行为
+`protocol_version`、当前构建的 `asset_digest` 和 `experience_hook` 选择。清单不保存凭据、项目 ID、
+用户输入、绝对路径或时间戳。安装器通过同目录临时文件和原子替换写入清单。
+
+安装后运行只读一致性检查：
+
+```bash
+gbrain install-client --check --json
+```
+
+检查分别返回 OpenCode 和 Codex 的 `current`、`stale` 或 `not_installed` 状态，并在漂移时以非零
+状态退出。它验证 managed rules、两个 skills、项目/经验 Hook、OpenCode plugin、Codex managed
+handlers、文件权限和安装清单，但不输出文件正文或敏感配置。普通安装命令也会在写入后调用同一检查器；
+只有两个客户端都为 `current` 时才成功。
 
 ## OpenCode 与 Codex 经验 Worker 守卫
 
@@ -51,13 +68,17 @@ bun src/cli.ts install-client --json
 并在 Agent 准备结束当前回合时检查是否已有结构化召回与收尾回执。它不会调用 MCP、不会写入
 GBrain、不会保存原始 prompt、命令、工具输出或 transcript，也不会中断正在运行的命令。
 
-非平凡回合会预发互不混用的一次性召回 token 与收尾 token。主 Agent 先派发独立 Recall Worker，
-等待其完成只读召回后，只接收受字段、条数和总字节限制的结构化 envelope；正文、搜索结果和日志不返回
-主会话。最终答复前，主 Agent 再派发独立 Closeout Worker，只传递脱敏后的任务目标、变更、失败和验证证据。
-Closeout Worker 独占搜索去重、候选判断、`inbox/` 写入、服务端可修复拒绝的修改重试、`get_page`
-验证和结构化回执。首次 `Stop` 已有两个有效回执时直接放行。若 Agent 未履约，`Stop` 仍返回
-`decision: "block"` 作为兜底，最多续跑两次后
-fail-open。Codex 使用 `Stop` block；OpenCode 没有等价阻断 Hook，因此在 `session.idle` 后通过
+非平凡回合只预发一次性召回 token。主 Agent 先派发独立 Recall Worker，等待其完成只读召回后，
+只接收受字段、条数和总字节限制的结构化 envelope；正文、搜索结果和日志不返回主会话。
+只有用户明确要求持久化、出现首次非预期失败，或存在未完成的
+既有收尾状态时，守卫才签发独立的收尾 token。只读工具调用数量和子 Agent 调用本身不触发收尾。
+
+触发收尾后，主 Agent 派发独立 Closeout Worker，只传递脱敏后的任务目标、变更、失败和验证证据。
+Closeout Worker 默认返回 `no_candidate`。只有明确持久化请求、重复且已验证的故障、代码或权威文档
+无法完整承载的已验证通用知识，或已验证项目里程碑这四条资格路径之一成立，并通过新颖性、持久性、
+证据、可操作性、信息密度和载体必要性六项门禁后，才写入 `inbox/`。`captured` 回执必须携带
+对应的 `candidate_basis`。经验守卫不安装或使用 Codex `Stop` Hook；回执由触发事件后的 Worker 显式提交。
+若 Agent 未履约，守卫保持 fail-open，不阻断回合结束。OpenCode 在 `session.idle` 后通过
 `promptAsync` 续跑同一 session。守卫本身不调用 MCP。
 
 守卫不会创建倒计时、后台等待任务或恢复会话；长期任务仍应使用合适的作业管理器、日志和检查点机制。永久禁用经验守卫时运行：
@@ -68,6 +89,15 @@ gbrain install-client --no-experience-hook --json
 
 此参数移除两端经验脚本、Codex 的三个经验 handler，并禁用 OpenCode 插件中的经验路径。
 两端项目身份检查和用户已有的其他 Hook/插件不受影响。
+后续不带选择参数重跑安装器时，会从清单或旧托管文件恢复该禁用选择。要明确重新启用，运行：
+
+```bash
+gbrain install-client --experience-hook --json
+```
+
+`gbrain post-upgrade` 会检查已有的托管安装。未安装过 GBrain 客户端时，它不创建任何客户端文件；
+已安装且发生模板或协议漂移时，它保留 `experience_hook` 选择并自动修复。选择冲突或损坏到无法恢复时，
+post-upgrade 只输出脱敏警告并继续数据库迁移。
 
 它不会读取或生成 `local-read.env`、`local-writer.env`、Bearer token 或
 client secret。
@@ -93,8 +123,8 @@ Codex 会对新增或变化的非托管 Hook 执行一次性信任检查。首�
 1. 非平凡任务开始时，Agent 先通过 MCP 只读召回已有经验。
 2. 关键失败只触发故障召回；同类故障第 2 次独立出现时，Agent 停止盲目
    重试并整理错误总结。
-3. 候选经验先完成搜索去重、自动脱敏、固定模板整理和预分类。
-4. Agent 简要说明预分类和目标 slug，并立即写入。
+3. Closeout Worker 默认判定为 `no_candidate`；只有一条资格路径成立并通过六项质量门禁时才继续。
+4. 合格候选完成搜索去重、自动脱敏、固定模板整理和预分类后立即写入。
 5. Agent 随即调用 `get_page` 验证写入；用户后续要求修改时更新或删除草稿。
 6. 所有草稿只写入 `inbox/`。写入后的正文锁定，后续人工审核只修改分类；
    正文有问题时退回并重新生成，不能在分类审核时静默修改。
@@ -170,7 +200,13 @@ codex mcp list
 
 ## 5. 验证客户端路径
 
-安装完成后，在已通过云防火墙白名单的客户端中调用 MCP：
+先确认安装协议为 current：
+
+```bash
+gbrain install-client --check --json
+```
+
+然后在已通过云防火墙白名单的客户端中调用 MCP：
 
 ```text
 get_brain_identity

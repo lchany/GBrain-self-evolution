@@ -45,3 +45,9 @@ reports/network-intelligence/
 # Local business-project binding. The tracked repository identity lives in
 # .gbrain/project.yaml; this per-checkout marker remains private.
 .gbrain-project.yaml
+
+# Local agent/client state — never commit credentials, session artifacts, or plans.
+.config/
+.local/
+.omo/
+.planning/

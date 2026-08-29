@@ -109,6 +109,9 @@ describe('gbrain install-client', () => {
       expect(opencodeRules).toContain('GBRAIN_EXPERIENCE_RECALL_REQUIRED');
       expect(opencodeRules).toContain('第 2 次');
       expect(opencodeRules).toContain('Closeout Worker 直接调用 `put_page`');
+      expect(opencodeRules).toContain('经验收尾默认返回 `no_candidate`');
+      expect(opencodeRules).toContain('只读工具数量和子 Agent 调用本身不触发收尾');
+      expect(opencodeRules).toContain('新颖性、持久性、证据、可操作性、信息密度和载体必要性');
       expect(opencodeRules).not.toContain('5 分钟');
       expect(opencodeRules).toContain('.gbrain-project.yaml');
       expect(opencodeRules).toContain('project_id');
@@ -121,6 +124,7 @@ describe('gbrain install-client', () => {
       expect(codexRules).toContain('只读召回');
       expect(codexRules).toContain('第 2 次');
       expect(codexRules).toContain('Closeout Worker 直接调用 `put_page`');
+      expect(codexRules).toContain('`captured` 回执必须包含对应 `candidate_basis`');
       expect(codexRules).not.toContain('5 分钟');
       expect(codexRules).toContain('match_project');
       expect(codexRules).toContain('OpenCode 首消息守卫与 Codex `SessionStart` Hook');
@@ -155,7 +159,19 @@ describe('gbrain install-client', () => {
       expect(opencodeCapture).toContain('applicability');
       expect(opencodeCapture).toContain('non_applicable');
       expect(opencodeCapture).toContain('预分类建议');
-      expect(opencodeCapture).toContain('## 六、同步写入');
+      expect(opencodeCapture).toContain('## 三、候选资格与质量门禁');
+      expect(opencodeCapture).toContain('## 七、同步写入');
+      expect(opencodeCapture).toContain('Closeout Worker 默认返回 `no_candidate`');
+      for (const basis of [
+        'explicit_retention_request',
+        'repeated_verified_incident',
+        'verified_reusable_knowledge',
+        'verified_project_milestone',
+      ]) expect(opencodeCapture).toContain(basis);
+      expect(opencodeCapture).toContain('新颖性、持久性、证据、可操作性');
+      expect(opencodeCapture).toContain('信息密度和载体必要性');
+      expect(opencodeCapture).toContain('普通问答、概念解释、首次故障');
+      expect(opencodeCapture).not.toContain('任务总结和项目里程碑；');
       expect(opencodeCapture).toContain('立即调用 `put_page`');
       expect(opencodeCapture).not.toContain('5 分钟');
       expect(opencodeCapture).toContain('project_binding');
@@ -214,12 +230,12 @@ describe('gbrain install-client', () => {
         .filter((handler) => handler.statusMessage === '检查当前目录的 GBrain 项目 ID');
       expect(gbrainHandlers).toHaveLength(1);
       expect(gbrainHandlers[0].command).toContain('gbrain-project-check.py');
-      for (const eventName of ['UserPromptSubmit', 'PostToolUse', 'Stop']) {
+      for (const eventName of ['UserPromptSubmit', 'PostToolUse']) {
         const handlers = hooksConfig.hooks[eventName].flatMap((entry) => entry.hooks ?? [])
           .filter((handler) => handler.statusMessage === 'GBrain 经验 Worker 守卫');
         expect(handlers).toHaveLength(1);
         expect(handlers[0].command).toContain('gbrain-experience-guard.py');
-        if (eventName !== 'Stop') expect(handlers[0].additionalContextLimit).toBe(2048);
+        expect(handlers[0].additionalContextLimit).toBe(2048);
       }
 
       const summary = JSON.parse(output.join('')) as {

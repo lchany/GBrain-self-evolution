@@ -25,15 +25,26 @@ it does not walk parents or call MCP. When unbound, it emits a bootstrap task
 with one atomically reused local creation key so concurrent sessions converge
 on one project registry. Both clients share the Python experience state machine,
 which observes only bounded metadata and never calls MCP or writes GBrain.
-Nontrivial turns arm separate one-time recall and closeout tokens. An isolated
-Recall Worker owns read-only retrieval; an isolated Closeout Worker owns
-deduplication, capture, recoverable server-rejection retries, and read-back
-verification. Workers submit explicit cross-session receipts and return only
-bounded envelopes to the parent. Codex enforces both phases through `Stop`;
+Nontrivial turns arm a one-time recall token. A closeout token is armed only for
+an explicit retention request, a write, a critical external change, an unexpected
+failure, or pending closeout state; read-only tool counts and subagent calls do
+not qualify. An isolated Recall Worker owns read-only retrieval. An isolated
+Closeout Worker defaults to `no_candidate` and captures only after one durable
+candidate path and all quality gates pass. Workers submit explicit cross-session
+receipts and return only bounded envelopes to the parent. Codex receives phase prompts from `UserPromptSubmit` and `PostToolUse`;
 OpenCode adapts `chat.message`, `tool.execute.after`, and `session.idle`,
 resuming the same session when a receipt is missing.
 Client credentials are not created or distributed. Client reachability is
 controlled by the cloud firewall allowlist.
+
+Each client root also receives a mode-600 `.gbrain-client-install.json` with
+the managed protocol version, build asset digest, and experience-guard choice.
+`gbrain install-client --check --json` verifies the managed blocks, skills,
+hooks, plugin, Codex handlers, permissions, and manifest without writing or
+printing managed file contents. `gbrain post-upgrade` repairs stale managed
+assets only when an existing installation can be identified and its guard
+choice recovered; it does not create client config for uninstalled users or
+block schema migration when repair fails.
 
 > **v0.26.0+:** `gbrain serve --http` ships full OAuth 2.1 (client credentials,
 > auth code + PKCE, refresh rotation, optional DCR), an embedded React admin
